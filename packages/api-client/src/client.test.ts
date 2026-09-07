@@ -230,6 +230,18 @@ describe('auth headers', () => {
     expect(headers.get('authorization')).toBeNull();
   });
 
+  it('rejects an async getAuthToken rather than sending a promise', async () => {
+    const fetchImpl = stubFetch([jsonResponse({})]);
+    await expect(
+      client(fetchImpl, {
+        // The type forbids this; a consumer without strict types can still do
+        // it, and the old behaviour was a silent "Bearer [object Promise]".
+        getAuthToken: (() => Promise.resolve('tok')) as unknown as () => string,
+      }).get('/x')
+    ).rejects.toThrowError(TypeError);
+    expect(vi.mocked(fetchImpl)).not.toHaveBeenCalled();
+  });
+
   it('reports a token the API rotated in through a response header', async () => {
     const onTokenRefresh = vi.fn();
     const fetchImpl = stubFetch([

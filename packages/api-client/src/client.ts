@@ -67,7 +67,16 @@ export interface ApiClientOptions {
   retries?: number;
   /** Base backoff delay in milliseconds. Defaults to 250. */
   retryBaseDelayMs?: number;
-  /** Returns an auth token to send as a bearer header. May be async. */
+  /**
+   * Returns an auth token to send as a bearer header.
+   *
+   * Synchronous by design. Both applications read the token straight out of
+   * `localStorage`, which needs no await, and an async source would have to be
+   * awaited on every request on the hot path. Returning a promise here would
+   * stringify into a `Bearer [object Promise]` header, so the type forbids it:
+   * resolve the token before constructing the client, or keep the store warm
+   * and read it synchronously.
+   */
   getAuthToken?: () => string | null | undefined;
   /** Called with a token the API rotated in via a response header. */
   onTokenRefresh?: (token: string) => void;
@@ -313,8 +322,17 @@ export class ApiClient {
       headers.set('x-retry-attempt', String(attempt));
     }
     const token = this.options.getAuthToken?.();
-    if (token !== null && token !== undefined && token !== '') {
+    if (typeof token === 'string' && token !== '') {
       headers.set('authorization', `Bearer ${token}`);
+    } else if (token !== null && token !== undefined) {
+      // A non-string here is almost always an async getAuthToken slipping past
+      // a consumer's types. Interpolating it would send the literal header
+      // "Bearer [object Promise]", which reads as an auth failure at the API
+      // and is very hard to trace back from there.
+      throw new TypeError(
+        'getAuthToken must return a string synchronously. It returned ' +
+          `${typeof token}, which cannot be sent as a bearer token.`
+      );
     }
     for (const [key, value] of Object.entries(options.headers ?? {})) {
       headers.set(key, value);
