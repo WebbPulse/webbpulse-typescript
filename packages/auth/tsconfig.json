@@ -4,7 +4,12 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    // Resolves @webbpulse/api-client to its source rather than its dist, so a
+    // typecheck of this package does not require api-client to be built first.
+    // The published package.json drops this condition, so a consumer always
+    // resolves the built output.
+    "customConditions": ["development"]
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]

@@ -4,7 +4,8 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "noEmit": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "customConditions": ["development"]
   },
   "include": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx"]
 }
