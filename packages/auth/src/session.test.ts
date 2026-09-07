@@ -24,8 +24,11 @@ function clientWith(results: (Response | Error)[]): {
 } {
   let index = 0;
   const fetchMock = vi.fn(() => {
-    const result = results[Math.min(index, results.length - 1)];
+    const result = results.at(Math.min(index, results.length - 1));
     index += 1;
+    if (result === undefined) {
+      throw new Error('The fetch stub was called with no queued result.');
+    }
     return result instanceof Error
       ? Promise.reject(result)
       : Promise.resolve(result.clone());
