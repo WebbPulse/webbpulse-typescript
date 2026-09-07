@@ -24,7 +24,9 @@ export interface ApiErrorBody {
   [key: string]: unknown;
 }
 
-function isValidationErrorItems(value: unknown): value is ValidationErrorItem[] {
+function isValidationErrorItems(
+  value: unknown
+): value is ValidationErrorItem[] {
   return (
     Array.isArray(value) &&
     value.every(

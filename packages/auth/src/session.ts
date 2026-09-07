@@ -11,10 +11,7 @@ import { TokenStore, type TokenStorage } from './storage.js';
  * flash of signed out UI that a distinct `'unknown'` state prevents.
  */
 export type SessionStatus =
-  | 'unknown'
-  | 'loading'
-  | 'authenticated'
-  | 'anonymous';
+  'unknown' | 'loading' | 'authenticated' | 'anonymous';
 
 /** Immutable snapshot of the session. */
 export interface SessionState<TUser> {
@@ -233,8 +230,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
         this.tokenStore?.set(token);
       }
 
-      const extractUser =
-        this.options.extractUser ?? defaultExtractUser<TUser>;
+      const extractUser = this.options.extractUser ?? defaultExtractUser<TUser>;
       let user = extractUser(response.data);
       if (user === null && (token !== null || this.options.mode === 'cookie')) {
         // The API authenticated us but did not embed the user, so ask for it.

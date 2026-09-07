@@ -57,7 +57,9 @@ describe('ApiClient requests', () => {
 
   it('appends a serialised query string', async () => {
     const fetchImpl = stubFetch([jsonResponse([])]);
-    await client(fetchImpl).get('/parts', { query: { ids: [1, 2], q: 'rotor' } });
+    await client(fetchImpl).get('/parts', {
+      query: { ids: [1, 2], q: 'rotor' },
+    });
     const [url] = vi.mocked(fetchImpl).mock.calls[0]!;
     expect(url).toBe(`${BASE}/parts?ids=1&ids=2&q=rotor`);
   });

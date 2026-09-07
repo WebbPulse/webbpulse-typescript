@@ -69,10 +69,10 @@ export function SessionProvider({
 }
 
 /** Returns the manager from context. Throws outside a provider. */
-export function useSessionManager<TUser = unknown, TCredentials = unknown>(): SessionManager<
-  TUser,
-  TCredentials
-> {
+export function useSessionManager<
+  TUser = unknown,
+  TCredentials = unknown,
+>(): SessionManager<TUser, TCredentials> {
   const manager = useContext(SessionManagerContext);
   if (manager === null) {
     throw new Error('useSessionManager must be used within a SessionProvider.');
@@ -99,8 +99,10 @@ export function useSessionState<TUser = unknown>(): SessionState<TUser> {
 }
 
 /** What {@link useSession} returns. */
-export interface UseSessionResult<TUser, TCredentials>
-  extends SessionState<TUser> {
+export interface UseSessionResult<
+  TUser,
+  TCredentials,
+> extends SessionState<TUser> {
   isAuthenticated: boolean;
   /** True until the first current user fetch settles. */
   isLoading: boolean;

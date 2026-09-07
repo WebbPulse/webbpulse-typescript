@@ -23,9 +23,9 @@ describe('serializeQuery', () => {
   });
 
   it('drops null and undefined inside arrays', () => {
-    expect(
-      serializeQuery({ ids: [1, null, 2] as unknown as number[] })
-    ).toBe('ids=1&ids=2');
+    expect(serializeQuery({ ids: [1, null, 2] as unknown as number[] })).toBe(
+      'ids=1&ids=2'
+    );
   });
 
   it('does not serialise null as the literal string null', () => {

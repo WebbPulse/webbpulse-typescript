@@ -1,8 +1,4 @@
-import {
-  ApiError,
-  ApiNetworkError,
-  ApiTimeoutError,
-} from './errors.js';
+import { ApiError, ApiNetworkError, ApiTimeoutError } from './errors.js';
 import { joinUrl, serializeQuery, type QueryParams } from './query.js';
 
 /** Header the API returns carrying the per request uuid7 correlation id. */

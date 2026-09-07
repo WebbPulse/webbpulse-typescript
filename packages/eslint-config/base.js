@@ -29,7 +29,10 @@ export function baseConfig(options = {}) {
     },
     {
       files,
-      extends: [js.configs.recommended, ...tseslint.configs.recommendedTypeChecked],
+      extends: [
+        js.configs.recommended,
+        ...tseslint.configs.recommendedTypeChecked,
+      ],
       languageOptions: {
         globals: {
           ...globals.browser,

@@ -270,9 +270,7 @@ describe('useSession actions', () => {
     function LogoutProbe(): React.ReactNode {
       const session = useSession<User>();
       logout = session.logout;
-      return (
-        <span data-testid="status">{session.status}</span>
-      );
+      return <span data-testid="status">{session.status}</span>;
     }
 
     render(

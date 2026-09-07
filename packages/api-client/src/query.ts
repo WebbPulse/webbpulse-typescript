@@ -10,12 +10,7 @@
 
 /** A value that can appear in a query string. */
 export type QueryValue =
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | (string | number | boolean)[];
+  string | number | boolean | null | undefined | (string | number | boolean)[];
 
 /** The query parameter bag accepted by every request method. */
 export type QueryParams = Record<string, QueryValue> | URLSearchParams;

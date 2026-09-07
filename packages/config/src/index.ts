@@ -1,8 +1,4 @@
-export {
-  ConfigError,
-  ConfigReader,
-  type ViteEnv,
-} from './env.js';
+export { ConfigError, ConfigReader, type ViteEnv } from './env.js';
 export {
   ENVIRONMENT_NAMES,
   loadAppConfig,

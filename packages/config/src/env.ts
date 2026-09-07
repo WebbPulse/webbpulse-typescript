@@ -93,7 +93,10 @@ export class ConfigReader {
    * backend, and in production where the SPA and the API sit behind one
    * CloudFront distribution.
    */
-  url(key: string, options: { required?: boolean; fallback?: string } = {}): string {
+  url(
+    key: string,
+    options: { required?: boolean; fallback?: string } = {}
+  ): string {
     const value = this.raw(key) ?? options.fallback;
     if (value === undefined) {
       if (options.required !== false) {

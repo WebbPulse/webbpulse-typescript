@@ -14,7 +14,11 @@ describe('formatApiErrorMessage', () => {
   it('joins FastAPI validation detail items', () => {
     const body = {
       detail: [
-        { loc: ['body', 'email'], msg: 'value is not a valid email', type: 'x' },
+        {
+          loc: ['body', 'email'],
+          msg: 'value is not a valid email',
+          type: 'x',
+        },
         { loc: ['body', 'age'], msg: 'must be positive', type: 'y' },
       ],
     };

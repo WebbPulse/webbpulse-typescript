@@ -1,11 +1,7 @@
 import { ConfigReader, type ViteEnv } from './env.js';
 
 /** Deployment environments in the estate. */
-export const ENVIRONMENT_NAMES = [
-  'local',
-  'staging',
-  'production',
-] as const;
+export const ENVIRONMENT_NAMES = ['local', 'staging', 'production'] as const;
 
 export type EnvironmentName = (typeof ENVIRONMENT_NAMES)[number];
 
@@ -53,7 +49,9 @@ export interface LoadAppConfigOptions {
  * the common spellings and leaves anything else to explicit configuration
  * through `VITE_ENVIRONMENT`.
  */
-function environmentFromMode(mode: string | undefined): EnvironmentName | undefined {
+function environmentFromMode(
+  mode: string | undefined
+): EnvironmentName | undefined {
   switch (mode) {
     case 'development':
     case 'local':

@@ -119,9 +119,12 @@ describe('loadAppConfig', () => {
   });
 
   it('defaults the application name and leaves the release undefined', () => {
-    const config = loadAppConfig({ MODE: 'production' }, {
-      defaultApiBaseUrl: '/api',
-    });
+    const config = loadAppConfig(
+      { MODE: 'production' },
+      {
+        defaultApiBaseUrl: '/api',
+      }
+    );
     expect(config.appName).toBe('WebbPulse');
     expect(config.release).toBeUndefined();
   });
