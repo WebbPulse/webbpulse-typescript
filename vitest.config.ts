@@ -2,15 +2,30 @@ import react from '@vitejs/plugin-react-swc';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  plugins: [react()],
   test: {
-    globals: true,
-    // Node by default. Only the React bindings need a DOM, and jsdom costs
-    // roughly an order of magnitude more per file to stand up, so it is opted
-    // into per file rather than applied to the whole run.
-    environment: 'node',
-    environmentMatchGlobs: [['**/*.test.tsx', 'jsdom']],
-    include: ['packages/*/src/**/*.test.{ts,tsx}'],
+    // Two projects rather than environmentMatchGlobs, which vitest 3
+    // deprecates. The split is the same: jsdom costs roughly an order of
+    // magnitude more per file to stand up, and only the React bindings need a
+    // DOM, so the rest of the suite stays on node.
+    projects: [
+      {
+        test: {
+          name: 'node',
+          globals: true,
+          environment: 'node',
+          include: ['packages/*/src/**/*.test.ts'],
+        },
+      },
+      {
+        plugins: [react()],
+        test: {
+          name: 'dom',
+          globals: true,
+          environment: 'jsdom',
+          include: ['packages/*/src/**/*.test.tsx'],
+        },
+      },
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
