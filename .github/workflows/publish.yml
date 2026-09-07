@@ -4,6 +4,40 @@
 # call, so the matrix fans out over the workspaces. Each call is idempotent: it
 # looks the version up in the repository first and skips one that is already
 # there, so a re-run of a tag is green rather than a failure.
+#
+# KNOWN BLOCKER, needs a change in WebbPulse/.github before a release can run.
+#
+# The reusable workflow derives the setup-node cache path from
+# working-directory:
+#
+#   cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+#
+# This is a workspaces repository, so the only lockfile is at the root and
+# packages/<name>/package-lock.json does not exist. actions/setup-node fails the
+# step when the cache path matches nothing ("Some specified paths were not
+# resolved, unable to cache dependencies"), so every job below fails at setup,
+# before the metadata, build and publish steps run.
+#
+# The fix is a new optional input on the reusable workflow, defaulting to the
+# current expression so no existing caller changes behaviour:
+#
+#   cache-dependency-path:
+#     description: "Lockfile path for the setup-node cache."
+#     type: string
+#     required: false
+#     default: ""
+#
+# then in the Set up Node.js step:
+#
+#   cache-dependency-path: ${{ inputs.cache-dependency-path != ''
+#     && inputs.cache-dependency-path
+#     || format('{0}/{1}', inputs.working-directory,
+#          inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml'
+#            || 'package-lock.json') }}
+#
+# Each job here then passes cache-dependency-path: package-lock.json. The
+# working-directory must stay packages/<name>, since the workflow reads
+# package.json and runs npm publish there.
 name: Publish
 
 on:
