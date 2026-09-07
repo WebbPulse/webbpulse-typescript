@@ -1,0 +1,27 @@
+{
+  "name": "@webbpulse/tsconfig",
+  "version": "0.1.0",
+  "description": "Shared TypeScript compiler configurations for WebbPulse applications and packages.",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WebbPulse/webbpulse-typescript.git",
+    "directory": "packages/tsconfig"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "files": [
+    "base.json",
+    "library.json",
+    "vite-app.json",
+    "node.json",
+    "README.md"
+  ],
+  "exports": {
+    "./base.json": "./base.json",
+    "./library.json": "./library.json",
+    "./vite-app.json": "./vite-app.json",
+    "./node.json": "./node.json"
+  }
+}

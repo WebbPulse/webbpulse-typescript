@@ -1,0 +1,20 @@
+{
+  "extends": "@webbpulse/tsconfig/library.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // Resolves @webbpulse/api-client to its source rather than its dist, so a
+    // typecheck of this package does not require api-client to be built first.
+    //
+    // The condition is deliberately namespaced rather than named "development".
+    // Vite resolves a "development" condition by default in serve mode, so a
+    // published package exposing one would hand every consuming dev server raw
+    // .ts out of node_modules instead of the built output. Only this repository
+    // ever asks for "@webbpulse/source", so a consumer always gets dist.
+    "customConditions": ["@webbpulse/source"]
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}
