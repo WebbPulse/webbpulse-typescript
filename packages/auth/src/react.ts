@@ -24,8 +24,15 @@ const SessionManagerContext = createContext<SessionManager<
  * A manager of any user and credential type.
  *
  * The context erases both generics, because one provider serves components
- * that each know their own user type. `unknown` is the honest erasure here and
- * the typed hooks below re-apply the caller's parameters on the way out.
+ * that each know their own user type, and the typed hooks below re-apply the
+ * caller's parameters on the way out.
+ *
+ * `SessionManager` is invariant in both parameters, since each appears in both
+ * an argument and a return position, so no single instantiation is assignable
+ * from every other one. `SessionManager<never, never>` is the alias a caller
+ * writes when the parameters genuinely do not matter, and the two casts below
+ * route through `unknown` because the invariance, not a real shape mismatch, is
+ * what TypeScript is objecting to.
  */
 export type AnySessionManager = SessionManager<never, never>;
 
@@ -46,15 +53,17 @@ export function SessionProvider({
   refreshOnMount = true,
   children,
 }: SessionProviderProps): ReactNode {
+  const erased = manager as unknown as SessionManager<unknown, unknown>;
+
   useEffect(() => {
     if (refreshOnMount) {
-      void (manager as SessionManager<unknown, unknown>).refresh();
+      void erased.refresh();
     }
-  }, [manager, refreshOnMount]);
+  }, [erased, refreshOnMount]);
 
   return createElement(
     SessionManagerContext.Provider,
-    { value: manager as SessionManager<unknown, unknown> },
+    { value: erased },
     children
   );
 }

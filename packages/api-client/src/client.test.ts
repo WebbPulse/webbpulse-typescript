@@ -25,7 +25,7 @@ function stubFetch(results: (Response | Error)[]): typeof globalThis.fetch {
       return Promise.reject(result);
     }
     return Promise.resolve((result as Response).clone());
-  }) as unknown as typeof globalThis.fetch;
+  });
 }
 
 function client(

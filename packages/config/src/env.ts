@@ -40,9 +40,30 @@ export class ConfigReader {
     this.env = env;
   }
 
+  /**
+   * Reads one key as a trimmed string, or `undefined` when it is absent or
+   * blank.
+   *
+   * Only primitives are accepted. Vite replaces `import.meta.env.VITE_*` with
+   * string literals, so an object arriving here means the caller passed a
+   * hand built bag with a nested value. Stringifying it would yield
+   * "[object Object]", which then passes every check below and fails much later
+   * as a request to a URL literally containing that text. Recording an issue
+   * instead surfaces it at startup, which is the whole point of this package.
+   */
   private raw(key: string): string | undefined {
     const value = this.env[key];
     if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (
+      typeof value !== 'string' &&
+      typeof value !== 'number' &&
+      typeof value !== 'boolean'
+    ) {
+      this.issues.push(
+        `${key} must be a string, number or boolean, got ${typeof value}`
+      );
       return undefined;
     }
     const asString = String(value).trim();
@@ -135,7 +156,7 @@ export class ConfigReader {
       );
       return allowed[0] as T[number];
     }
-    return value as T[number];
+    return value;
   }
 
   /** Records a problem a caller detected itself. */
