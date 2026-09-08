@@ -137,7 +137,8 @@ const { data, requestId } = await build_lists.get<BuildList[]>('/');
 
 Exports `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the error types
 `ApiError`, `ApiNetworkError` and `ApiTimeoutError`, the message formatter
-`formatApiErrorMessage`, and the URL helpers `joinUrl` and `serializeQuery`.
+`formatApiErrorMessage`, the URL helpers `joinUrl` and `serializeQuery`, and the
+opt in envelope layer `toEnvelope` and `createEnvelopeClient`.
 
 What it does, and why each piece is there:
 
@@ -170,6 +171,12 @@ What it does, and why each piece is there:
 
 `createDomainClient(prefix)` returns a client bound to a path prefix on the same
 base URL, sharing the token source, retry policy and headers.
+
+`toEnvelope(call)` and `createEnvelopeClient(client)` are the opt in `{ data,
+error }` layer for an application whose call sites are not converted yet. The
+throwing client stays the default and is untouched underneath; the envelope is
+a migration step rather than a second supported contract. See the
+[package README](packages/api-client#the--data-error--envelope).
 
 ### `@webbpulse/auth`
 
@@ -263,6 +270,11 @@ whichever one is slower to adopt.
 `exactOptionalPropertyTypes` and `noPropertyAccessFromIndexSignature`),
 `library.json` (declarations and source maps), `vite-app.json` (DOM libs, JSX)
 and `node.json`.
+
+`node.json` sets no `types` array. Pinning `["node"]` there made the config
+unusable for a consumer without `@types/node` installed, which is the common
+case for the Vite config file it is applied to, and an unresolvable `types`
+entry is a compile error. A project wanting the narrow set states it.
 
 ```json
 { "extends": "@webbpulse/tsconfig/vite-app.json" }

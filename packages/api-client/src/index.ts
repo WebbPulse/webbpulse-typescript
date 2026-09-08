@@ -7,6 +7,13 @@ export {
   type RequestOptions,
 } from './client.js';
 export {
+  createEnvelopeClient,
+  toEnvelope,
+  type ApiEnvelope,
+  type EnvelopeClient,
+  type EnvelopeOptions,
+} from './envelope.js';
+export {
   ApiError,
   ApiNetworkError,
   ApiTimeoutError,
