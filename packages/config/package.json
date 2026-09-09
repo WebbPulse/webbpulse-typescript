@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/config",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Validated runtime configuration for WebbPulse Vite applications.",
   "license": "UNLICENSED",
   "type": "module",
@@ -35,6 +35,6 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@webbpulse/tsconfig": "0.2.0"
+    "@webbpulse/tsconfig": "0.3.0"
   }
 }

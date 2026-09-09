@@ -4,7 +4,32 @@ import {
   ApiNetworkError,
   ApiTimeoutError,
   formatApiErrorMessage,
+  getWebbPulseError,
+  isWebbPulseErrorBody,
+  type WebbPulseErrorBody,
 } from './errors.js';
+
+/** The body `error_body` in `webbpulse.http` renders, at its minimum. */
+const envelope = (
+  overrides: Partial<WebbPulseErrorBody> = {}
+): WebbPulseErrorBody => ({
+  success: false,
+  status: 404,
+  message: 'No such build list.',
+  request_id: 'req-1',
+  ...overrides,
+});
+
+/** An `ApiError` carrying `body`, with the rest filled in plausibly. */
+const apiError = (body: unknown, status = 404, requestId = 'hdr-1'): ApiError =>
+  new ApiError({
+    status,
+    statusText: 'Not Found',
+    body,
+    url: 'https://api.test/build-lists/1',
+    method: 'GET',
+    requestId,
+  });
 
 describe('formatApiErrorMessage', () => {
   it('uses a string detail', () => {
@@ -127,5 +152,154 @@ describe('ApiNetworkError', () => {
     expect(error).toBeInstanceOf(ApiNetworkError);
     expect(error.cause).toBe(cause);
     expect(error.method).toBe('POST');
+  });
+});
+
+describe('isWebbPulseErrorBody', () => {
+  it('accepts the four field envelope', () => {
+    expect(isWebbPulseErrorBody(envelope())).toBe(true);
+  });
+
+  it('accepts the envelope with the optional fields present', () => {
+    expect(
+      isWebbPulseErrorBody(
+        envelope({ error_code: 'NOT_FOUND', details: { field: 'id' } })
+      )
+    ).toBe(true);
+  });
+
+  it('rejects a FastAPI detail body', () => {
+    // The discriminant is `success: false`, which a `detail` body never sets.
+    expect(isWebbPulseErrorBody({ detail: 'Not found' })).toBe(false);
+  });
+
+  it('rejects a bare message body', () => {
+    expect(isWebbPulseErrorBody({ message: 'Nope' })).toBe(false);
+  });
+
+  it('rejects a success envelope', () => {
+    expect(isWebbPulseErrorBody({ success: true, message: 'ok' })).toBe(false);
+  });
+
+  it('rejects a non object', () => {
+    expect(isWebbPulseErrorBody(null)).toBe(false);
+    expect(isWebbPulseErrorBody('Not found')).toBe(false);
+    expect(isWebbPulseErrorBody(undefined)).toBe(false);
+  });
+
+  it('rejects an envelope whose message is not a string', () => {
+    expect(isWebbPulseErrorBody({ success: false, message: 42 })).toBe(false);
+  });
+
+  it('accepts an envelope missing status and request_id', () => {
+    // Deliberately permissive: a proxy that drops a key should not cost the
+    // caller the message, which is the field that matters.
+    expect(isWebbPulseErrorBody({ success: false, message: 'Gone' })).toBe(
+      true
+    );
+  });
+});
+
+describe('formatApiErrorMessage with the WebbPulse envelope', () => {
+  it('prefers the envelope message', () => {
+    expect(formatApiErrorMessage(envelope())).toBe('No such build list.');
+  });
+
+  it('prefers the envelope message over a detail on the same body', () => {
+    // Not a shape the backend produces, but the precedence has to be stated:
+    // `message` is what `error_body` writes for a caller to read.
+    expect(
+      formatApiErrorMessage({ ...envelope(), detail: 'framework wording' })
+    ).toBe('No such build list.');
+  });
+
+  it('falls through to the fallback when the envelope message is blank', () => {
+    expect(formatApiErrorMessage(envelope({ message: '   ' }), 'fb')).toBe(
+      'fb'
+    );
+  });
+
+  it('still reads a FastAPI detail, unchanged', () => {
+    expect(formatApiErrorMessage({ detail: 'Not found' })).toBe('Not found');
+  });
+});
+
+describe('getWebbPulseError', () => {
+  it('returns every envelope field, camel cased', () => {
+    const error = apiError(
+      envelope({
+        error_code: 'BUILD_LIST_NOT_FOUND',
+        details: [{ field: 'id', message: 'unknown' }],
+      })
+    );
+
+    expect(getWebbPulseError(error)).toEqual({
+      message: 'No such build list.',
+      errorCode: 'BUILD_LIST_NOT_FOUND',
+      details: [{ field: 'id', message: 'unknown' }],
+      requestId: 'req-1',
+      status: 404,
+    });
+  });
+
+  it('leaves the optional fields undefined when the backend omitted them', () => {
+    // A service that has not enabled `error_codes` or `validation_details`
+    // sends the four base fields, and a `switch` on errorCode has to be able
+    // to see that as one case rather than as a missing property.
+    const info = getWebbPulseError(apiError(envelope()));
+    expect(info.errorCode).toBeUndefined();
+    expect(info.details).toBeUndefined();
+    expect(info.message).toBe('No such build list.');
+  });
+
+  it('prefers the body request id over the header', () => {
+    const info = getWebbPulseError(
+      apiError(envelope({ request_id: 'body-9' }))
+    );
+    expect(info.requestId).toBe('body-9');
+  });
+
+  it('falls back to the header request id when the body has none', () => {
+    const info = getWebbPulseError(apiError(envelope({ request_id: '' })));
+    expect(info.requestId).toBe('hdr-1');
+  });
+
+  it('reads the status from the response, not the body', () => {
+    // The two disagree only when something rewrote one of them, and the
+    // response is the one the browser actually saw.
+    const info = getWebbPulseError(apiError(envelope({ status: 500 }), 502));
+    expect(info.status).toBe(502);
+  });
+
+  it('degrades to the formatted message for a FastAPI detail body', () => {
+    const info = getWebbPulseError(apiError({ detail: 'Not found' }, 404));
+    expect(info).toEqual({
+      message: 'Not found',
+      errorCode: undefined,
+      details: undefined,
+      requestId: 'hdr-1',
+      status: 404,
+    });
+  });
+
+  it('degrades to the generic message for an unreadable body', () => {
+    const info = getWebbPulseError(apiError('<html>502</html>', 502));
+    expect(info.message).toBe('<html>502</html>');
+    expect(info.errorCode).toBeUndefined();
+  });
+
+  it('always yields a renderable message', () => {
+    // The point of the accessor: a call site renders `.message` with no
+    // fallback of its own, so it can never be empty.
+    const bare = new ApiError({
+      status: 500,
+      statusText: 'Internal Server Error',
+      body: null,
+      url: 'https://api.test/x',
+      method: 'GET',
+    });
+    const info = getWebbPulseError(bare);
+    expect(info.message).toBe('Request failed with status 500.');
+    expect(info.requestId).toBeUndefined();
   });
 });

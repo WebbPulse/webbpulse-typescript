@@ -24,6 +24,101 @@ export interface ApiErrorBody {
   [key: string]: unknown;
 }
 
+/**
+ * The error envelope every WebbPulse backend renders on a non 2xx.
+ *
+ * Built by `error_body` in `webbpulse.http` (the shared Python package) and
+ * installed application wide by `register_error_handlers`, so a 404 from a
+ * route, a 422 from request validation and a 500 from an unhandled exception
+ * all arrive in this one shape rather than three.
+ *
+ * Four fields are always present and always in this order: `success`, `status`,
+ * `message` and `request_id`. `error_code` and `details` are omitted entirely
+ * unless the service opted into them (`register_error_handlers(error_codes=True,
+ * validation_details=True)`), which is why both are optional here rather than
+ * nullable: an absent key and an explicit `null` are different answers and the
+ * backend only ever produces the former.
+ *
+ * `status` is duplicated from the HTTP status line deliberately. A body that
+ * has been logged, serialised into an error report or passed through a queue
+ * no longer has a response beside it, and the envelope stays self describing.
+ */
+export interface WebbPulseErrorBody {
+  /** Always `false`. It is what distinguishes the envelope from a success body. */
+  success: false;
+  /** HTTP status, duplicated from the status line. */
+  status: number;
+  /** Human readable message. Safe to render: the backend writes it for a caller. */
+  message: string;
+  /** Request id, the same value echoed in the `X-Request-ID` response header. */
+  request_id: string;
+  /**
+   * Stable machine readable code, when the service enabled `error_codes`.
+   *
+   * Derived from the status for handled statuses (`NOT_FOUND`, `CONFLICT`,
+   * `VALIDATION_ERROR`, `INTERNAL_ERROR`), and overridable per route, so an
+   * application branches on this rather than on the message text.
+   */
+  error_code?: string;
+  /**
+   * Structured detail, when the service enabled `validation_details`.
+   *
+   * A list for validation failures, one entry per offending field, or a mapping
+   * for anything else. The backend echoes it verbatim to the caller, so it
+   * never carries a rejected input value or an internal identifier.
+   */
+  details?: unknown[] | Record<string, unknown>;
+}
+
+/**
+ * Narrows an unknown value to the WebbPulse error envelope.
+ *
+ * The check is on `success === false` plus a string `message`, not on the full
+ * field set. `status` and `request_id` are always written by `error_body`, but
+ * requiring them here would make the guard fail closed against a body that
+ * crossed a proxy which dropped a key, and the useful part (the message) would
+ * be lost for no gain. `success: false` is the discriminant that a FastAPI
+ * `detail` body and a bare `{ message }` both lack, so it alone is enough to
+ * tell the envelope apart from the shapes below.
+ */
+export function isWebbPulseErrorBody(
+  value: unknown
+): value is WebbPulseErrorBody {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate['success'] === false && typeof candidate['message'] === 'string'
+  );
+}
+
+/**
+ * The fields an application reads off a failed request, in one flat object.
+ *
+ * Returned by {@link getWebbPulseError}. `message` is always a usable string,
+ * so a call site can render it without a fallback of its own; the rest are
+ * `undefined` when the backend did not send them.
+ */
+export interface WebbPulseErrorInfo {
+  /** The envelope's message, or the best line the other shapes yield. */
+  message: string;
+  /** `error_code` when the service enabled it. */
+  errorCode: string | undefined;
+  /** `details` when the service enabled it. */
+  details: unknown[] | Record<string, unknown> | undefined;
+  /**
+   * The request id.
+   *
+   * Read from the envelope's `request_id` first and from the response header
+   * second. The two agree in practice, since the same middleware writes both,
+   * and preferring the body means a logged or forwarded body still carries it.
+   */
+  requestId: string | undefined;
+  /** HTTP status, from the response rather than the body. */
+  status: number;
+}
+
 function isValidationErrorItems(
   value: unknown
 ): value is ValidationErrorItem[] {
@@ -56,6 +151,12 @@ export function formatApiErrorMessage(
   }
   if (typeof body !== 'object' || body === null) {
     return fallback;
+  }
+  // The WebbPulse envelope first. Its `message` is the field the backend wrote
+  // for a caller to read, and a body carrying `success: false` never also
+  // carries a meaningful `detail`, so there is nothing to fall through to.
+  if (isWebbPulseErrorBody(body) && body.message.trim()) {
+    return body.message;
   }
   const candidate = body as ApiErrorBody;
   const detail = candidate.detail;
@@ -132,6 +233,69 @@ export class ApiError extends Error {
   get isServerError(): boolean {
     return this.status >= 500;
   }
+}
+
+/**
+ * Reads the WebbPulse error envelope off an `ApiError`.
+ *
+ * This is the accessor an application uses instead of reaching into
+ * `error.body` and re-implementing the shape check. It always returns a value:
+ * `message` falls back through the same chain `formatApiErrorMessage` walks, so
+ * a call site renders `getWebbPulseError(error).message` without a fallback of
+ * its own, and `errorCode` is `undefined` rather than absent when the backend
+ * did not send one, which is what lets a `switch` on it be exhaustive.
+ *
+ * Returning a flat object rather than the envelope itself is deliberate. The
+ * body is snake case because Python wrote it, and the two consumers should not
+ * both have to remember that `request_id` is the spelling on this one object
+ * when every other field they touch is camel case. It also lets `requestId`
+ * fall back to the response header, which the body cannot do.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.post('/build-lists', body);
+ * } catch (error) {
+ *   if (error instanceof ApiError) {
+ *     const { message, errorCode } = getWebbPulseError(error);
+ *     if (errorCode === 'DUPLICATE_NAME') {
+ *       setFieldError('name', message);
+ *     } else {
+ *       toast.error(message);
+ *     }
+ *   }
+ * }
+ * ```
+ */
+export function getWebbPulseError(error: ApiError): WebbPulseErrorInfo {
+  const body = error.body;
+  if (isWebbPulseErrorBody(body)) {
+    return {
+      message: body.message.trim()
+        ? body.message
+        : formatApiErrorMessage(
+            body,
+            `Request failed with status ${String(error.status)}.`
+          ),
+      errorCode: body.error_code,
+      details: body.details,
+      // The body's own id first, the header second. They are written by the
+      // same middleware from the same value, so this is a fallback rather than
+      // a choice between two sources of truth.
+      requestId: body.request_id || error.requestId,
+      status: error.status,
+    };
+  }
+  // Not an envelope. Everything the envelope carries beyond the message is
+  // absent by definition, and the message comes from the FastAPI `detail` or
+  // bare `message` handling that was already here.
+  return {
+    message: error.message,
+    errorCode: undefined,
+    details: undefined,
+    requestId: error.requestId,
+    status: error.status,
+  };
 }
 
 /** Thrown when the request aborts, whether by timeout or by caller signal. */

@@ -18,8 +18,12 @@ export {
   ApiNetworkError,
   ApiTimeoutError,
   formatApiErrorMessage,
+  getWebbPulseError,
+  isWebbPulseErrorBody,
   type ApiErrorBody,
   type ValidationErrorItem,
+  type WebbPulseErrorBody,
+  type WebbPulseErrorInfo,
 } from './errors.js';
 export {
   joinUrl,
