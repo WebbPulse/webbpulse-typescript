@@ -1,5 +1,52 @@
 # @webbpulse/api-client
 
+## 0.3.0
+
+### Minor Changes
+
+- Read the WebbPulse error envelope as a first class shape.
+
+  Every backend in the estate now renders one error body, built by `error_body` in
+  the shared `webbpulse` Python package and installed application wide by
+  `register_error_handlers`: `{ success, status, message, request_id, error_code,
+details }`. `formatApiErrorMessage` understood FastAPI's `detail` and a bare
+  `message` but not this, so the field the backend writes for a caller to read was
+  the one field the formatter ignored, and CarModPicker kept a local
+  `utils/apiError.ts` to read it.
+
+  Four additions, all additive:
+
+  - `WebbPulseErrorBody`, the typed envelope. `error_code` and `details` are
+    optional rather than nullable, because a service that has not enabled them
+    omits the keys entirely and the backend never writes an explicit `null`.
+  - `isWebbPulseErrorBody(value)`, the type guard. It narrows on `success ===
+false` plus a string `message` rather than on the full field set: `success:
+false` is the discriminant a `detail` body and a bare `{ message }` both lack,
+    and requiring `status` and `request_id` too would fail closed against a body
+    that crossed a proxy which dropped a key, losing the message for no gain.
+  - `getWebbPulseError(error)`, the accessor, returning `{ message, errorCode,
+details, requestId, status }` off an `ApiError`. It always returns a value:
+    for a body that is not an envelope, `message` falls through the same chain
+    `formatApiErrorMessage` walks, so a call site renders it with no fallback of
+    its own, and `errorCode` is `undefined` rather than absent, which is what lets
+    a `switch` on it be exhaustive. `requestId` reads the body first and the
+    response header second, since the same middleware writes both and a body that
+    was logged or forwarded no longer has a response beside it. `status` comes
+    from the response rather than the body's copy, because that is the one the
+    browser actually saw.
+  - `WebbPulseErrorInfo`, its return type. Flat and camel cased deliberately: the
+    body is snake case because Python wrote it, and neither consumer should have
+    to remember that `request_id` is the spelling on this one object.
+
+  `formatApiErrorMessage` now prefers the envelope's `message` when present and is
+  otherwise unchanged. Every existing export and behaviour is preserved: the
+  FastAPI `detail` string, the validation array and the bare `message` are read
+  exactly as before, and a body carrying `success: false` never also carries a
+  meaningful `detail` to fall through to.
+
+  This is what lets CarModPicker delete its local envelope reader and Portfolio
+  branch on `error_code` rather than on message text.
+
 ## 0.2.0
 
 ### Minor Changes

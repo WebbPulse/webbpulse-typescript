@@ -39,6 +39,68 @@ export interface LoadAppConfigOptions {
   defaultApiBaseUrl?: string;
   /** Application name when `VITE_APP_NAME` is unset. */
   defaultAppName?: string;
+  /**
+   * Dev only backend switch: a map from the value of `VITE_BACKEND` to the
+   * base URL that value selects.
+   *
+   * CarModPicker runs `npm run dev:staging` and `npm run dev:prod`, which set
+   * `VITE_BACKEND=staging` and `VITE_BACKEND=production` so the local dev
+   * server talks to a deployed backend instead of localhost. Without this the
+   * application has to resolve the URL itself before calling `loadAppConfig`,
+   * which puts the one piece of URL selection outside the validating layer.
+   *
+   * Consulted **only when `DEV` is true**. A production bundle reads
+   * `VITE_API_BASE_URL` as it always did, so a stray `VITE_BACKEND` in a deploy
+   * environment cannot repoint a shipped build at another backend. That is the
+   * property worth having: the switch is a developer convenience, and a
+   * convenience that survives into production is a way to ship the wrong URL.
+   *
+   * A value present in the map wins over `VITE_API_BASE_URL`, since a developer
+   * who asked for the staging backend means it. A value absent from the map,
+   * and an unset `VITE_BACKEND`, both fall through to the normal resolution, so
+   * `{ staging, production }` leaves the default local flow untouched.
+   *
+   * Each URL is validated the same way `VITE_API_BASE_URL` is, so a typo in the
+   * map throws at startup rather than at the first request.
+   *
+   * @example
+   * ```ts
+   * loadAppConfig(import.meta.env, {
+   *   defaultApiBaseUrl: '/api',
+   *   backendTargets: {
+   *     staging: env.VITE_STAGING_API_URL,
+   *     production: env.VITE_PROD_API_URL,
+   *   },
+   *   apiPathPrefix: '/api',
+   * });
+   * ```
+   */
+  backendTargets?: Record<string, string | undefined>;
+  /**
+   * Path suffix appended to the resolved base URL.
+   *
+   * The backends mount every router under one prefix (`/api` for CarModPicker),
+   * and the deploy writes the bare origin into `VITE_API_URL` because that is
+   * what the Terraform `api_url` output is. Somebody has to join the two, and
+   * doing it here means the joined value is what gets validated rather than the
+   * half of it that was in the environment.
+   *
+   * Applied after the base URL is resolved and its trailing slashes are
+   * stripped, and skipped when the resolved URL already ends with the prefix,
+   * so a `VITE_API_BASE_URL` that was written with the prefix in it does not
+   * become `/api/api`. That idempotence matters because the two applications
+   * disagree today about whether the variable holds the origin or the full base,
+   * and both spellings are in deploy configuration right now.
+   */
+  apiPathPrefix?: string;
+  /**
+   * Name of the environment variable {@link backendTargets} is keyed by.
+   *
+   * Defaults to `VITE_BACKEND`, which is the name CarModPicker's dev scripts
+   * already set. Exposed so an application that spells it differently does not
+   * have to rename its scripts to adopt this.
+   */
+  backendTargetKey?: string;
 }
 
 /**
@@ -63,6 +125,83 @@ function environmentFromMode(
     default:
       return undefined;
   }
+}
+
+/**
+ * Resolves the dev backend switch to a URL and the key that named it.
+ *
+ * Returns `undefined` when the switch is unset, blank, or names a target the
+ * map does not carry, in which case the caller falls through to the normal
+ * `VITE_API_BASE_URL` resolution. A map entry whose value is `undefined` is
+ * treated as absent too, so a caller can pass `env.VITE_STAGING_API_URL`
+ * straight through without guarding it first.
+ *
+ * The returned `key` is the environment variable that supplied the URL, so a
+ * validation failure reports the name a developer would go and fix rather than
+ * `VITE_BACKEND`, which merely selected it.
+ */
+function readBackendTarget(
+  env: ViteEnv,
+  targets: Record<string, string | undefined>,
+  switchKey: string
+): { key: string; url: string } | undefined {
+  const raw = env[switchKey];
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const selected = raw.trim().toLowerCase();
+  if (selected === '') {
+    return undefined;
+  }
+  const url = Object.prototype.hasOwnProperty.call(targets, selected)
+    ? targets[selected]
+    : undefined;
+  if (typeof url !== 'string' || url.trim() === '') {
+    return undefined;
+  }
+  return { key: `${switchKey}=${selected}`, url: url.trim() };
+}
+
+/** Strips every trailing slash, collapsing a bare "/" to itself. */
+function stripTrailingSlashes(value: string): string {
+  const stripped = value.replace(/\/+$/, '');
+  return stripped === '' ? '/' : stripped;
+}
+
+/**
+ * Appends the path prefix unless it is already there.
+ *
+ * The idempotence check is on the resolved URL's path, not on the whole string,
+ * so `https://api.example.com/api` and `/api` are both recognised while a host
+ * that merely ends in the same characters is not.
+ */
+function applyPathPrefix(baseUrl: string, prefix: string): string {
+  const normalisedPrefix = stripTrailingSlashes(
+    prefix.startsWith('/') ? prefix : `/${prefix}`
+  );
+  if (normalisedPrefix === '/') {
+    return baseUrl;
+  }
+  const stripped = stripTrailingSlashes(baseUrl);
+  const path = stripped.startsWith('/')
+    ? stripped
+    : (() => {
+        try {
+          return stripTrailingSlashes(new URL(stripped).pathname);
+        } catch {
+          // Not parseable as a URL. The reader reports that separately; here
+          // the safe move is to leave the value exactly as it arrived so the
+          // error message names what the caller actually set.
+          return null;
+        }
+      })();
+  if (path === null) {
+    return baseUrl;
+  }
+  if (path === normalisedPrefix || path.endsWith(normalisedPrefix)) {
+    return stripped;
+  }
+  return `${stripped === '/' ? '' : stripped}${normalisedPrefix}`;
 }
 
 /**
@@ -95,11 +234,33 @@ export function loadAppConfig(
     inferred ?? 'local'
   );
 
-  const apiBaseUrl = reader.url('VITE_API_BASE_URL', {
-    ...(options.defaultApiBaseUrl === undefined
-      ? {}
-      : { fallback: options.defaultApiBaseUrl }),
-  });
+  // The dev only backend switch, consulted before VITE_API_BASE_URL. A
+  // production bundle never reaches this branch, so a stray VITE_BACKEND in a
+  // deploy environment cannot repoint a shipped build.
+  const backendTarget =
+    env.DEV === true && options.backendTargets !== undefined
+      ? readBackendTarget(
+          env,
+          options.backendTargets,
+          options.backendTargetKey ?? 'VITE_BACKEND'
+        )
+      : undefined;
+
+  const resolvedBaseUrl =
+    backendTarget === undefined
+      ? reader.url('VITE_API_BASE_URL', {
+          ...(options.defaultApiBaseUrl === undefined
+            ? {}
+            : { fallback: options.defaultApiBaseUrl }),
+        })
+      : // Validated through the same reader, under the key that selected it, so
+        // a malformed entry in the map names itself in the error.
+        reader.url(backendTarget.key, { fallback: backendTarget.url });
+
+  const apiBaseUrl =
+    options.apiPathPrefix === undefined || resolvedBaseUrl === ''
+      ? resolvedBaseUrl
+      : applyPathPrefix(resolvedBaseUrl, options.apiPathPrefix);
 
   const appName = reader.optionalString(
     'VITE_APP_NAME',

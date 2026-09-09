@@ -154,3 +154,216 @@ describe('loadAppConfig', () => {
     expect(config.isProd).toBe(false);
   });
 });
+
+describe('loadAppConfig backendTargets', () => {
+  const targets = {
+    staging: 'https://api.staging.carmodpicker.com',
+    production: 'https://api.carmodpicker.com',
+  };
+
+  it('selects the staging backend in dev', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
+      { defaultApiBaseUrl: '/api', backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.carmodpicker.com');
+  });
+
+  it('selects the production backend in dev', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'production' },
+      { defaultApiBaseUrl: '/api', backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.carmodpicker.com');
+  });
+
+  it('falls through to the default when the switch is unset', () => {
+    // The plain `npm run dev` case: the dev server proxies /api to localhost.
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true },
+      { defaultApiBaseUrl: '/api', backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('/api');
+  });
+
+  it('falls through when the switch names a target that is not in the map', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'local' },
+      { defaultApiBaseUrl: '/api', backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('/api');
+  });
+
+  it('falls through when the mapped value is undefined', () => {
+    // Lets a caller pass `env.VITE_STAGING_API_URL` straight in without
+    // guarding it, which is the whole convenience of the option.
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
+      {
+        defaultApiBaseUrl: '/api',
+        backendTargets: { staging: undefined },
+      }
+    );
+    expect(config.apiBaseUrl).toBe('/api');
+  });
+
+  it('matches the switch case insensitively', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'Staging' },
+      { defaultApiBaseUrl: '/api', backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.carmodpicker.com');
+  });
+
+  it('ignores the switch outside dev', () => {
+    // The property worth having: a stray VITE_BACKEND in a deploy environment
+    // cannot repoint a shipped production bundle at another backend.
+    const config = loadAppConfig(
+      {
+        MODE: 'production',
+        DEV: false,
+        PROD: true,
+        VITE_BACKEND: 'staging',
+        VITE_API_BASE_URL: 'https://api.carmodpicker.com',
+      },
+      { backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.carmodpicker.com');
+  });
+
+  it('wins over VITE_API_BASE_URL in dev', () => {
+    // A developer who ran `npm run dev:staging` means it.
+    const config = loadAppConfig(
+      {
+        MODE: 'development',
+        DEV: true,
+        VITE_BACKEND: 'staging',
+        VITE_API_BASE_URL: '/api',
+      },
+      { backendTargets: targets }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.carmodpicker.com');
+  });
+
+  it('validates the selected URL and names the key that supplied it', () => {
+    let caught: unknown;
+    try {
+      loadAppConfig(
+        { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
+        { backendTargets: { staging: 'not a url' } }
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigError);
+    expect((caught as ConfigError).issues[0]).toContain('VITE_BACKEND=staging');
+  });
+
+  it('reads the switch from a custom key', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_TARGET: 'staging' },
+      {
+        defaultApiBaseUrl: '/api',
+        backendTargets: targets,
+        backendTargetKey: 'VITE_TARGET',
+      }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.carmodpicker.com');
+  });
+
+  it('strips a trailing slash from a selected target', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
+      { backendTargets: { staging: 'https://api.staging.test/' } }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.test');
+  });
+});
+
+describe('loadAppConfig apiPathPrefix', () => {
+  it('appends the prefix to an absolute base URL', () => {
+    // The deploy writes the bare origin from the Terraform api_url output.
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_BASE_URL: 'https://api.carmodpicker.com' },
+      { apiPathPrefix: '/api' }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.carmodpicker.com/api');
+  });
+
+  it('appends the prefix to a root relative base URL', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true },
+      { defaultApiBaseUrl: '/', apiPathPrefix: '/api' }
+    );
+    expect(config.apiBaseUrl).toBe('/api');
+  });
+
+  it('does not double the prefix when the URL already carries it', () => {
+    // Both spellings of VITE_API_BASE_URL are in deploy configuration right
+    // now, so appending has to be idempotent or one of them breaks.
+    const config = loadAppConfig(
+      {
+        MODE: 'production',
+        VITE_API_BASE_URL: 'https://api.carmodpicker.com/api',
+      },
+      { apiPathPrefix: '/api' }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.carmodpicker.com/api');
+  });
+
+  it('does not double the prefix on a root relative URL', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true },
+      { defaultApiBaseUrl: '/api', apiPathPrefix: '/api' }
+    );
+    expect(config.apiBaseUrl).toBe('/api');
+  });
+
+  it('accepts a prefix written without a leading slash', () => {
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_BASE_URL: 'https://api.test' },
+      { apiPathPrefix: 'api' }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test/api');
+  });
+
+  it('applies to a backend target too', () => {
+    // The CarModPicker case end to end: dev switch picks the host, the prefix
+    // is appended, and the result is what gets validated.
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
+      {
+        defaultApiBaseUrl: '/api',
+        backendTargets: { staging: 'https://api.staging.test' },
+        apiPathPrefix: '/api',
+      }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.test/api');
+  });
+
+  it('is a no-op for a bare slash prefix', () => {
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_BASE_URL: 'https://api.test' },
+      { apiPathPrefix: '/' }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test');
+  });
+
+  it('appends a multi segment prefix', () => {
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_BASE_URL: 'https://api.test' },
+      { apiPathPrefix: '/api/v1' }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test/api/v1');
+  });
+
+  it('leaves the defaults untouched when neither option is given', () => {
+    // The backwards compatibility check: 0.2.0 behaviour, unchanged.
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_BASE_URL: 'https://api.test/' },
+      { defaultAppName: 'Portfolio' }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test');
+    expect(config.appName).toBe('Portfolio');
+  });
+});

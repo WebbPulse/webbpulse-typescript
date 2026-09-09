@@ -99,10 +99,82 @@ including the multipart boundary. Do not set `Content-Type` yourself for
 `FormData`: unlike axios, this client forwards the header you give it, and a
 `multipart/form-data` value with no boundary is unparseable by the server.
 
+## The WebbPulse error envelope
+
+Every WebbPulse backend renders one error shape, built by `error_body` in the
+shared `webbpulse` Python package and installed application wide by
+`register_error_handlers`. A 404 from a route, a 422 from request validation and
+a 500 from an unhandled exception all arrive like this:
+
+```json
+{
+  "success": false,
+  "status": 404,
+  "message": "No such build list.",
+  "request_id": "0199a1c2-...",
+  "error_code": "BUILD_LIST_NOT_FOUND",
+  "details": [{ "field": "id", "message": "unknown" }]
+}
+```
+
+The four base fields are always present. `error_code` and `details` are omitted
+entirely unless the service opted into them, which is why both are optional
+here: an absent key and an explicit `null` are different answers and the backend
+only ever produces the former.
+
+`getWebbPulseError(error)` is the accessor, and it always returns a value:
+
+```ts
+try {
+  await client.post('/build-lists', body);
+} catch (error) {
+  if (error instanceof ApiError) {
+    const { message, errorCode, details, requestId, status } =
+      getWebbPulseError(error);
+    if (errorCode === 'DUPLICATE_NAME') {
+      setFieldError('name', message);
+    } else {
+      toast.error(message);
+    }
+  }
+}
+```
+
+- **`message` is always a renderable string.** For a body that is not an
+  envelope it falls through the same chain `formatApiErrorMessage` walks, so a
+  call site never needs a fallback of its own.
+- **`errorCode` is `undefined` rather than absent** when the service has not
+  enabled `error_codes`, which is what lets a `switch` on it be exhaustive.
+- **`requestId` reads the body's `request_id` first and the response header
+  second.** The same middleware writes both, so this is a fallback rather than a
+  choice between two sources of truth, and it means a body that has been logged
+  or forwarded still carries the id.
+- **`status` comes from the response**, not from the body's copy of it. The two
+  disagree only when something rewrote one of them, and the response is the one
+  the browser actually saw.
+
+The returned object is flat and camel cased. The body is snake case because
+Python wrote it, and a consumer should not have to remember that `request_id` is
+the spelling on this one object when every other field it touches is camel case.
+
+`isWebbPulseErrorBody(value)` is the type guard behind it, exported for a call
+site that holds a body rather than an `ApiError`. It narrows on `success ===
+false` plus a string `message`, not on the full field set: `success: false` is
+the discriminant that a FastAPI `detail` body and a bare `{ message }` both
+lack, and requiring `status` and `request_id` too would fail closed against a
+body that crossed a proxy which dropped a key, losing the message for no gain.
+
+`formatApiErrorMessage` prefers the envelope's `message` when it is present, and
+is otherwise unchanged: FastAPI's `detail` (string or validation array) and a
+bare `message` are read exactly as before.
+
 ## Exports
 
 `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the error types `ApiError`,
 `ApiNetworkError` and `ApiTimeoutError`, the message formatter
-`formatApiErrorMessage`, the URL helpers `joinUrl` and `serializeQuery`, and the
-opt in envelope layer `toEnvelope`, `createEnvelopeClient` with the types
-`ApiEnvelope`, `EnvelopeClient` and `EnvelopeOptions`.
+`formatApiErrorMessage`, the WebbPulse error envelope reader
+`getWebbPulseError` with its guard `isWebbPulseErrorBody` and the types
+`WebbPulseErrorBody` and `WebbPulseErrorInfo`, the URL helpers `joinUrl` and
+`serializeQuery`, and the opt in envelope layer `toEnvelope`,
+`createEnvelopeClient` with the types `ApiEnvelope`, `EnvelopeClient` and
+`EnvelopeOptions`.

@@ -137,8 +137,10 @@ const { data, requestId } = await build_lists.get<BuildList[]>('/');
 
 Exports `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the error types
 `ApiError`, `ApiNetworkError` and `ApiTimeoutError`, the message formatter
-`formatApiErrorMessage`, the URL helpers `joinUrl` and `serializeQuery`, and the
-opt in envelope layer `toEnvelope` and `createEnvelopeClient`.
+`formatApiErrorMessage`, the WebbPulse error envelope reader
+`getWebbPulseError` with its guard `isWebbPulseErrorBody`, the URL helpers
+`joinUrl` and `serializeQuery`, and the opt in envelope layer `toEnvelope` and
+`createEnvelopeClient`.
 
 What it does, and why each piece is there:
 
@@ -168,6 +170,12 @@ What it does, and why each piece is there:
 - **Trailing slashes are preserved.** Portfolio's collection routes carry one
   and its item routes do not, and the distinction is load bearing against the
   backend's `TrailingSlashMiddleware`.
+- **The shared error envelope is first class.** Every backend renders
+  `{ success: false, status, message, request_id, error_code, details }` through
+  `error_body` in the `webbpulse` Python package. `getWebbPulseError(error)`
+  returns those fields flat and camel cased, with a message that is always
+  renderable, so an application branches on `error_code` rather than on message
+  text and neither consumer keeps its own reader.
 
 `createDomainClient(prefix)` returns a client bound to a path prefix on the same
 base URL, sharing the token source, retry policy and headers.
@@ -234,7 +242,14 @@ export const config = loadAppConfig(import.meta.env, {
 ```
 
 Exports `loadAppConfig`, `ConfigReader`, `ConfigError`, `ENVIRONMENT_NAMES` and
-the `AppConfig`, `EnvironmentName` and `ViteEnv` types.
+the `AppConfig`, `EnvironmentName`, `LoadAppConfigOptions` and `ViteEnv` types.
+
+`backendTargets` maps a `VITE_BACKEND` value onto the base URL it selects, for
+CarModPicker's `dev:staging` and `dev:prod` scripts. It is consulted only when
+`DEV` is true, so a stray variable in a deploy environment cannot repoint a
+shipped bundle. `apiPathPrefix` appends the path prefix the backends mount their
+routers under, idempotently, so a base URL that already carries it is left
+alone. Both default to absent and neither changes existing behaviour.
 
 It takes the environment bag as an argument rather than reading
 `import.meta.env` itself, which keeps it testable in Node and out of the way of
@@ -263,6 +278,12 @@ React plugins are peer dependencies passed in by the consumer rather than
 dependencies of this package. The two applications are on different plugin sets
 today, and forcing the union on both would make this config a blocker for
 whichever one is slower to adopt.
+
+The `eslint` peer range is `^9.0.0 || ^10.0.0`. CarModPicker is on ESLint 10 and
+needed an `overrides` entry to install against the 0.2.0 range; it does not any
+more. `@eslint/js` stays pinned to `^9.39.1` rather than widening with the peer,
+because `@eslint/js@10` peer depends on `eslint@^10` and widening would
+reintroduce the same conflict from the ESLint 9 side.
 
 ### `@webbpulse/tsconfig`
 
@@ -339,6 +360,9 @@ The closest fit, since most of this was extracted from it.
   `formatApiErrorMessage`. The roughly 91 call sites that inline their own
   `axiosError.response?.data?.detail || 'fallback'` can move to
   `error.message`, which is already that string.
+- `src/utils/apiError.ts` can go. `getWebbPulseError` reads the same envelope
+  off an `ApiError` and returns `error_code` and `details` alongside the
+  message, which is what that local reader existed to do.
 - The axios `paramsSerializer` can go: repeated array keys are the default.
 - The 24 modules under `src/api/` become `createDomainClient` calls, one per
   path prefix.
