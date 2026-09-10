@@ -3,7 +3,6 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionManager } from './session.js';
-import { MemoryTokenStorage } from './storage.js';
 import {
   SessionProvider,
   useSession,
@@ -46,9 +45,7 @@ function managerWith(
       fetch: fetchMock,
       retries: 0,
     }),
-    mode: 'token',
-    tokenStorageKey: 'access_token',
-    tokenStorage: new MemoryTokenStorage(),
+    mode: 'cookie',
   });
 }
 

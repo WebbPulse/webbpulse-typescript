@@ -32,6 +32,49 @@ const { data, requestId } = await buildLists.get<BuildList[]>('/');
 - **Trailing slashes are preserved**, which the backend's
   `TrailingSlashMiddleware` depends on.
 
+## Access tokens and the 401 retry
+
+Section 7.2 of the identity standard puts the token attachment and the retry in
+the transport rather than in every call site. Pass an `auth` provider and the
+client reads the access token off it for every request and, on a 401, refreshes
+once and replays the request once:
+
+```ts
+import { createApiClient } from '@webbpulse/api-client';
+import { createAuthClient } from '@webbpulse/auth';
+
+const auth = createAuthClient({ baseUrl: config.apiBaseUrl });
+const client = createApiClient({ baseUrl: config.apiBaseUrl, auth });
+```
+
+`auth` is typed as `AuthTokenProvider`, which is two methods:
+`getAccessToken(): string | null` and `refresh(): Promise<string | null>`. The
+interface is declared here rather than imported, so this package does not depend
+on `@webbpulse/auth` and anything satisfying those two methods will do.
+
+- **The retry runs at most once, structurally.** `request` calls the single
+  attempt path at most twice and has no loop, so a replay that also takes a 401
+  throws rather than starting a second refresh. The replay also carries
+  `skipAuthRetry` as a redundant guard.
+- **A replay is safe for a POST**, which the transport retry would never do. The
+  two cases are different: a 401 was rejected before it reached the handler, so
+  nothing happened that a replay would repeat.
+- **`refresh()` returning `null` means the session is gone.** The original 401
+  is thrown and there is no replay.
+- **Concurrency is the auth client's problem, not this one's.** Ten parallel
+  requests taking a 401 together call `refresh()` ten times, and the auth
+  client's single flight collapses that into one rotation. Any other provider
+  must do the same, because a second rotation of a consumed refresh token reads
+  as reuse on the server.
+- **A caller who aborted does not trigger a refresh.**
+- **`skipAuthRetry: true` on a `RequestOptions` opts a call out.** The identity
+  routes set it: `/api/auth/refresh` cannot refresh itself, and a 401 from
+  `/api/auth/login` means the password was wrong.
+
+`auth` takes precedence over `getAuthToken`, which stays for an application that
+has not adopted the auth client yet. With no `auth` configured the behaviour is
+exactly what it was before, `onUnauthorized` included.
+
 ## The `{ data, error }` envelope
 
 The client throws, and that stays the default. A rejection is the contract both
@@ -170,7 +213,8 @@ bare `message` are read exactly as before.
 
 ## Exports
 
-`ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the error types `ApiError`,
+`ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the auth contract type
+`AuthTokenProvider`, the error types `ApiError`,
 `ApiNetworkError` and `ApiTimeoutError`, the message formatter
 `formatApiErrorMessage`, the WebbPulse error envelope reader
 `getWebbPulseError` with its guard `isWebbPulseErrorBody` and the types
