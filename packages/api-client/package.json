@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/api-client",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Framework free typed fetch client for the WebbPulse HTTP APIs, with per-domain sub clients.",
   "license": "UNLICENSED",
   "type": "module",
@@ -35,6 +35,6 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@webbpulse/tsconfig": "0.5.0"
+    "@webbpulse/tsconfig": "0.6.0"
   }
 }
