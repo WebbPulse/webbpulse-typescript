@@ -211,6 +211,49 @@ body that crossed a proxy which dropped a key, losing the message for no gain.
 is otherwise unchanged: FastAPI's `detail` (string or validation array) and a
 bare `message` are read exactly as before.
 
+## `Retry-After` on a rate limit
+
+A 429 is the one refusal where the server usually knows how long the caller
+should wait, and it says so in a `Retry-After` header rather than in the body.
+`ApiError` now keeps it, as `retryAfterSeconds`:
+
+```ts
+try {
+  await client.post('/api/auth/reset', { email });
+} catch (error) {
+  if (error instanceof ApiError && error.status === 429) {
+    const wait = error.retryAfterSeconds;
+    setBanner(
+      wait === undefined
+        ? 'Too many requests. Try again shortly.'
+        : `Too many requests. Try again in ${String(wait)} seconds.`
+    );
+  }
+}
+```
+
+- **It is set only on the statuses this client already treats as retryable**:
+  408, 425, 429, 500, 502, 503 and 504. A `Retry-After` on a 404 is not a wait
+  a caller should act on, and surfacing one would put a countdown in front of a
+  permanent failure.
+- **Both RFC 9110 forms are read.** `Retry-After: 120` is delta-seconds and is
+  taken as it stands. `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` is an
+  HTTP-date and is turned into the seconds between the client's clock and that
+  instant, rounded up and floored at zero, so a date already past reads as `0`
+  rather than as a negative wait. An HTTP-date is only as good as the skew
+  between the two machines, which is why the header's own specification prefers
+  delta-seconds.
+- **`undefined` means no usable hint**, whether the server sent no header or
+  sent one that could not be read. Treat the value as a floor and keep whatever
+  backoff the call site already has for the absent case.
+- **Nothing else changed.** The field is additive: the retry policy, the
+  statuses it retries on and the backoff are all what they were, and every
+  existing construction of `ApiError` reads `undefined` on it.
+
+`parseRetryAfter(value, now?)` and `retryAfterFromHeaders(status, headers)` are
+exported for a call site holding a raw header or a `Response` rather than a
+thrown `ApiError`.
+
 ## Exports
 
 `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the auth contract type
@@ -218,7 +261,8 @@ bare `message` are read exactly as before.
 `ApiNetworkError` and `ApiTimeoutError`, the message formatter
 `formatApiErrorMessage`, the WebbPulse error envelope reader
 `getWebbPulseError` with its guard `isWebbPulseErrorBody` and the types
-`WebbPulseErrorBody` and `WebbPulseErrorInfo`, the URL helpers `joinUrl` and
+`WebbPulseErrorBody` and `WebbPulseErrorInfo`, the rate limit helpers
+`parseRetryAfter` and `retryAfterFromHeaders`, the URL helpers `joinUrl` and
 `serializeQuery`, and the opt in envelope layer `toEnvelope`,
 `createEnvelopeClient` with the types `ApiEnvelope`, `EnvelopeClient` and
 `EnvelopeOptions`.

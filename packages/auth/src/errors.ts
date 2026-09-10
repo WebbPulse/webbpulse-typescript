@@ -57,6 +57,32 @@ import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
  *   caller with no usable bearer token. Named here so a `switch` can see it,
  *   though the MFA methods never turn it into an outcome: it means the session
  *   ended, which is not a form field error.
+ *
+ * The last group is emitted by the M6 OAuth routes. `OAUTH_EMAIL_UNVERIFIED` was
+ * already in 7.3's list and is above; these are the rest, and they are added on
+ * the same rule as the others, that every one of them is an identity outcome a
+ * page has to render:
+ *
+ * - `OAUTH_LAST_SIGN_IN_METHOD`: an unlink that would leave the account with no
+ *   way in. The only refusal in the set whose remedy is a specific instruction
+ *   ("set a password first"), which is why it is a named outcome rather than a
+ *   thrown 409.
+ * - `OAUTH_ALREADY_LINKED`, `OAUTH_NOT_LINKED`: the provider identity is
+ *   attached to an account already, or is not attached to this one. Usually a
+ *   stale settings page, and the remedy is a reload.
+ * - `OAUTH_PROVIDER_UNKNOWN`, `OAUTH_PROVIDER_UNAVAILABLE`: a name the server
+ *   does not know, and a name it knows but has no client id for. Both are
+ *   deployment faults rather than user errors.
+ * - `OAUTH_CANCELLED`: the user pressed Cancel on the consent screen. Not an
+ *   error, and a landing page should not render it as one.
+ * - `OAUTH_STATE_INVALID`, `OAUTH_REDIRECT_NOT_ALLOWED`: an expired or replayed
+ *   authorization, and a redirect URI outside the allow-list.
+ * - `OAUTH_EXCHANGE_FAILED`, `OAUTH_USERINFO_FAILED`, `OAUTH_ID_TOKEN_INVALID`,
+ *   `OAUTH_NONCE_MISMATCH`, `OAUTH_CODE_MISSING`, `OAUTH_EMAIL_MISSING`,
+ *   `OAUTH_ACCOUNT_MISSING`: the provider leg went wrong. Named so a log line
+ *   records which, though a user sees one sentence for all of them.
+ * - `REGISTRATION_DISABLED`: a first-time provider identity arriving at a
+ *   product that is not creating accounts.
  */
 export const AUTH_ERROR_CODES = [
   'MFA_REQUIRED',
@@ -82,6 +108,22 @@ export const AUTH_ERROR_CODES = [
   'NO_PENDING_ENROLMENT',
   'MFA_NOT_CONFIGURED',
   'NOT_AUTHENTICATED',
+  'OAUTH_LAST_SIGN_IN_METHOD',
+  'OAUTH_ALREADY_LINKED',
+  'OAUTH_NOT_LINKED',
+  'OAUTH_PROVIDER_UNKNOWN',
+  'OAUTH_PROVIDER_UNAVAILABLE',
+  'OAUTH_CANCELLED',
+  'OAUTH_STATE_INVALID',
+  'OAUTH_REDIRECT_NOT_ALLOWED',
+  'OAUTH_EXCHANGE_FAILED',
+  'OAUTH_USERINFO_FAILED',
+  'OAUTH_ID_TOKEN_INVALID',
+  'OAUTH_NONCE_MISMATCH',
+  'OAUTH_CODE_MISSING',
+  'OAUTH_EMAIL_MISSING',
+  'OAUTH_ACCOUNT_MISSING',
+  'REGISTRATION_DISABLED',
 ] as const;
 
 /** One of the codes in {@link AUTH_ERROR_CODES}. */

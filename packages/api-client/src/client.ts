@@ -1,4 +1,9 @@
-import { ApiError, ApiNetworkError, ApiTimeoutError } from './errors.js';
+import {
+  ApiError,
+  ApiNetworkError,
+  ApiTimeoutError,
+  retryAfterFromHeaders,
+} from './errors.js';
 import { joinUrl, serializeQuery, type QueryParams } from './query.js';
 
 /** Header the API returns carrying the per request uuid7 correlation id. */
@@ -503,6 +508,10 @@ export class ApiClient {
         url,
         method,
         requestId: responseRequestId,
+        retryAfterSeconds: retryAfterFromHeaders(
+          response.status,
+          response.headers
+        ),
       });
       if (apiError.isUnauthorized) {
         this.options.onUnauthorized?.(apiError);

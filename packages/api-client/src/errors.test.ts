@@ -6,6 +6,8 @@ import {
   formatApiErrorMessage,
   getWebbPulseError,
   isWebbPulseErrorBody,
+  parseRetryAfter,
+  retryAfterFromHeaders,
   type WebbPulseErrorBody,
 } from './errors.js';
 
@@ -301,5 +303,106 @@ describe('getWebbPulseError', () => {
     const info = getWebbPulseError(bare);
     expect(info.message).toBe('Request failed with status 500.');
     expect(info.requestId).toBeUndefined();
+  });
+});
+
+describe('parseRetryAfter', () => {
+  // RFC 9110 section 10.2.3 defines two forms, and a server may send either.
+  it('reads the delta-seconds form', () => {
+    expect(parseRetryAfter('120')).toBe(120);
+  });
+
+  it('reads a zero wait', () => {
+    // Distinct from `undefined`: the server said "now", not "no hint".
+    expect(parseRetryAfter('0')).toBe(0);
+  });
+
+  it('tolerates surrounding whitespace', () => {
+    expect(parseRetryAfter('  30  ')).toBe(30);
+  });
+
+  it('reads the HTTP-date form against the supplied clock', () => {
+    const now = Date.parse('Wed, 21 Oct 2026 07:28:00 GMT');
+    expect(parseRetryAfter('Wed, 21 Oct 2026 07:30:00 GMT', now)).toBe(120);
+  });
+
+  it('rounds a fractional HTTP-date wait up', () => {
+    // 1500ms must not read as one second: the caller would retry too early.
+    const now = Date.parse('Wed, 21 Oct 2026 07:28:00 GMT');
+    expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:01 GMT', now + 500)).toBe(1);
+    expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:02 GMT', now + 500)).toBe(2);
+  });
+
+  it('floors an HTTP-date already in the past at zero', () => {
+    const now = Date.parse('Wed, 21 Oct 2026 07:30:00 GMT');
+    expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:00 GMT', now)).toBe(0);
+  });
+
+  it('returns undefined for an absent header', () => {
+    expect(parseRetryAfter(null)).toBeUndefined();
+    expect(parseRetryAfter(undefined)).toBeUndefined();
+  });
+
+  it('returns undefined for an empty or unparseable value', () => {
+    expect(parseRetryAfter('')).toBeUndefined();
+    expect(parseRetryAfter('   ')).toBeUndefined();
+    expect(parseRetryAfter('soon')).toBeUndefined();
+  });
+
+  it('refuses a signed or fractional delta rather than coercing it', () => {
+    // `Number('-5')` and `Number('1.5')` both succeed, and neither is
+    // delta-seconds. Accepting them would hand a call site a negative wait.
+    expect(parseRetryAfter('-5')).toBeUndefined();
+    expect(parseRetryAfter('1.5')).toBeUndefined();
+    expect(parseRetryAfter('12abc')).toBeUndefined();
+  });
+});
+
+describe('retryAfterFromHeaders', () => {
+  const headersWith = (value: string | null): Headers => {
+    const headers = new Headers();
+    if (value !== null) {
+      headers.set('retry-after', value);
+    }
+    return headers;
+  };
+
+  it('reads the header on a 429', () => {
+    expect(retryAfterFromHeaders(429, headersWith('45'))).toBe(45);
+  });
+
+  it('reads the header on a 503', () => {
+    expect(retryAfterFromHeaders(503, headersWith('5'))).toBe(5);
+  });
+
+  it('ignores the header on a status that is not retryable', () => {
+    // A 404 with a `Retry-After` is not a wait a caller should act on, and
+    // surfacing one would put a countdown in front of a permanent failure.
+    expect(retryAfterFromHeaders(404, headersWith('45'))).toBeUndefined();
+    expect(retryAfterFromHeaders(400, headersWith('45'))).toBeUndefined();
+  });
+
+  it('returns undefined when a retryable status carried no header', () => {
+    expect(retryAfterFromHeaders(429, headersWith(null))).toBeUndefined();
+  });
+});
+
+describe('ApiError.retryAfterSeconds', () => {
+  it('carries the value it was constructed with', () => {
+    const error = new ApiError({
+      status: 429,
+      statusText: 'Too Many Requests',
+      body: envelope({ status: 429, message: 'Slow down.' }),
+      url: 'https://api.test/x',
+      method: 'GET',
+      retryAfterSeconds: 60,
+    });
+    expect(error.retryAfterSeconds).toBe(60);
+  });
+
+  it('is undefined when the field was not supplied', () => {
+    // Every existing construction site omits it, and none of them changes
+    // shape: the field reads `undefined` exactly as an absent header does.
+    expect(apiError(envelope()).retryAfterSeconds).toBeUndefined();
   });
 });
