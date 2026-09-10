@@ -36,6 +36,27 @@ export {
   type RateLimited,
 } from './email-flows.js';
 export {
+  TOTP_FACTOR,
+  classifyMfaError,
+  type MfaCodeRejected,
+  type MfaPaths,
+  type MfaRateLimited,
+  type MfaRefusal,
+  type MfaUnavailable,
+  type NoPendingEnrolment,
+  type RecoveryCodesIssued,
+  type RecoveryCodesOutcome,
+  type StepUpOutcome,
+  type StepUpSucceeded,
+  type TotpActivated,
+  type TotpActivationOutcome,
+  type TotpAlreadyEnabled,
+  type TotpDisableOutcome,
+  type TotpDisabled,
+  type TotpEnrolmentOutcome,
+  type TotpEnrolmentStarted,
+} from './mfa.js';
+export {
   AUTH_ERROR_CODES,
   AuthSessionEndedError,
   describeAuthError,

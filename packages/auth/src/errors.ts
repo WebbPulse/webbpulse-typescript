@@ -37,6 +37,26 @@ import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
  *   `RATE_LIMITED` and is what the backend actually emits.
  * - `EMAIL_NOT_CONFIGURED`: an identity deployment with no sender. A fault
  *   rather than a user error, and worth telling apart from a rate limit.
+ *
+ * The six after those are emitted by the M4 MFA routes, and are added for the
+ * same reason:
+ *
+ * - `INVALID_MFA_CODE`: the one refusal every failed factor check carries.
+ *   Wrong code, replayed code, no factor enrolled, a factor enrolled but not
+ *   activated, a spent recovery code and one that never existed are deliberately
+ *   one code with one message, so the second leg of login cannot be used to
+ *   discover which accounts have TOTP enabled.
+ * - `MFA_TICKET_INVALID`: the ticket expired or was already spent. The remedy
+ *   is to start the sign in again, which is a different sentence from a wrong
+ *   code and so is worth telling apart.
+ * - `TOTP_ALREADY_ENABLED`, `NO_PENDING_ENROLMENT`: the two 409s of the
+ *   enrolment routes.
+ * - `MFA_NOT_CONFIGURED`: a deployment whose MFA routes exist but whose service
+ *   does not. A fault rather than a user error.
+ * - `NOT_AUTHENTICATED`: what the five authorized identity routes answer to a
+ *   caller with no usable bearer token. Named here so a `switch` can see it,
+ *   though the MFA methods never turn it into an outcome: it means the session
+ *   ended, which is not a form field error.
  */
 export const AUTH_ERROR_CODES = [
   'MFA_REQUIRED',
@@ -56,6 +76,12 @@ export const AUTH_ERROR_CODES = [
   'PASSWORD_REJECTED',
   'TOO_MANY_ATTEMPTS',
   'EMAIL_NOT_CONFIGURED',
+  'INVALID_MFA_CODE',
+  'MFA_TICKET_INVALID',
+  'TOTP_ALREADY_ENABLED',
+  'NO_PENDING_ENROLMENT',
+  'MFA_NOT_CONFIGURED',
+  'NOT_AUTHENTICATED',
 ] as const;
 
 /** One of the codes in {@link AUTH_ERROR_CODES}. */
