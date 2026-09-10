@@ -87,7 +87,7 @@ describe('AUTH_ERROR_CODES', () => {
     // `OAUTH_ALREADY_LINKED` and `OAUTH_NOT_LINKED`. The provider leg codes
     // that follow them are named so a log line records which one arrived,
     // though a user sees one sentence for all of them.
-    expect([...AUTH_ERROR_CODES].slice(23)).toEqual([
+    expect([...AUTH_ERROR_CODES].slice(23, 39)).toEqual([
       'OAUTH_LAST_SIGN_IN_METHOD',
       'OAUTH_ALREADY_LINKED',
       'OAUTH_NOT_LINKED',
@@ -104,6 +104,26 @@ describe('AUTH_ERROR_CODES', () => {
       'OAUTH_EMAIL_MISSING',
       'OAUTH_ACCOUNT_MISSING',
       'REGISTRATION_DISABLED',
+    ]);
+  });
+
+  it('adds the codes the M5 passkey routes emit', () => {
+    // `PASSKEY_NOT_RECOGNISED` is not repeated here: it is 7.3's own code and
+    // sits in the first block. It is a different thing from `PASSKEY_REJECTED`,
+    // which is what the seven routes actually emit for a ceremony that did not
+    // verify, and which folds five distinct failures into one answer so that
+    // neither login route becomes an oracle. `LAST_CREDENTIAL` is the one whose
+    // remedy is a specific instruction, so a settings page branches on it.
+    expect([...AUTH_ERROR_CODES].slice(39)).toEqual([
+      'PASSKEY_REJECTED',
+      'PASSKEY_ALREADY_REGISTERED',
+      'PASSKEY_NOT_FOUND',
+      'PASSKEY_NAME_REQUIRED',
+      'PASSKEY_CHALLENGE_INVALID',
+      'PASSKEY_LOGIN_DISABLED',
+      'PASSKEYS_DISABLED',
+      'LAST_CREDENTIAL',
+      'CREDENTIAL_REQUIRED',
     ]);
   });
 });

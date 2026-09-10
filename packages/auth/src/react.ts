@@ -239,9 +239,16 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   isLoading: boolean;
   login: AuthClient<TUser>['login'];
   completeTotp: AuthClient<TUser>['completeTotp'];
-  loginWithPasskey: AuthClient<TUser>['loginWithPasskey'];
-  completePasskeyMfa: AuthClient<TUser>['completePasskeyMfa'];
+  /**
+   * Signs in with a passkey. Replaces the 0.7.0 `loginWithPasskey` and
+   * `completePasskeyMfa` pair: the MFA case is now an outcome of this one call
+   * rather than a second method, and it is finished with `completeTotp`.
+   */
+  signInWithPasskey: AuthClient<TUser>['signInWithPasskey'];
   registerPasskey: AuthClient<TUser>['registerPasskey'];
+  listPasskeys: AuthClient<TUser>['listPasskeys'];
+  renamePasskey: AuthClient<TUser>['renamePasskey'];
+  deletePasskey: AuthClient<TUser>['deletePasskey'];
   startOAuth: AuthClient<TUser>['startOAuth'];
   logout: AuthClient<TUser>['logout'];
   /** The in-memory access token, or null. Rarely needed in a component. */
@@ -263,9 +270,11 @@ export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
     () => ({
       login: client.login.bind(client),
       completeTotp: client.completeTotp.bind(client),
-      loginWithPasskey: client.loginWithPasskey.bind(client),
-      completePasskeyMfa: client.completePasskeyMfa.bind(client),
+      signInWithPasskey: client.signInWithPasskey.bind(client),
       registerPasskey: client.registerPasskey.bind(client),
+      listPasskeys: client.listPasskeys.bind(client),
+      renamePasskey: client.renamePasskey.bind(client),
+      deletePasskey: client.deletePasskey.bind(client),
       startOAuth: client.startOAuth.bind(client),
       logout: client.logout.bind(client),
       getAccessToken: client.getAccessToken.bind(client),

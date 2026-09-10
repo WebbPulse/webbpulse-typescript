@@ -459,6 +459,177 @@ Route paths are overridable through `paths`: `oauthStart`, which defaults to
 `/api/auth/oauth` and has the provider and `/start` or `/link` appended, and
 `oauthLinks`, which defaults to `/api/auth/oauth/links`.
 
+## Signing in with a passkey
+
+Seven routes on the server, and unlike the OAuth set every one of them is an
+ordinary `fetch`. What is different here is that each ceremony is **two round
+trips with a browser API in between**: fetch options, run
+`navigator.credentials`, post what it returned. `registerPasskey` and
+`signInWithPasskey` each run both legs, because the challenge between them is a
+single-use row on the server that is spent by one attempt whatever the outcome.
+Holding the options across a user interaction is how a ceremony ends up half
+finished with the row already consumed, so a failed attempt starts again from
+the options leg, which is what calling the method again does.
+
+Check support before rendering a button, because a button that throws when it is
+pressed is worse than no button:
+
+```ts
+import {
+  passkeysSupported,
+  conditionalMediationAvailable,
+} from '@webbpulse/auth';
+
+if (passkeysSupported()) {
+  // Render the passkey controls.
+}
+```
+
+`passkeysSupported()` is `window.PublicKeyCredential` being present, which is
+what the specification says is true exactly when the API is. It is false in
+Node, in a test run with no DOM, and over plain HTTP, since WebAuthn is a
+secure-context API. `conditionalMediationAvailable()` is a separate capability
+and a separate question: it is what puts a passkey in the same autofill dropdown
+as a saved username, and a browser can have one without the other.
+
+### Enrolling
+
+```ts
+const outcome = await auth.registerPasskey({ name: 'MacBook Touch ID' });
+if (outcome.ok) {
+  setPasskeys((current) => [...current, outcome.passkey]);
+} else if (outcome.reason !== 'cancelled') {
+  setBanner(outcome.message);
+}
+```
+
+Both legs are authorized routes, so both carry the bearer token and the method
+rejects with `AuthSessionEndedError` rather than opening a prompt when no
+session is held. `name` is the label the settings page will show; the server
+trims it, caps it at 64 characters and substitutes `Passkey` when it is empty,
+so omitting it is fine.
+
+### Signing in
+
+```ts
+const outcome = await auth.signInWithPasskey();
+if (!outcome.ok) {
+  if (outcome.reason !== 'cancelled') setBanner(outcome.message);
+} else if (outcome.kind === 'mfa-required') {
+  setPendingTicket(outcome.ticket);
+} else {
+  navigate('/');
+}
+```
+
+Omit `email` for the ordinary discoverable flow: the server answers with no
+`allowCredentials` and the authenticator offers whatever it holds for the
+relying party. Pass one when the form already collected an address, which
+produces an `allowCredentials` list so the browser prompts for the right
+credential. **An unknown address is not an error and is not distinguishable from
+a known one**: the server answers any address with a challenge and an empty
+list, byte-identical to a genuine discoverable request, so this route cannot be
+used to find out which addresses have accounts.
+
+A sign-in resolves to `kind: 'mfa-required'` when the authenticator reported no
+user verification and the account has TOTP enrolled. Finish it with
+`completeTotp({ ticket, code })`, the same method and the same route the
+password path uses, because it is the same ticket. A passkey that verified the
+user is two factors in one gesture and signs in outright: the assertion proves
+possession of a key that never leaves the authenticator, and the `uv` flag
+proves the authenticator separately checked something the user knows or is.
+
+For an autofill sign-in, check conditional mediation first and pass an
+`AbortSignal` so the pending ceremony can be torn down if the user submits a
+password instead:
+
+```ts
+if (await conditionalMediationAvailable()) {
+  void auth.signInWithPasskey({
+    mediation: 'conditional',
+    signal: controller.signal,
+  });
+}
+```
+
+### Managing them
+
+```ts
+const listed = await auth.listPasskeys();
+await auth.renamePasskey(credentialId, 'Work key');
+const removed = await auth.deletePasskey(credentialId);
+if (!removed.ok && removed.reason === 'last-credential') {
+  setBanner('Set a password before removing your last passkey.');
+}
+```
+
+`listPasskeys` returns the credential id, the label, two timestamps, the
+transports the authenticator reported, its `aaguid`, the two backup flags and
+whether the user was verified at enrolment. The public key is deliberately not
+in the response: it discloses nothing, being public, but a settings page has no
+use for it and a body carrying key material invites somebody to start comparing
+it to something.
+
+### Which refusals are outcomes
+
+The same rule again, and one of them is the reason this rule exists.
+`last-credential` is a delete that would leave an account with no password and
+no passkey, and its remedy is a specific instruction, "set a password first",
+which no generic failure toast knows to say. It applies only to the last one;
+with two enrolled, either can go.
+
+`rejected` is one outcome rather than five, because the server answers one code
+for five reasons on purpose: a challenge that does not exist, one that expired,
+one minted for another account, an assertion that does not verify and a
+credential the server does not know are indistinguishable to a caller, so
+neither login route becomes an oracle for which credentials or accounts exist.
+`already-registered` is one answer whether the authenticator is enrolled on this
+account or somebody else's, for the same reason.
+
+`unavailable` covers both `PASSKEYS_DISABLED` and `PASSKEY_LOGIN_DISABLED`: the
+capability is off altogether, or passwordless sign-in specifically is off while
+enrolment still works. Both are deployment configuration rather than user error,
+and a page should hide the affected control rather than render a failure.
+`code` tells the two apart when a caller cares.
+
+`cancelled` is the one that does not come from the server at all. A user who
+dismisses the browser's prompt gets a `DOMException` from
+`navigator.credentials`, and that is the same gesture as pressing Cancel on an
+OAuth consent screen: not an error, and not something to render as one.
+`isPasskeyCancellation` recognises it by `name`, and both ceremony methods turn
+it into this outcome.
+
+`rate-limited` carries `retryAfter` in seconds, read from `Retry-After` first.
+Section 5.1 puts each login leg at 30 per 15 minutes per IP and enrolment at 10
+per hour.
+
+### base64url, in both directions
+
+WebAuthn's JavaScript API speaks `ArrayBuffer` and the wire speaks base64url, so
+something has to convert. Recent browsers do it themselves through
+`PublicKeyCredential.parseCreationOptionsFromJSON`,
+`parseRequestOptionsFromJSON` and the credential's own `toJSON`, and those are
+used whenever they exist, because they will keep pace with fields added after
+this version was written. `toCreationOptions`, `toRequestOptions` and
+`credentialToJSON` are the fallback, and they convert exactly the fields the
+specification declares as `BufferSource`: everything else is copied through, so
+an option this version has never heard of still reaches the browser.
+
+The wire shapes are py_webauthn's `PublicKeyCredentialCreationOptionsJSON` and
+`PublicKeyCredentialRequestOptionsJSON` going in, and its
+`RegistrationResponseJSON` and `AuthenticationResponseJSON` coming back.
+
+`navigator.credentials` is injected through the `webAuthn` option, so a test can
+supply a stub without constructing a real credential. The adapter receives the
+whole `CredentialCreationOptions` wrapper rather than the bare `publicKey`
+document, because a conditional sign-in also needs `mediation` and `signal` in
+that wrapper and there is nowhere else to put them.
+
+Route paths are overridable through `paths`: `passkeyRegisterOptions`,
+`passkeyRegisterVerify`, `passkeyLoginOptions`, `passkeyLoginVerify`, and
+`passkeys`, which defaults to `/api/auth/passkeys` and is both the list
+collection and the base the rename and the delete append a credential id to.
+
 ## Errors
 
 `AUTH_ERROR_CODES` opens with exactly the twelve codes section 7.3 names, then
@@ -466,10 +637,16 @@ the five the M3 link routes emit: `INVALID_LINK`, `PASSWORD_TOO_SHORT`,
 `PASSWORD_REJECTED`, `TOO_MANY_ATTEMPTS` and `EMAIL_NOT_CONFIGURED`, then the
 six the M4 MFA routes emit: `INVALID_MFA_CODE`, `MFA_TICKET_INVALID`,
 `TOTP_ALREADY_ENABLED`, `NO_PENDING_ENROLMENT`, `MFA_NOT_CONFIGURED` and
-`NOT_AUTHENTICATED`, and finally the sixteen the M6 OAuth routes emit, led by
+`NOT_AUTHENTICATED`, then the sixteen the M6 OAuth routes emit, led by
 the three a settings page branches on by name: `OAUTH_LAST_SIGN_IN_METHOD`,
-`OAUTH_ALREADY_LINKED` and `OAUTH_NOT_LINKED`. The rest after the first twelve
-are not in the standard's
+`OAUTH_ALREADY_LINKED` and `OAUTH_NOT_LINKED`, and finally the nine the M5
+passkey routes emit: `PASSKEY_REJECTED`, `PASSKEY_ALREADY_REGISTERED`,
+`PASSKEY_NOT_FOUND`, `PASSKEY_NAME_REQUIRED`, `PASSKEY_CHALLENGE_INVALID`,
+`PASSKEY_LOGIN_DISABLED`, `PASSKEYS_DISABLED`, `LAST_CREDENTIAL` and
+`CREDENTIAL_REQUIRED`. Note that `PASSKEY_NOT_RECOGNISED`, in the first twelve,
+is 7.3's own code and is a different thing from `PASSKEY_REJECTED`, which is
+what the seven routes actually emit for a ceremony that did not verify. The rest
+after the first twelve are not in the standard's
 list, which was written before those routes existed, and they are added rather
 than left to fall through, because `getAuthErrorCode` returning `undefined`
 means "not an identity outcome I model" and every one of these is an outcome a
@@ -552,6 +729,19 @@ From the OAuth flows: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`,
 `OAuthUnlinkOutcome`, `OAuthUnlinked`, `OAuthRefusal`, `OAuthLastSignInMethod`,
 `OAuthNotLinked`, `OAuthAlreadyLinked`, `OAuthProviderUnavailable`,
 `OAuthRateLimited`, `OAuthMode`, `OAuthStartOptions`, `OAuthPaths`.
+
+From the passkey flows: `passkeysSupported`, `conditionalMediationAvailable`,
+`isPasskeyCancellation`, `classifyPasskeyError`, `parsePasskey`,
+`parsePasskeys`, `parsePasskeyChallenge`, `toCreationOptions`,
+`toRequestOptions`, `credentialToJSON`, `base64UrlToBuffer`,
+`bufferToBase64Url`, and the types `Passkey`, `PasskeyChallenge`,
+`PasskeyRegistrationOutcome`, `PasskeyRegistered`, `PasskeySignInOutcome`,
+`PasskeySignedIn`, `PasskeyMfaRequired`, `PasskeyListOutcome`,
+`PasskeysLoaded`, `PasskeyRenameOutcome`, `PasskeyRenamed`,
+`PasskeyDeleteOutcome`, `PasskeyDeleted`, `PasskeyRefusal`, `PasskeyRejected`,
+`PasskeyAlreadyRegistered`, `PasskeyLastCredential`, `PasskeyNotFound`,
+`PasskeyNameRequired`, `PasskeysUnavailable`, `PasskeyRateLimited`,
+`PasskeyCancelled`, `PasskeyPaths`.
 
 `@webbpulse/auth/react`: `AuthProvider`, `useAuth`, `useAuthState`,
 `useAuthClient`, `SessionProvider`, `useSession`, `useSessionState`,
