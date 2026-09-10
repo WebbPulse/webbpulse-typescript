@@ -59,6 +59,24 @@ import {
   type TotpDisableOutcome,
   type TotpEnrolmentOutcome,
 } from './mfa.js';
+import {
+  classifyPasskeyError,
+  credentialToJSON,
+  parsePasskey,
+  parsePasskeyChallenge,
+  parsePasskeys,
+  toCreationOptions,
+  toRequestOptions,
+  type PasskeyChallenge,
+  type PasskeyDeleteOutcome,
+  type PasskeyListOutcome,
+  type PasskeyPaths,
+  type PasskeyRefusal,
+  type PasskeyRegistrationOutcome,
+  type PasskeyRenameOutcome,
+  type PasskeySignInOutcome,
+  type WebAuthnAdapter,
+} from './passkeys.js';
 
 /** Status of the session, as a single field. */
 export type AuthStatus =
@@ -142,22 +160,11 @@ export interface AuthTokenProvider {
   refresh(): Promise<string | null>;
 }
 
-/**
- * The WebAuthn surface this client uses.
- *
- * Typed structurally rather than against the DOM `CredentialsContainer`, so the
- * package type checks in a Node test run with no `navigator` and a test can
- * supply a stub without constructing a real credential.
- */
-export interface WebAuthnAdapter {
-  /** Wraps `navigator.credentials.create`, returning a serialisable payload. */
-  create(options: unknown): Promise<unknown>;
-  /** Wraps `navigator.credentials.get`, returning a serialisable payload. */
-  get(options: unknown): Promise<unknown>;
-}
+export type { WebAuthnAdapter } from './passkeys.js';
 
 /** Where the identity routes live, relative to the base URL. */
-export interface AuthPaths extends EmailFlowPaths, MfaPaths, OAuthPaths {
+export interface AuthPaths
+  extends EmailFlowPaths, MfaPaths, OAuthPaths, PasskeyPaths {
   /** Defaults to `/api/auth/login`. */
   login?: string;
   /** Defaults to `/api/auth/login/totp`. */
@@ -170,14 +177,6 @@ export interface AuthPaths extends EmailFlowPaths, MfaPaths, OAuthPaths {
   logoutAll?: string;
   /** Defaults to `/api/auth/register`. */
   register?: string;
-  /** Defaults to `/api/auth/webauthn/register/options`. */
-  passkeyRegisterOptions?: string;
-  /** Defaults to `/api/auth/webauthn/register/verify`. */
-  passkeyRegisterVerify?: string;
-  /** Defaults to `/api/auth/login/webauthn/options`. */
-  passkeyLoginOptions?: string;
-  /** Defaults to `/api/auth/login/webauthn/verify`. */
-  passkeyLoginVerify?: string;
 }
 
 const DEFAULT_PATHS: Required<AuthPaths> = {
@@ -187,10 +186,11 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   logout: '/api/auth/logout',
   logoutAll: '/api/auth/logout-all',
   register: '/api/auth/register',
-  passkeyRegisterOptions: '/api/auth/webauthn/register/options',
-  passkeyRegisterVerify: '/api/auth/webauthn/register/verify',
-  passkeyLoginOptions: '/api/auth/login/webauthn/options',
-  passkeyLoginVerify: '/api/auth/login/webauthn/verify',
+  passkeyRegisterOptions: '/api/auth/passkeys/register/options',
+  passkeyRegisterVerify: '/api/auth/passkeys/register/verify',
+  passkeyLoginOptions: '/api/auth/login/passkey/options',
+  passkeyLoginVerify: '/api/auth/login/passkey/verify',
+  passkeys: '/api/auth/passkeys',
   oauthStart: '/api/auth/oauth',
   oauthLinks: '/api/auth/oauth/links',
   verifyEmail: '/api/auth/verify-email',
@@ -361,6 +361,85 @@ const UNLINK_REASONS: ReadonlySet<
   'not-linked',
   'provider-unavailable',
 ] as const);
+
+/**
+ * The refusals each passkey method models, on the same rule again.
+ *
+ * `already-registered` appears only on enrolment, `last-credential` only on the
+ * delete, and `name-required` only on the rename. `cancelled` and
+ * `rate-limited` are on the two ceremony methods alone: they are the only ones
+ * that open a browser prompt and the only ones section 5.1's limits apply to.
+ * `unavailable` is on all five, because a deployment with passkeys switched off
+ * refuses every one of the seven routes.
+ */
+const REGISTER_REASONS: ReadonlySet<
+  | 'rejected'
+  | 'already-registered'
+  | 'unavailable'
+  | 'rate-limited'
+  | 'cancelled'
+> = new Set([
+  'rejected',
+  'already-registered',
+  'unavailable',
+  'rate-limited',
+  'cancelled',
+] as const);
+
+const SIGN_IN_REASONS: ReadonlySet<
+  'rejected' | 'unavailable' | 'rate-limited' | 'cancelled'
+> = new Set(['rejected', 'unavailable', 'rate-limited', 'cancelled'] as const);
+
+const PASSKEY_LIST_REASONS: ReadonlySet<'unavailable'> = new Set([
+  'unavailable',
+] as const);
+
+const RENAME_REASONS: ReadonlySet<
+  'not-found' | 'name-required' | 'unavailable'
+> = new Set(['not-found', 'name-required', 'unavailable'] as const);
+
+const DELETE_REASONS: ReadonlySet<
+  'not-found' | 'last-credential' | 'unavailable'
+> = new Set(['not-found', 'last-credential', 'unavailable'] as const);
+
+/**
+ * WebAuthn creation options for the browser, preferring the browser's own
+ * parser.
+ *
+ * `PublicKeyCredential.parseCreationOptionsFromJSON` is the specification's own
+ * conversion and is used wherever it exists, because it will keep pace with
+ * fields added after this version was written. {@link toCreationOptions} is the
+ * fallback, and it converts exactly the three fields the specification declares
+ * as `BufferSource`.
+ */
+function parseCreationOptions(json: Record<string, unknown>): unknown {
+  const ctor = (
+    globalThis as {
+      PublicKeyCredential?: {
+        parseCreationOptionsFromJSON?: (value: unknown) => unknown;
+      };
+    }
+  ).PublicKeyCredential;
+  if (typeof ctor?.parseCreationOptionsFromJSON === 'function') {
+    return ctor.parseCreationOptionsFromJSON(json);
+  }
+  return toCreationOptions(json);
+}
+
+/** @see {@link parseCreationOptions} */
+function parseRequestOptions(json: Record<string, unknown>): unknown {
+  const ctor = (
+    globalThis as {
+      PublicKeyCredential?: {
+        parseRequestOptionsFromJSON?: (value: unknown) => unknown;
+      };
+    }
+  ).PublicKeyCredential;
+  if (typeof ctor?.parseRequestOptionsFromJSON === 'function') {
+    return ctor.parseRequestOptionsFromJSON(json);
+  }
+  return toRequestOptions(json);
+}
 
 /** The body the two routes that issue recovery codes answer with. */
 interface RecoveryCodesBody {
@@ -692,7 +771,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * Resolves to `{ mfaRequired: true, ticket, factors }` when the account needs
    * a second factor, which is a successful outcome and not an error: the first
    * leg returns no access token by design (2.6). Call `completeTotp` or
-   * `completePasskeyMfa` with the ticket to finish. A failed login rejects, so
+   * `completeTotp` with the ticket to finish. A failed login rejects, so
    * the form that triggered it can render the reason.
    */
   async login(credentials: PasswordCredentials): Promise<LoginOutcome<TUser>> {
@@ -717,70 +796,274 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Passwordless passkey login, with discoverable credentials.
+   * Enrols a new passkey on the signed-in account.
    *
-   * Two legs: fetch the options, then hand the authenticator's assertion back.
-   * The `allowCredentials` list is empty on the server side, so the
-   * authenticator offers whatever it holds for the relying party.
-   */
-  async loginWithPasskey(): Promise<LoginOutcome<TUser>> {
-    const webAuthn = this.requireWebAuthn();
-    const options = await this.client.post<unknown>(
-      this.paths.passkeyLoginOptions,
-      {}
-    );
-    const assertion = await webAuthn.get(options.data);
-    return this.runTokenCall(this.paths.passkeyLoginVerify, { assertion });
-  }
-
-  /**
-   * Completes an MFA login with a passkey.
+   * Both legs are authorized routes, so both carry the bearer token, which is
+   * why this rejects rather than prompting when no session is held. The two
+   * legs are one method because the challenge between them is single use and
+   * spent by one attempt whatever the outcome: holding the options across a
+   * user interaction is how a ceremony ends up half finished with the row
+   * already consumed. A failed attempt starts again from the options leg, which
+   * is what calling this again does.
    *
-   * A passkey with user verification is two factors in one gesture and
-   * satisfies the requirement on its own, so this is also the step up path when
-   * the first leg listed `webauthn` among its factors.
-   */
-  async completePasskeyMfa(input: {
-    ticket: string;
-  }): Promise<LoginOutcome<TUser>> {
-    const webAuthn = this.requireWebAuthn();
-    const options = await this.client.post<unknown>(
-      this.paths.passkeyLoginOptions,
-      { mfa_ticket: input.ticket }
-    );
-    const assertion = await webAuthn.get(options.data);
-    return this.runTokenCall(this.paths.passkeyLoginVerify, {
-      mfa_ticket: input.ticket,
-      assertion,
-    });
-  }
-
-  /**
-   * Adds a passkey to the signed in account. Requires a session.
+   * `name` is the label the settings page will show. The server trims it,
+   * caps it at 64 characters, and substitutes `Passkey` when it is empty, so
+   * omitting it is fine.
    *
-   * Both legs are authorized routes, so they carry the bearer token, which is
-   * why this rejects rather than prompting when no session is held.
+   * @example
+   * ```ts
+   * const outcome = await auth.registerPasskey({ name: 'MacBook Touch ID' });
+   * if (outcome.ok) {
+   *   setPasskeys((current) => [...current, outcome.passkey]);
+   * } else if (outcome.reason !== 'cancelled') {
+   *   setBanner(outcome.message);
+   * }
+   * ```
    */
-  async registerPasskey(): Promise<unknown> {
-    const webAuthn = this.requireWebAuthn();
+  async registerPasskey(
+    input: { name?: string } = {}
+  ): Promise<PasskeyRegistrationOutcome> {
     if (this.accessToken === null) {
       throw new AuthSessionEndedError({
         message: 'registerPasskey requires a signed in session.',
         reason: 'no-session',
       });
     }
-    const options = await this.client.post<unknown>(
-      this.paths.passkeyRegisterOptions,
-      {},
-      { headers: this.authorizationHeader() }
-    );
-    const attestation = await webAuthn.create(options.data);
-    const verified = await this.client.post<unknown>(
-      this.paths.passkeyRegisterVerify,
-      { attestation },
-      { headers: this.authorizationHeader() }
-    );
-    return verified.data;
+    try {
+      const webAuthn = this.requireWebAuthn();
+      const challenge = await this.passkeyChallenge(
+        this.paths.passkeyRegisterOptions,
+        {},
+        { headers: this.authorizationHeader() }
+      );
+      const created = await webAuthn.create({
+        publicKey: parseCreationOptions(challenge.publicKey),
+      });
+      const body: Record<string, unknown> = {
+        challenge_id: challenge.challengeId,
+        credential: credentialToJSON(created),
+      };
+      if (input.name !== undefined) {
+        body['name'] = input.name;
+      }
+      const response = await this.client.post<unknown>(
+        this.paths.passkeyRegisterVerify,
+        body,
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      const record = (response.data as { passkey?: unknown } | null)?.passkey;
+      const passkey = parsePasskey(record);
+      if (passkey === null) {
+        throw new Error(
+          'The passkey registration response carried no passkey.'
+        );
+      }
+      return { ok: true, passkey };
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, REGISTER_REASONS);
+    }
+  }
+
+  /**
+   * Signs in with a passkey.
+   *
+   * Two legs again, and one method for the same reason. Omit `email` for the
+   * ordinary discoverable flow: the server answers with no `allowCredentials`
+   * and the authenticator offers whatever it holds for the relying party. Pass
+   * one when the sign-in form already collected an address, which produces an
+   * `allowCredentials` list so the browser prompts for the right credential.
+   *
+   * **An unknown address is not an error and is not distinguishable from a
+   * known one.** The server answers any address with a challenge and an empty
+   * list, byte-identical to a genuine discoverable request, so this route
+   * cannot be used to find out which addresses have accounts.
+   *
+   * Resolves to `{ ok: true, kind: 'mfa-required', ticket }` when the
+   * authenticator reported no user verification and the account has TOTP
+   * enrolled. Finish it with `completeTotp({ ticket, code })`, the same method
+   * the password path uses. A passkey that verified the user is two factors in
+   * one gesture and signs in outright.
+   *
+   * `mediation: 'conditional'` puts the passkey in the browser's autofill
+   * dropdown instead of a modal prompt. Check
+   * {@link conditionalMediationAvailable} first, and pass an `AbortSignal` so
+   * the pending ceremony can be torn down if the user submits a password
+   * instead.
+   *
+   * @example
+   * ```ts
+   * const outcome = await auth.signInWithPasskey();
+   * if (!outcome.ok) {
+   *   if (outcome.reason !== 'cancelled') setBanner(outcome.message);
+   * } else if (outcome.kind === 'mfa-required') {
+   *   setPendingTicket(outcome.ticket);
+   * } else {
+   *   navigate('/');
+   * }
+   * ```
+   */
+  async signInWithPasskey(
+    input: {
+      email?: string;
+      mediation?: 'silent' | 'optional' | 'conditional' | 'required';
+      signal?: AbortSignal;
+    } = {}
+  ): Promise<PasskeySignInOutcome> {
+    try {
+      const webAuthn = this.requireWebAuthn();
+      const challenge = await this.passkeyChallenge(
+        this.paths.passkeyLoginOptions,
+        input.email === undefined ? {} : { email: input.email }
+      );
+      const request: Record<string, unknown> = {
+        publicKey: parseRequestOptions(challenge.publicKey),
+      };
+      if (input.mediation !== undefined) {
+        request['mediation'] = input.mediation;
+      }
+      if (input.signal !== undefined) {
+        request['signal'] = input.signal;
+      }
+      const assertion = await webAuthn.get(request);
+      const outcome = await this.runTokenCall(this.paths.passkeyLoginVerify, {
+        challenge_id: challenge.challengeId,
+        credential: credentialToJSON(assertion),
+      });
+      return outcome.mfaRequired
+        ? {
+            ok: true,
+            kind: 'mfa-required',
+            ticket: outcome.ticket,
+            factors: outcome.factors,
+          }
+        : {
+            ok: true,
+            kind: 'signed-in',
+            user: outcome.user,
+            expiresIn: outcome.expiresIn,
+          };
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, SIGN_IN_REASONS);
+    }
+  }
+
+  /**
+   * Every passkey on the signed-in account.
+   *
+   * The public key is not in the response. It discloses nothing, being public,
+   * but a settings page has no use for it and a body carrying key material
+   * invites somebody to start comparing it to something.
+   */
+  async listPasskeys(): Promise<PasskeyListOutcome> {
+    try {
+      const response = await this.client.get<unknown>(this.paths.passkeys, {
+        headers: this.authorizationHeader(),
+      });
+      return { ok: true, passkeys: parsePasskeys(response.data) };
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, PASSKEY_LIST_REASONS);
+    }
+  }
+
+  /**
+   * Relabels one of the caller's own passkeys.
+   *
+   * The server trims the name, caps it at 64 characters and refuses an empty
+   * one with `name-required`, which is a form-field error rather than a thrown
+   * failure and so is an outcome here.
+   */
+  async renamePasskey(
+    credentialId: string,
+    name: string
+  ): Promise<PasskeyRenameOutcome> {
+    try {
+      const response = await this.client.patch<unknown>(
+        this.passkeyItemPath(credentialId),
+        { name },
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      const passkey = parsePasskey(
+        (response.data as { passkey?: unknown } | null)?.passkey
+      );
+      if (passkey === null) {
+        throw new Error('The passkey rename response carried no passkey.');
+      }
+      return { ok: true, passkey };
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, RENAME_REASONS);
+    }
+  }
+
+  /**
+   * Removes one of the caller's own passkeys.
+   *
+   * The refusal that matters is `last-credential`: this is the only passkey on
+   * an account with no password, so removing it would strand the user outside
+   * their own account with no support path back. It is a named outcome rather
+   * than a thrown 409 because its remedy is a specific instruction, "set a
+   * password first, then remove this passkey", and a generic failure toast does
+   * not say that. It applies only to the last one; with two enrolled, either
+   * can go.
+   */
+  async deletePasskey(credentialId: string): Promise<PasskeyDeleteOutcome> {
+    try {
+      await this.client.delete(this.passkeyItemPath(credentialId), {
+        retries: 0,
+        headers: this.authorizationHeader(),
+      });
+      return { ok: true };
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, DELETE_REASONS);
+    }
+  }
+
+  /** `<collection>/<credential id>`, the path the rename and the delete share. */
+  private passkeyItemPath(credentialId: string): string {
+    return `${this.paths.passkeys}/${encodeURIComponent(credentialId)}`;
+  }
+
+  /** Posts an options leg and reads the challenge off it. */
+  private async passkeyChallenge(
+    path: string,
+    body: Record<string, unknown>,
+    init: { headers?: Record<string, string> } = {}
+  ): Promise<PasskeyChallenge> {
+    // No retry: an options call writes a challenge row and burns a rate limit
+    // bucket, so a replayed one costs an attempt for nothing.
+    const response = await this.client.post<unknown>(path, body, {
+      retries: 0,
+      ...init,
+    });
+    return parsePasskeyChallenge(response.data);
+  }
+
+  /**
+   * Turns a thrown passkey error into a modelled refusal, or rethrows.
+   *
+   * The same shape as `settleOAuthRefusal`, and for the same reason: a refusal
+   * is not a session ending, so `status` goes back to what the token says
+   * rather than to `anonymous`, and a 401 the client could not repair is left
+   * to throw because that one **is** the session ending.
+   */
+  private settlePasskeyRefusal<TReason extends PasskeyRefusal['reason']>(
+    error: unknown,
+    reasons: ReadonlySet<TReason>
+  ): Extract<PasskeyRefusal, { reason: TReason }> {
+    const refused = classifyPasskeyError(error, reasons);
+    this.setState({
+      status: this.accessToken === null ? 'anonymous' : 'authenticated',
+      hasAccessToken: this.accessToken !== null,
+      error:
+        refused === null
+          ? error instanceof Error
+            ? error
+            : new Error(String(error))
+          : null,
+    });
+    if (refused === null) {
+      throw error;
+    }
+    return refused;
   }
 
   /**
@@ -1405,26 +1688,30 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       : { authorization: `Bearer ${this.accessToken}` };
   }
 
+  /**
+   * The WebAuthn adapter, defaulting to `navigator.credentials`.
+   *
+   * The adapter receives the whole `CredentialCreationOptions` wrapper rather
+   * than the bare `publicKey` document, because a conditional sign-in also
+   * needs `mediation` and `signal` in that wrapper and there is nowhere else to
+   * put them. That makes `navigator.credentials` itself a valid adapter, which
+   * is why the default is a passthrough rather than a rewrap.
+   */
   private requireWebAuthn(): WebAuthnAdapter {
     if (this.options.webAuthn !== undefined) {
       return this.options.webAuthn;
     }
     const credentials = (
       globalThis as { navigator?: { credentials?: unknown } }
-    ).navigator?.credentials as
-      | {
-          create(options: unknown): Promise<unknown>;
-          get(options: unknown): Promise<unknown>;
-        }
-      | undefined;
+    ).navigator?.credentials as WebAuthnAdapter | undefined;
     if (credentials === undefined) {
       throw new Error(
         'WebAuthn is not available in this environment. Pass a webAuthn adapter to createAuthClient.'
       );
     }
     return {
-      create: (options: unknown) => credentials.create({ publicKey: options }),
-      get: (options: unknown) => credentials.get({ publicKey: options }),
+      create: (options: unknown) => credentials.create(options),
+      get: (options: unknown) => credentials.get(options),
     };
   }
 

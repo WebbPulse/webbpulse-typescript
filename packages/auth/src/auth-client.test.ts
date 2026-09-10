@@ -702,27 +702,27 @@ describe('AuthClient.startOAuth', () => {
 });
 
 describe('AuthClient passkeys', () => {
-  it('logs in with a discoverable credential', async () => {
+  it('signs in with a discoverable credential', async () => {
     const webAuthn = {
       create: vi.fn(),
-      get: vi.fn(() => Promise.resolve({ id: 'cred_1' })),
+      get: vi.fn(() => Promise.resolve({ id: 'cred_1', type: 'public-key' })),
     };
     const fetchMock = routedFetch({
-      '/api/auth/login/webauthn/options': () =>
-        jsonResponse({ challenge: 'c1', allowCredentials: [] }),
-      '/api/auth/login/webauthn/verify': () =>
+      '/api/auth/login/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { challenge: 'Y2hhbA', allowCredentials: [] },
+        }),
+      '/api/auth/login/passkey/verify': () =>
         jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE }),
     });
     const auth = authWith(fetchMock, { webAuthn });
 
-    const outcome = await auth.loginWithPasskey();
+    const outcome = await auth.signInWithPasskey();
 
-    expect(webAuthn.get).toHaveBeenCalledWith({
-      challenge: 'c1',
-      allowCredentials: [],
-    });
     expect(outcome).toEqual({
-      mfaRequired: false,
+      ok: true,
+      kind: 'signed-in',
       user: ALICE,
       expiresIn: 600,
     });
@@ -731,23 +731,33 @@ describe('AuthClient passkeys', () => {
 
   it('registers a passkey against the current session', async () => {
     const webAuthn = {
-      create: vi.fn(() => Promise.resolve({ id: 'cred_1' })),
+      create: vi.fn(() =>
+        Promise.resolve({ id: 'cred_1', type: 'public-key' })
+      ),
       get: vi.fn(),
     };
     const fetchMock = routedFetch({
       '/api/auth/login': () =>
         jsonResponse({ access_token: 'a1', expires_in: 600 }),
-      '/api/auth/webauthn/register/options': () =>
-        jsonResponse({ challenge: 'c1' }),
-      '/api/auth/webauthn/register/verify': () => jsonResponse({ ok: true }),
+      '/api/auth/passkeys/register/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { challenge: 'Y2hhbA' },
+        }),
+      '/api/auth/passkeys/register/verify': () =>
+        jsonResponse({
+          registered: true,
+          passkey: { credential_id: 'cred_1', name: 'Laptop' },
+        }),
     });
     const auth = authWith(fetchMock, { webAuthn });
 
     await auth.login({ email: 'a@b.test', password: 'pw' });
-    await expect(auth.registerPasskey()).resolves.toEqual({ ok: true });
+    const outcome = await auth.registerPasskey({ name: 'Laptop' });
 
+    expect(outcome.ok).toBe(true);
     const optionsCall = fetchMock.mock.calls.find((call) =>
-      String(call[0]).includes('/webauthn/register/options')
+      String(call[0]).includes('/passkeys/register/options')
     );
     const headers = new Headers((optionsCall?.[1] as RequestInit).headers);
     expect(headers.get('authorization')).toBe('Bearer a1');
@@ -763,28 +773,35 @@ describe('AuthClient passkeys', () => {
     );
   });
 
-  it('completes an MFA login with a passkey', async () => {
+  it('reports an MFA challenge from a passkey with no user verification', async () => {
     const webAuthn = {
       create: vi.fn(),
-      get: vi.fn(() => Promise.resolve({ id: 'cred_1' })),
+      get: vi.fn(() => Promise.resolve({ id: 'cred_1', type: 'public-key' })),
     };
     const fetchMock = routedFetch({
-      '/api/auth/login/webauthn/options': () =>
-        jsonResponse({ challenge: 'c1' }),
-      '/api/auth/login/webauthn/verify': () =>
-        jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE }),
+      '/api/auth/login/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { challenge: 'Y2hhbA' },
+        }),
+      '/api/auth/login/passkey/verify': () =>
+        jsonResponse({
+          mfa_required: true,
+          mfa_ticket: 'tkt',
+          factors: ['totp'],
+        }),
     });
     const auth = authWith(fetchMock, { webAuthn });
 
-    await auth.completePasskeyMfa({ ticket: 'tkt' });
-    expect(auth.getAccessToken()).toBe('a1');
+    const outcome = await auth.signInWithPasskey();
 
-    const verifyCall = fetchMock.mock.calls.find((call) =>
-      String(call[0]).includes('/webauthn/verify')
-    );
-    expect(
-      JSON.parse((verifyCall?.[1] as RequestInit).body as string)
-    ).toMatchObject({ mfa_ticket: 'tkt' });
+    expect(outcome).toEqual({
+      ok: true,
+      kind: 'mfa-required',
+      ticket: 'tkt',
+      factors: ['totp'],
+    });
+    expect(auth.getAccessToken()).toBeNull();
   });
 });
 

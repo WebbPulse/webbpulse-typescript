@@ -83,6 +83,38 @@ import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
  *   records which, though a user sees one sentence for all of them.
  * - `REGISTRATION_DISABLED`: a first-time provider identity arriving at a
  *   product that is not creating accounts.
+ *
+ * The last group is emitted by the M5 passkey routes, and is added on the same
+ * rule again. Note that `PASSKEY_NOT_RECOGNISED` above is 7.3's code and is a
+ * different thing from these: it is what the standard names for a credential
+ * the server does not know, while the seven routes actually emit
+ * `PASSKEY_REJECTED` for that case along with four others.
+ *
+ * - `PASSKEY_REJECTED`: the one refusal every failed ceremony carries. A
+ *   challenge that does not exist, one that expired, one minted for another
+ *   account, an assertion that does not verify, a credential the server does
+ *   not know and a credential whose user is gone are deliberately one code with
+ *   one message, so neither login route becomes an oracle for which credentials
+ *   or accounts exist.
+ * - `PASSKEY_ALREADY_REGISTERED`: the authenticator already holds a credential
+ *   for some account. One answer whether it is this account or another, for the
+ *   same reason: telling them apart would let somebody test which accounts an
+ *   authenticator is enrolled on.
+ * - `LAST_CREDENTIAL`: a delete that would leave an account with no password
+ *   and no passkey. The only passkey refusal whose remedy is a specific
+ *   instruction, "set a password first", which is why it is a named outcome
+ *   rather than a thrown 409.
+ * - `PASSKEY_NOT_FOUND`, `PASSKEY_NAME_REQUIRED`: no such credential on this
+ *   account, and a rename with an empty name.
+ * - `PASSKEY_CHALLENGE_INVALID`: the challenge row was missing, spent or past
+ *   its five minute deadline. Reached mostly by a stale tab, and the remedy is
+ *   to start the ceremony again.
+ * - `PASSKEY_LOGIN_DISABLED`, `PASSKEYS_DISABLED`: passwordless sign-in is off
+ *   for this deployment, and passkeys are off altogether. Both are deployment
+ *   configuration rather than user error, and a page should hide the control
+ *   rather than render a failure.
+ * - `CREDENTIAL_REQUIRED`: a verify leg posted with no credential in the body.
+ *   A client bug rather than a user one, named so a log line can say so.
  */
 export const AUTH_ERROR_CODES = [
   'MFA_REQUIRED',
@@ -124,6 +156,15 @@ export const AUTH_ERROR_CODES = [
   'OAUTH_EMAIL_MISSING',
   'OAUTH_ACCOUNT_MISSING',
   'REGISTRATION_DISABLED',
+  'PASSKEY_REJECTED',
+  'PASSKEY_ALREADY_REGISTERED',
+  'PASSKEY_NOT_FOUND',
+  'PASSKEY_NAME_REQUIRED',
+  'PASSKEY_CHALLENGE_INVALID',
+  'PASSKEY_LOGIN_DISABLED',
+  'PASSKEYS_DISABLED',
+  'LAST_CREDENTIAL',
+  'CREDENTIAL_REQUIRED',
 ] as const;
 
 /** One of the codes in {@link AUTH_ERROR_CODES}. */
