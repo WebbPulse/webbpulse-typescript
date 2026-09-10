@@ -1,7 +1,6 @@
 import { createApiClient, type ApiClient } from '@webbpulse/api-client';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SessionManager, type SessionState } from './session.js';
-import { MemoryTokenStorage } from './storage.js';
 
 interface User {
   id: number;
@@ -43,28 +42,6 @@ function clientWith(results: (Response | Error)[]): {
 }
 
 describe('SessionManager construction', () => {
-  it('requires a token key in token mode', () => {
-    // The two applications use different keys, so a default would silently
-    // sign one of them out on the deploy that adopts this package.
-    expect(
-      () =>
-        new SessionManager({
-          client: clientWith([]).client,
-          mode: 'token',
-        })
-    ).toThrow(/tokenStorageKey is required/);
-  });
-
-  it('does not require a token key in cookie mode', () => {
-    expect(
-      () =>
-        new SessionManager({
-          client: clientWith([]).client,
-          mode: 'cookie',
-        })
-    ).not.toThrow();
-  });
-
   it('starts in the unknown state', () => {
     const manager = new SessionManager({
       client: clientWith([]).client,
@@ -124,21 +101,6 @@ describe('SessionManager.refresh', () => {
     });
   });
 
-  it('clears a stale token on a 401', async () => {
-    const storage = new MemoryTokenStorage();
-    storage.setItem('access_token', 'expired');
-    const { client } = clientWith([jsonResponse({ detail: 'nope' }, 401)]);
-    const manager = new SessionManager<User>({
-      client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: storage,
-    });
-
-    await manager.refresh();
-    expect(manager.getToken()).toBeNull();
-  });
-
   it('records a non 401 failure as an error', async () => {
     const { client } = clientWith([jsonResponse({ detail: 'boom' }, 500)]);
     const manager = new SessionManager<User>({ client, mode: 'cookie' });
@@ -147,23 +109,6 @@ describe('SessionManager.refresh', () => {
     const state = manager.getState();
     expect(state.status).toBe('anonymous');
     expect(state.error).toBeInstanceOf(Error);
-  });
-
-  it('keeps a token that a server error did not invalidate', async () => {
-    // A 500 says nothing about the session, so discarding the token would sign
-    // the user out over an unrelated backend fault.
-    const storage = new MemoryTokenStorage();
-    storage.setItem('access_token', 'still-good');
-    const { client } = clientWith([jsonResponse({ detail: 'boom' }, 500)]);
-    const manager = new SessionManager<User>({
-      client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: storage,
-    });
-
-    await manager.refresh();
-    expect(manager.getToken()).toBe('still-good');
   });
 
   it('de-duplicates concurrent refreshes into one request', async () => {
@@ -193,35 +138,13 @@ describe('SessionManager.refresh', () => {
 });
 
 describe('SessionManager.login', () => {
-  it('stores the token and resolves the user in token mode', async () => {
-    const storage = new MemoryTokenStorage();
-    const { client } = clientWith([
-      jsonResponse({ access_token: 'tok', token_type: 'bearer' }),
-      jsonResponse(ALICE),
-    ]);
-    const manager = new SessionManager<User, { username: string }>({
-      client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: storage,
-    });
-
-    const result = await manager.login({ username: 'alice' });
-
-    expect(manager.getToken()).toBe('tok');
-    expect(result.user).toEqual(ALICE);
-    expect(manager.getState().status).toBe('authenticated');
-  });
-
   it('uses a user embedded in the login response without a second call', async () => {
     const { client, fetchMock } = clientWith([
       jsonResponse({ access_token: 'tok', user: ALICE }),
     ]);
     const manager = new SessionManager<User, { username: string }>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: new MemoryTokenStorage(),
+      mode: 'cookie',
     });
 
     await manager.login({ username: 'alice' });
@@ -236,9 +159,7 @@ describe('SessionManager.login', () => {
     ]);
     const manager = new SessionManager<User, { username: string }>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: new MemoryTokenStorage(),
+      mode: 'cookie',
       encodeCredentials: (credentials) =>
         new URLSearchParams({ username: credentials.username }),
     });
@@ -254,9 +175,7 @@ describe('SessionManager.login', () => {
     ]);
     const manager = new SessionManager<User, { username: string }>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'authToken',
-      tokenStorage: new MemoryTokenStorage(),
+      mode: 'cookie',
       loginPath: '/admin/login',
     });
 
@@ -266,15 +185,15 @@ describe('SessionManager.login', () => {
     );
   });
 
-  it('stays anonymous when the response carries neither token nor user', async () => {
+  it('stays anonymous when the login is not complete', async () => {
     // A pending second factor is the usual reason. Claiming a session here
     // would let the UI past a gate the API has not opened.
     const { client } = clientWith([jsonResponse({ requires_2fa: true })]);
     const manager = new SessionManager<User, { username: string }>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: new MemoryTokenStorage(),
+      mode: 'cookie',
+      isLoginComplete: (response) =>
+        (response as { requires_2fa?: boolean }).requires_2fa !== true,
     });
 
     const result = await manager.login({ username: 'alice' });
@@ -289,9 +208,7 @@ describe('SessionManager.login', () => {
     ]);
     const manager = new SessionManager<User, { username: string }>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: new MemoryTokenStorage(),
+      mode: 'cookie',
     });
 
     await expect(manager.login({ username: 'alice' })).rejects.toThrow(
@@ -303,26 +220,17 @@ describe('SessionManager.login', () => {
 
 describe('SessionManager.logout', () => {
   let manager: SessionManager<User, unknown>;
-  let storage: MemoryTokenStorage;
 
-  beforeEach(() => {
-    storage = new MemoryTokenStorage();
-    storage.setItem('access_token', 'tok');
-  });
-
-  it('clears the token and the state', async () => {
+  it('clears the state', async () => {
     const { client } = clientWith([new Response(null, { status: 204 })]);
     manager = new SessionManager<User, unknown>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: storage,
+      mode: 'cookie',
     });
     manager.setUser(ALICE);
 
     await manager.logout();
 
-    expect(manager.getToken()).toBeNull();
     expect(manager.getState()).toEqual({
       status: 'anonymous',
       user: null,
@@ -336,14 +244,11 @@ describe('SessionManager.logout', () => {
     const { client } = clientWith([jsonResponse({ detail: 'boom' }, 500)]);
     manager = new SessionManager<User, unknown>({
       client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: storage,
+      mode: 'cookie',
     });
     manager.setUser(ALICE);
 
     await expect(manager.logout()).resolves.toBeUndefined();
-    expect(manager.getToken()).toBeNull();
     expect(manager.getState().status).toBe('anonymous');
   });
 });
@@ -388,32 +293,7 @@ describe('SessionManager subscriptions', () => {
   });
 });
 
-describe('SessionManager token rotation', () => {
-  it('stores a token the API rotated in mid session', () => {
-    const storage = new MemoryTokenStorage();
-    const manager = new SessionManager<User>({
-      client: clientWith([]).client,
-      mode: 'token',
-      tokenStorageKey: 'access_token',
-      tokenStorage: storage,
-    });
-
-    manager.setToken('rotated');
-    expect(manager.getToken()).toBe('rotated');
-  });
-
-  it('is a no-op in cookie mode', () => {
-    const manager = new SessionManager<User>({
-      client: clientWith([]).client,
-      mode: 'cookie',
-    });
-
-    expect(() => {
-      manager.setToken('ignored');
-    }).not.toThrow();
-    expect(manager.getToken()).toBeNull();
-  });
-
+describe('SessionManager setUser', () => {
   it('setUser(null) returns the session to anonymous', () => {
     const manager = new SessionManager<User>({
       client: clientWith([]).client,

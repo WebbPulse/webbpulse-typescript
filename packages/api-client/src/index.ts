@@ -3,6 +3,7 @@ export {
   createApiClient,
   REQUEST_ID_HEADER,
   type ApiClientOptions,
+  type AuthTokenProvider,
   type ApiResponse,
   type RequestOptions,
 } from './client.js';

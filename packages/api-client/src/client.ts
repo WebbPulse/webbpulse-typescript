@@ -10,6 +10,32 @@ const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 /** Statuses worth a second attempt. 5xx and 429, never a 4xx the caller owns. */
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
+/**
+ * The part of an auth client this package needs, and no more.
+ *
+ * `@webbpulse/auth` implements it. Declaring the contract here rather than
+ * importing the class keeps the dependency one way: auth depends on api-client,
+ * never the reverse, so a consumer wanting only the transport pulls in nothing
+ * of the session machinery.
+ *
+ * `getAccessToken` is synchronous for the same reason `getAuthToken` is: it is
+ * read on every request and an await there would put a microtask on the hot
+ * path. `refresh` is the async one, and it is only reached on a 401.
+ */
+export interface AuthTokenProvider {
+  /** The access token held in memory, or null when there is no session. */
+  getAccessToken(): string | null;
+  /**
+   * Refreshes the access token, resolving to the new one or to null when the
+   * session is gone.
+   *
+   * Implementations must share one in-flight request between concurrent
+   * callers. Ten parallel 401s refreshing ten times would look like refresh
+   * token reuse to the server, which revokes the whole family.
+   */
+  refresh(): Promise<string | null>;
+}
+
 /** Per request options. */
 export interface RequestOptions {
   /** Query parameters. Arrays repeat the key. */
@@ -33,6 +59,15 @@ export interface RequestOptions {
   requestId?: string;
   /** Skips JSON parsing and resolves the raw Response. */
   raw?: boolean;
+  /**
+   * Turns off the refresh-and-replay on 401 for this call.
+   *
+   * The identity routes set it: `/api/auth/refresh` cannot refresh itself, and
+   * `/api/auth/login` answering 401 means the password was wrong, not that a
+   * token expired. Retrying either would be at best pointless and at worst a
+   * second rotation that the server reads as reuse.
+   */
+  skipAuthRetry?: boolean;
 }
 
 /** A response, plus the metadata a caller needs for logging and auth. */
@@ -78,6 +113,25 @@ export interface ApiClientOptions {
    * and read it synchronously.
    */
   getAuthToken?: () => string | null | undefined;
+  /**
+   * The auth client this client asks for a token, and for a refresh on a 401.
+   *
+   * Supplying it turns on the retry-once behaviour of section 7.2 of the
+   * identity standard: a 401 triggers a single refresh, shared with every other
+   * concurrent 401 through the auth client's own in-flight promise, and a
+   * single replay of the original request. A second 401 is thrown. The retry
+   * never recurses, which is the classic interceptor bug that turns one expired
+   * token into an infinite loop.
+   *
+   * The type is the narrow {@link AuthTokenProvider} rather than the concrete
+   * class, so this package keeps no dependency on `@webbpulse/auth` and the
+   * dependency edge stays one way.
+   *
+   * Takes precedence over `getAuthToken` when both are set, which is not a
+   * configuration worth writing on purpose: the auth client is the one holding
+   * the token that the refresh replaces.
+   */
+  auth?: AuthTokenProvider;
   /** Called with a token the API rotated in via a response header. */
   onTokenRefresh?: (token: string) => void;
   /** Called for every 401, so the auth layer can clear its session. */
@@ -210,7 +264,68 @@ export class ApiClient {
     });
   }
 
+  /**
+   * Sends a request, refreshing and replaying once on a 401.
+   *
+   * The 401 handling is section 7.2 of the identity standard, and the shape is
+   * chosen so it cannot recurse. `requestOnce` holds the whole transport retry
+   * loop and knows nothing about auth; this wrapper calls it at most twice and
+   * has no loop of its own, so "exactly once" is a property of the control flow
+   * rather than a counter someone has to keep correct. A second 401 falls
+   * straight through to the caller.
+   *
+   * The refresh itself is the auth client's, which shares one in-flight promise
+   * between every concurrent caller. Ten requests meeting an expired token
+   * together make one rotation, not ten.
+   */
   async request<T = unknown>(
+    method: string,
+    path: string,
+    options: RequestOptions = {}
+  ): Promise<ApiResponse<T>> {
+    const auth = this.options.auth;
+    if (auth === undefined || options.skipAuthRetry === true) {
+      return this.requestOnce<T>(method, path, options);
+    }
+
+    try {
+      return await this.requestOnce<T>(method, path, options);
+    } catch (error) {
+      if (!(error instanceof ApiError) || !error.isUnauthorized) {
+        throw error;
+      }
+      // The caller aborted while the request was in flight. Refreshing for a
+      // request nobody is waiting on rotates a token for nothing.
+      if (options.signal?.aborted === true) {
+        throw error;
+      }
+      const token = await auth.refresh();
+      if (token === null) {
+        // The session is gone. The auth client has already cleared its state
+        // and notified its session-ended hook, so the original 401 is the most
+        // useful thing to hand back: it names the route that discovered it.
+        throw error;
+      }
+      // Exactly one replay, and `skipAuthRetry` on it so a 401 from the replay
+      // cannot start a second refresh. That guard is redundant given this
+      // method has no loop, and it is here anyway because the invariant is
+      // worth stating in the code rather than only in this comment.
+      return this.requestOnce<T>(method, path, {
+        ...options,
+        skipAuthRetry: true,
+      });
+    }
+  }
+
+  /**
+   * One logical request, including the transport level retries.
+   *
+   * Retries here are for transient transport failures: a network error, a
+   * timeout, a 429 or a 5xx, and only on idempotent methods. A 401 is never
+   * retried at this level, because a second identical request with the same
+   * expired token gets the same answer.
+   */
+  private async requestOnce<T = unknown>(
     method: string,
     path: string,
     options: RequestOptions = {}
@@ -321,7 +436,13 @@ export class ApiClient {
     if (attempt > 0) {
       headers.set('x-retry-attempt', String(attempt));
     }
-    const token = this.options.getAuthToken?.();
+    // The auth client first when one is configured. It is the holder of the
+    // in-memory token that a refresh replaces, so reading `getAuthToken`
+    // instead would attach whatever the older source still had.
+    const token =
+      this.options.auth === undefined
+        ? this.options.getAuthToken?.()
+        : this.options.auth.getAccessToken();
     if (typeof token === 'string' && token !== '') {
       headers.set('authorization', `Bearer ${token}`);
     } else if (token !== null && token !== undefined) {

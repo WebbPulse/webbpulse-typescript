@@ -1,5 +1,4 @@
 import { ApiError, type ApiClient } from '@webbpulse/api-client';
-import { TokenStore, type TokenStorage } from './storage.js';
 
 /**
  * Session state, in the shape both applications need.
@@ -21,17 +20,25 @@ export interface SessionState<TUser> {
   error: Error | null;
 }
 
-/** How a session is carried. */
-export type SessionMode =
-  /** Bearer token in `localStorage`, sent on every request. */
-  | 'token'
-  /** HttpOnly cookie set by the API; the browser carries it. */
-  | 'cookie';
+/**
+ * How a session is carried.
+ *
+ * Cookie only since 0.4.0. The `'token'` mode kept a bearer token in
+ * `localStorage`, which section 7.1 of the identity standard removes: a token
+ * any script on the page can read, that survives the tab, is the standard XSS
+ * prize. `AuthClient` is the replacement for anything that needs a bearer
+ * token, and it holds it in memory.
+ *
+ * The type is kept as a one-member union rather than deleted so an existing
+ * `mode: 'cookie'` call site still reads the same, and a `mode: 'token'` one
+ * fails to compile with the mode named rather than with a missing export.
+ */
+export type SessionMode = 'cookie';
 
 export interface SessionManagerOptions<TUser, TCredentials> {
   /** Client used for every session call. */
   client: ApiClient;
-  /** Token or cookie. Decides whether a token store is used at all. */
+  /** Always `'cookie'`. See {@link SessionMode}. */
   mode: SessionMode;
   /** Path returning the signed in user. Defaults to `/users/me`. */
   currentUserPath?: string;
@@ -39,10 +46,6 @@ export interface SessionManagerOptions<TUser, TCredentials> {
   loginPath?: string;
   /** Path ending the session. Defaults to `/auth/logout`. */
   logoutPath?: string;
-  /** localStorage key. Required in `'token'` mode. */
-  tokenStorageKey?: string;
-  /** Storage backend. Defaults to `localStorage` when usable. */
-  tokenStorage?: TokenStorage;
   /**
    * Encodes credentials for the login request.
    *
@@ -52,10 +55,14 @@ export interface SessionManagerOptions<TUser, TCredentials> {
    */
   encodeCredentials?: (credentials: TCredentials) => unknown;
   /**
-   * Pulls the token out of a login response. Return `null` for a cookie
-   * session, or when the API signalled that a second factor is still needed.
+   * Reports whether a login response completed the session.
+   *
+   * Return `false` when the API signalled that a second factor is still
+   * needed, so the manager leaves the state anonymous and the caller drives
+   * the next leg from `raw`. Defaults to treating every non-error response as
+   * complete, which is what a cookie session that issued its cookie means.
    */
-  extractToken?: (response: unknown) => string | null;
+  isLoginComplete?: (response: unknown) => boolean;
   /**
    * Pulls the user out of a login response, or returns `null` to make the
    * manager fetch the current user separately after logging in.
@@ -68,14 +75,6 @@ export interface LoginResult<TUser> {
   user: TUser | null;
   /** The raw login response, for flows this package does not model, such as 2FA. */
   raw: unknown;
-}
-
-function defaultExtractToken(response: unknown): string | null {
-  if (typeof response !== 'object' || response === null) {
-    return null;
-  }
-  const token = (response as { access_token?: unknown }).access_token;
-  return typeof token === 'string' && token !== '' ? token : null;
 }
 
 function defaultExtractUser<TUser>(response: unknown): TUser | null {
@@ -95,7 +94,6 @@ function defaultExtractUser<TUser>(response: unknown): TUser | null {
  */
 export class SessionManager<TUser = unknown, TCredentials = unknown> {
   private readonly options: SessionManagerOptions<TUser, TCredentials>;
-  private readonly tokenStore: TokenStore | null;
   private readonly listeners = new Set<(state: SessionState<TUser>) => void>();
   private state: SessionState<TUser> = {
     status: 'unknown',
@@ -107,43 +105,11 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
 
   constructor(options: SessionManagerOptions<TUser, TCredentials>) {
     this.options = options;
-    if (options.mode === 'token') {
-      if (
-        options.tokenStorageKey === undefined ||
-        options.tokenStorageKey === ''
-      ) {
-        throw new Error(
-          "tokenStorageKey is required when mode is 'token'. The two applications use different keys, so there is no safe default."
-        );
-      }
-      this.tokenStore = new TokenStore(
-        options.tokenStorageKey,
-        options.tokenStorage
-      );
-    } else {
-      this.tokenStore = null;
-    }
   }
 
   /** Current snapshot. */
   getState(): SessionState<TUser> {
     return this.state;
-  }
-
-  /** Stored token, or null in cookie mode. */
-  getToken(): string | null {
-    return this.tokenStore?.get() ?? null;
-  }
-
-  /**
-   * Stores a token the API rotated in mid session.
-   *
-   * Wire this to the client's `onTokenRefresh` so a username change, which
-   * makes the backend reissue the token in a response header, does not sign
-   * the user out on their next request.
-   */
-  setToken(token: string): void {
-    this.tokenStore?.set(token);
   }
 
   /** Subscribes to changes. Returns the unsubscribe function. */
@@ -187,7 +153,6 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
         return response.data;
       } catch (error) {
         if (error instanceof ApiError && error.isUnauthorized) {
-          this.tokenStore?.clear();
           this.setState({ status: 'anonymous', user: null, error: null });
           return null;
         }
@@ -224,23 +189,20 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
         encode(credentials)
       );
 
-      const extractToken = this.options.extractToken ?? defaultExtractToken;
-      const token = extractToken(response.data);
-      if (token !== null) {
-        this.tokenStore?.set(token);
-      }
+      const isComplete = this.options.isLoginComplete ?? (() => true);
+      const complete = isComplete(response.data);
 
       const extractUser = this.options.extractUser ?? defaultExtractUser<TUser>;
       let user = extractUser(response.data);
-      if (user === null && (token !== null || this.options.mode === 'cookie')) {
+      if (user === null && complete) {
         // The API authenticated us but did not embed the user, so ask for it.
         user = await this.refresh();
       }
 
       if (user === null) {
-        // No user and no token means the flow is unfinished, a pending second
-        // factor being the usual reason. Leave the caller to drive the next
-        // step from `raw` rather than claiming a session that does not exist.
+        // No user and an incomplete flow, a pending second factor being the
+        // usual reason. Leave the caller to drive the next step from `raw`
+        // rather than claiming a session that does not exist.
         this.setState({ status: 'anonymous', user: null, error: null });
       } else {
         this.setState({ status: 'authenticated', user, error: null });
@@ -266,7 +228,6 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
     } catch {
       // Deliberately swallowed. The local session is ended regardless.
     } finally {
-      this.tokenStore?.clear();
       this.setState({ status: 'anonymous', user: null, error: null });
     }
   }

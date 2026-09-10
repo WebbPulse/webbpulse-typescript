@@ -13,6 +13,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
+import type { AuthClient, AuthState } from './auth-client.js';
 import type { SessionManager, SessionState } from './session.js';
 
 const SessionManagerContext = createContext<SessionManager<
@@ -144,5 +145,141 @@ export function useSession<
       refresh,
     }),
     [state, login, logout, refresh]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AuthClient bindings, section 7.1
+//
+// A second context rather than a widened first one. `SessionManager` and
+// `AuthClient` model different things: one is a cookie session whose state is
+// "who is signed in", the other holds an access token and a refresh lifecycle.
+// An application adopting the identity standard uses the second and can drop
+// the first, and during the migration a page may legitimately sit under both.
+// ---------------------------------------------------------------------------
+
+const AuthClientContext = createContext<AuthClient<unknown> | null>(null);
+
+/**
+ * An auth client of any user type.
+ *
+ * `AuthClient` is invariant in `TUser`, since the parameter appears in both an
+ * argument and a return position, so no single instantiation is assignable from
+ * every other one. This is the alias a provider prop writes, and the typed
+ * hooks re-apply the caller's parameter on the way out.
+ */
+export type AnyAuthClient = AuthClient<never>;
+
+export interface AuthProviderProps {
+  /** The client to expose. Construct it once, outside the component tree. */
+  client: AnyAuthClient;
+  /**
+   * Runs the silent refresh on mount. Defaults to true, which is the behaviour
+   * 7.1 requires: without it an in-memory token does not survive a reload and
+   * every refresh of the page lands the user on a login screen.
+   */
+  initializeOnMount?: boolean;
+  children: ReactNode;
+}
+
+/**
+ * Puts an {@link AuthClient} in context and runs the silent refresh.
+ *
+ * The effect is safe under StrictMode's double mount, because `initialize` is
+ * idempotent and shares one in-flight request: two mounts make one call to the
+ * refresh endpoint, not two rotations of the same cookie.
+ */
+export function AuthProvider({
+  client,
+  initializeOnMount = true,
+  children,
+}: AuthProviderProps): ReactNode {
+  const erased = client as unknown as AuthClient<unknown>;
+
+  useEffect(() => {
+    if (initializeOnMount) {
+      void erased.initialize();
+    }
+  }, [erased, initializeOnMount]);
+
+  return createElement(AuthClientContext.Provider, { value: erased }, children);
+}
+
+/** Returns the auth client from context. Throws outside a provider. */
+export function useAuthClient<TUser = unknown>(): AuthClient<TUser> {
+  const client = useContext(AuthClientContext);
+  if (client === null) {
+    throw new Error('useAuthClient must be used within an AuthProvider.');
+  }
+  return client as unknown as AuthClient<TUser>;
+}
+
+/**
+ * Subscribes to auth state.
+ *
+ * `useSyncExternalStore` keeps the client the single source of truth and stops
+ * concurrent rendering tearing a component onto a stale snapshot. The client
+ * returns the identical object until something changes, which is what makes the
+ * default reference equality check correct.
+ */
+export function useAuthState<TUser = unknown>(): AuthState<TUser> {
+  const client = useAuthClient<TUser>();
+  const subscribe = useCallback(
+    (onChange: () => void) => client.subscribe(onChange),
+    [client]
+  );
+  const getSnapshot = useCallback(() => client.getState(), [client]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** What {@link useAuth} returns. */
+export interface UseAuthResult<TUser> extends AuthState<TUser> {
+  isAuthenticated: boolean;
+  /** True until the first silent refresh settles, and during a session call. */
+  isLoading: boolean;
+  login: AuthClient<TUser>['login'];
+  completeTotp: AuthClient<TUser>['completeTotp'];
+  loginWithPasskey: AuthClient<TUser>['loginWithPasskey'];
+  completePasskeyMfa: AuthClient<TUser>['completePasskeyMfa'];
+  registerPasskey: AuthClient<TUser>['registerPasskey'];
+  startOAuth: AuthClient<TUser>['startOAuth'];
+  logout: AuthClient<TUser>['logout'];
+  /** The in-memory access token, or null. Rarely needed in a component. */
+  getAccessToken: () => string | null;
+}
+
+/**
+ * The hook application code uses.
+ *
+ * The methods are bound to the client and stable for its lifetime, so a
+ * component can put them in a dependency array without re-running an effect on
+ * every state change.
+ */
+export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
+  const client = useAuthClient<TUser>();
+  const state = useAuthState<TUser>();
+
+  const bound = useMemo(
+    () => ({
+      login: client.login.bind(client),
+      completeTotp: client.completeTotp.bind(client),
+      loginWithPasskey: client.loginWithPasskey.bind(client),
+      completePasskeyMfa: client.completePasskeyMfa.bind(client),
+      registerPasskey: client.registerPasskey.bind(client),
+      startOAuth: client.startOAuth.bind(client),
+      logout: client.logout.bind(client),
+      getAccessToken: client.getAccessToken.bind(client),
+    }),
+    [client]
+  );
+
+  return useMemo(
+    () => ({
+      ...state,
+      isAuthenticated: state.status === 'authenticated',
+      isLoading: state.status === 'loading' || state.status === 'unknown',
+      ...bound,
+    }),
+    [state, bound]
   );
 }
