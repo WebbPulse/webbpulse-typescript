@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/auth",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Framework free session helpers for WebbPulse applications, with an optional React entry point.",
   "license": "UNLICENSED",
   "type": "module",
@@ -40,7 +40,7 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@webbpulse/api-client": "0.6.0"
+    "@webbpulse/api-client": "0.7.0"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0"
@@ -53,7 +53,7 @@
   "devDependencies": {
     "@testing-library/react": "^16.3.0",
     "@types/react": "^19.2.2",
-    "@webbpulse/tsconfig": "0.6.0",
+    "@webbpulse/tsconfig": "0.7.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   }

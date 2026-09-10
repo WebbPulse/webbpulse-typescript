@@ -1,5 +1,37 @@
 # @webbpulse/auth
 
+## 0.7.0
+
+### Minor Changes
+
+- OAuth sign-in, linking and unlinking in `@webbpulse/auth`, and `Retry-After` on
+  rate-limit errors in `@webbpulse/api-client`.
+
+  `@webbpulse/auth` gains the client side of the identity service's five OAuth
+  routes. `oauthStartUrl` and `startOAuth` send the browser to the provider, a
+  builder rather than a fetch because the start route answers a cross-origin
+  redirect that script cannot follow. `readOAuthCallback` reads the landing page's
+  single query parameter and narrows it to one of signed in, MFA required, linked
+  or refused, with a fixed precedence so a stale parameter cannot outrank a live
+  refusal. The session comes back as the ordinary refresh cookie set on that
+  redirect, so there is no one-time code to exchange and no token in the URL.
+  `linkOAuthProvider`, `listOAuthLinks` and `unlinkOAuthProvider` cover a settings
+  page, with `already-linked`, `not-linked`, `last-sign-in-method`,
+  `provider-unavailable` and `rate-limited` modelled as outcomes on the routes
+  that can legitimately produce them. `AUTH_ERROR_CODES` gains the sixteen codes
+  the OAuth routes emit.
+
+  `@webbpulse/api-client` now keeps the `Retry-After` header on `ApiError` as
+  `retryAfterSeconds`, parsed from both the delta-seconds and the HTTP-date form
+  and present only on the statuses the transport treats as retryable. Callers had
+  no way to read it before, because `ApiError` does not keep the `Response`.
+  Nothing else about the transport changed.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webbpulse/api-client@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

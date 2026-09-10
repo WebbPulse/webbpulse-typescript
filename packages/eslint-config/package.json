@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/eslint-config",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Shared ESLint flat configurations for WebbPulse TypeScript and React projects.",
   "license": "UNLICENSED",
   "type": "module",
