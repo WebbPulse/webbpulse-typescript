@@ -57,12 +57,26 @@ describe('AUTH_ERROR_CODES', () => {
     // existed. They are listed here rather than left to fall through
     // getAuthErrorCode as undefined, because that value means "not an identity
     // outcome I model" and every one of these is one a form has to render.
-    expect([...AUTH_ERROR_CODES].slice(12)).toEqual([
+    expect([...AUTH_ERROR_CODES].slice(12, 17)).toEqual([
       'INVALID_LINK',
       'PASSWORD_TOO_SHORT',
       'PASSWORD_REJECTED',
       'TOO_MANY_ATTEMPTS',
       'EMAIL_NOT_CONFIGURED',
+    ]);
+  });
+
+  it('adds the codes the M4 MFA routes emit', () => {
+    // Same reason as the M3 block above. `INVALID_MFA_CODE` is the one refusal
+    // every failed factor check carries, and `NOT_AUTHENTICATED` is what the
+    // five authorized routes answer to a caller with no usable bearer token.
+    expect([...AUTH_ERROR_CODES].slice(17)).toEqual([
+      'INVALID_MFA_CODE',
+      'MFA_TICKET_INVALID',
+      'TOTP_ALREADY_ENABLED',
+      'NO_PENDING_ENROLMENT',
+      'MFA_NOT_CONFIGURED',
+      'NOT_AUTHENTICATED',
     ]);
   });
 });

@@ -39,6 +39,16 @@ import {
   type PasswordResetOutcome,
 } from './email-flows.js';
 import { AuthSessionEndedError, getAuthErrorCode } from './errors.js';
+import {
+  classifyMfaError,
+  type MfaPaths,
+  type MfaRefusal,
+  type RecoveryCodesOutcome,
+  type StepUpOutcome,
+  type TotpActivationOutcome,
+  type TotpDisableOutcome,
+  type TotpEnrolmentOutcome,
+} from './mfa.js';
 
 /** Status of the session, as a single field. */
 export type AuthStatus =
@@ -137,7 +147,7 @@ export interface WebAuthnAdapter {
 }
 
 /** Where the identity routes live, relative to the base URL. */
-export interface AuthPaths extends EmailFlowPaths {
+export interface AuthPaths extends EmailFlowPaths, MfaPaths {
   /** Defaults to `/api/auth/login`. */
   login?: string;
   /** Defaults to `/api/auth/login/totp`. */
@@ -178,6 +188,11 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   verifyEmailConfirm: '/api/auth/verify-email/confirm',
   passwordReset: '/api/auth/reset',
   passwordResetConfirm: '/api/auth/reset/confirm',
+  totpEnrol: '/api/auth/totp/enrol',
+  totpActivate: '/api/auth/totp/activate',
+  totpDisable: '/api/auth/totp/disable',
+  recoveryCodes: '/api/auth/recovery-codes',
+  stepUp: '/api/auth/step-up',
 };
 
 /** Construction options. */
@@ -280,6 +295,38 @@ const RESET_CONFIRM_REASONS: ReadonlySet<
   'unavailable',
   'password-rejected',
 ] as const);
+
+/**
+ * Which refusals each MFA route models, per route, on the same rule the link
+ * routes follow: an explicit set rather than one permissive classifier, so a
+ * code that is a legitimate outcome on one route cannot become a silent success
+ * on another.
+ *
+ * `already-enabled` appears only on enrol and `no-pending-enrolment` only on
+ * activate. `invalid-code` appears on every route that presents a code, which
+ * is all of them except enrol: activate, disable, regenerate and step-up.
+ */
+const ENROL_REASONS: ReadonlySet<
+  'already-enabled' | 'rate-limited' | 'unavailable'
+> = new Set(['already-enabled', 'rate-limited', 'unavailable'] as const);
+
+const ACTIVATE_REASONS: ReadonlySet<
+  'invalid-code' | 'no-pending-enrolment' | 'rate-limited' | 'unavailable'
+> = new Set([
+  'invalid-code',
+  'no-pending-enrolment',
+  'rate-limited',
+  'unavailable',
+] as const);
+
+const CODE_REASONS: ReadonlySet<
+  'invalid-code' | 'rate-limited' | 'unavailable'
+> = new Set(['invalid-code', 'rate-limited', 'unavailable'] as const);
+
+/** The body the two routes that issue recovery codes answer with. */
+interface RecoveryCodesBody {
+  recovery_codes?: unknown;
+}
 
 /**
  * The auth client.
@@ -923,6 +970,229 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       }
       return refused;
     }
+  }
+
+  // --------------------------------------------------- TOTP and step-up
+
+  /**
+   * Starts a TOTP enrolment and returns the seed, once.
+   *
+   * The factor is written **inactive**, so it does not gate login and does not
+   * appear in a challenge until {@link activateTotp} sees a correct code. A user
+   * who scans badly and walks away has changed nothing about their account.
+   *
+   * Call it again and the previous pending enrolment is replaced with a new
+   * seed rather than redisplayed: there is no route that reads a seed back, and
+   * a read-back route would turn every stolen access token into a copy of the
+   * user's second factor. An account that already has an **active** factor is
+   * refused with `already-enabled` instead, because silently replacing a working
+   * authenticator is how a user ends up with a factor they cannot satisfy. The
+   * path to replacing one is disable, then enrol.
+   *
+   * Render `provisioningUri` as a QR code and `secret` as the typed fallback.
+   * This package generates no QR code and adds no dependency to do it.
+   */
+  async enrolTotp(): Promise<TotpEnrolmentOutcome> {
+    return this.runMfaCall(
+      this.paths.totpEnrol,
+      {},
+      ENROL_REASONS,
+      (data: { secret?: unknown; provisioning_uri?: unknown }) => ({
+        ok: true as const,
+        secret: typeof data.secret === 'string' ? data.secret : '',
+        provisioningUri:
+          typeof data.provisioning_uri === 'string'
+            ? data.provisioning_uri
+            : '',
+      })
+    );
+  }
+
+  /**
+   * Activates a pending enrolment with its first correct code.
+   *
+   * Returns the recovery codes the server issues with the activation. They are
+   * generated here rather than at enrolment because a set the user never
+   * activated is a set of live credentials for a factor that does not exist,
+   * and they are shown **exactly once**: the server stores only their hashes.
+   * A UI that renders them without saying so is setting up a support ticket.
+   *
+   * The code just used cannot be replayed as a login code seconds later: the
+   * activation records the step it consumed.
+   */
+  async activateTotp(input: { code: string }): Promise<TotpActivationOutcome> {
+    return this.runMfaCall(
+      this.paths.totpActivate,
+      { code: input.code },
+      ACTIVATE_REASONS,
+      (data: RecoveryCodesBody) => ({
+        ok: true as const,
+        recoveryCodes: asStringArray(data.recovery_codes),
+      })
+    );
+  }
+
+  /**
+   * Removes the factor and every recovery code with it.
+   *
+   * Both, always, on the server side: leaving recovery codes behind after TOTP
+   * is disabled leaves a set of credentials that satisfy a factor the user
+   * believes is gone.
+   *
+   * Requires a code, which is either a current TOTP code or an unspent
+   * recovery code. Turning the second factor off is the single action an
+   * attacker holding nothing but a stolen access token would most want, so the
+   * route asks the user to prove the factor still works before removing it.
+   * A wrong or replayed code comes back as `invalid-code`.
+   */
+  async disableTotp(input: { code: string }): Promise<TotpDisableOutcome> {
+    return this.runMfaCall(
+      this.paths.totpDisable,
+      { code: input.code },
+      CODE_REASONS,
+      () => ({ ok: true as const })
+    );
+  }
+
+  /**
+   * Replaces every recovery code with a fresh set, returned once.
+   *
+   * The old set is deleted first, so a user who regenerates because a printout
+   * was lost has actually invalidated the printout, which is the entire reason
+   * they regenerated. Show the new set with the same "this is the only time you
+   * will see these" framing the activation uses.
+   *
+   * Requires a code, the same current TOTP code or unspent recovery code
+   * {@link disableTotp} takes. Regenerating voids the printout that is a
+   * user's way back in after losing their phone, so the route asks them to
+   * prove the factor is live before it does that. A wrong or replayed code
+   * comes back as `invalid-code`.
+   */
+  async regenerateRecoveryCodes(input: {
+    code: string;
+  }): Promise<RecoveryCodesOutcome> {
+    return this.runMfaCall(
+      this.paths.recoveryCodes,
+      { code: input.code },
+      CODE_REASONS,
+      (data: RecoveryCodesBody) => ({
+        ok: true as const,
+        recoveryCodes: asStringArray(data.recovery_codes),
+      })
+    );
+  }
+
+  /**
+   * Re-authenticates inside the current session for a fresher access token.
+   *
+   * Not a second login. No refresh family is started and the refresh cookie is
+   * untouched, because the session is not new: the user is proving freshness
+   * within it. What changes on the new token is `auth_time`, which becomes now,
+   * and `amr`, which gains the factor just satisfied. A sensitive route asserts
+   * on those two rather than on a boolean, which is what makes "was this
+   * re-authenticated recently" answerable at all.
+   *
+   * The new token is adopted into this client's in-memory store on success and
+   * the proactive refresh timer is re-armed against its lifetime, so the next
+   * request carries it with no further work at the call site. It is not in the
+   * outcome, because there is exactly one place an access token lives.
+   *
+   * `code` takes a TOTP code or a recovery code. The server tells them apart by
+   * shape, so a caller does not choose and cannot be made to disclose which
+   * kind the user had.
+   */
+  async stepUp(input: { code: string }): Promise<StepUpOutcome> {
+    this.setState({ status: 'loading', error: null });
+    try {
+      const response = await this.client.post<TokenResponseBody>(
+        this.paths.stepUp,
+        { code: input.code },
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      const token = response.data.access_token;
+      if (typeof token !== 'string' || token === '') {
+        throw new AuthSessionEndedError({
+          message: 'The step-up response carried no access token.',
+          reason: 'refresh-failed',
+        });
+      }
+      const expiresIn =
+        typeof response.data.expires_in === 'number'
+          ? response.data.expires_in
+          : undefined;
+      this.adoptToken(token, expiresIn);
+      this.setState({
+        status: 'authenticated',
+        hasAccessToken: true,
+        error: null,
+      });
+      return { ok: true, expiresIn };
+    } catch (error) {
+      return this.settleMfaRefusal(error, CODE_REASONS);
+    }
+  }
+
+  /**
+   * The shared body of the four MFA calls that are a plain post and a mapping.
+   *
+   * Written once because all four are the same shape: bearer token, no retry,
+   * an outcome on a modelled refusal, and a rethrow on anything else. `stepUp`
+   * is not routed through it, because it is the only one that adopts a token
+   * and so has a success path of its own.
+   */
+  private async runMfaCall<
+    TBody,
+    TOk extends { ok: true },
+    TReason extends MfaRefusal['reason'],
+  >(
+    path: string,
+    body: Record<string, unknown>,
+    reasons: ReadonlySet<TReason>,
+    toOutcome: (data: TBody) => TOk
+  ): Promise<TOk | Extract<MfaRefusal, { reason: TReason }>> {
+    try {
+      // No retry. Every one of these either spends a single-use code or burns a
+      // rate limit bucket the standard sets deliberately low, and a replayed
+      // enrolment start would throw away the seed the user is mid-way through
+      // scanning.
+      const response = await this.client.post<TBody>(path, body, {
+        retries: 0,
+        headers: this.authorizationHeader(),
+      });
+      return toOutcome(response.data);
+    } catch (error) {
+      return this.settleMfaRefusal(error, reasons);
+    }
+  }
+
+  /**
+   * Turns a thrown MFA error into a modelled refusal, or rethrows.
+   *
+   * The state write is what a caller would otherwise have to remember: a
+   * refusal is not a session ending, so `status` goes back to what the token
+   * says rather than to `anonymous`, and the error is not parked in
+   * `state.error` for a page level boundary to render. A 401 the client could
+   * not repair is left to throw, because that one **is** the session ending.
+   */
+  private settleMfaRefusal<TReason extends MfaRefusal['reason']>(
+    error: unknown,
+    reasons: ReadonlySet<TReason>
+  ): Extract<MfaRefusal, { reason: TReason }> {
+    const refused = classifyMfaError(error, reasons);
+    this.setState({
+      status: this.accessToken === null ? 'anonymous' : 'authenticated',
+      hasAccessToken: this.accessToken !== null,
+      error:
+        refused === null
+          ? error instanceof Error
+            ? error
+            : new Error(String(error))
+          : null,
+    });
+    if (refused === null) {
+      throw error;
+    }
+    return refused;
   }
 
   // ------------------------------------------------------------- helpers

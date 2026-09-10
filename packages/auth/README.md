@@ -88,6 +88,135 @@ The ticket is held in `state.pendingMfa` as well, so a component that navigated
 between the two steps can pick it up from the store rather than threading it
 through a router.
 
+The first leg answers **200 with the challenge**, not 401. Nothing was refused:
+the password was correct and the flow is half done. That is why `mfaRequired` is
+a branch on a successful outcome rather than something to catch.
+
+## Enrolling TOTP, recovery codes and step-up
+
+Five methods for the rest of the identity service's MFA surface, all of them on
+routes behind the authorizer, so all of them carry the bearer token from this
+client and inherit its refresh-once behaviour on a 401.
+
+```ts
+await auth.enrolTotp(); // { secret, provisioningUri }
+await auth.activateTotp({ code }); // { recoveryCodes }
+await auth.disableTotp({ code }); // { ok: true }
+await auth.regenerateRecoveryCodes({ code }); // { recoveryCodes }
+await auth.stepUp({ code }); // adopts a fresher access token
+```
+
+**Four of the five take a code**, and every `code` above accepts either a
+current TOTP code or an unspent recovery code. Disable and regenerate ask for
+one because a bearer token on its own is a weaker thing to hold than a bearer
+token plus a live factor, and those two either remove the second factor or void
+the printout that survives losing the phone. Both answer a wrong code with the
+same `invalid-code` refusal an activation does.
+
+**They return outcomes rather than throwing**, in the style of the link flows
+and for a sharper version of the same reason: a user mistyping a six digit code
+is the single most likely thing to happen with an activation form open. Putting
+that in a `catch` puts the common path in the handler. They reject only for a
+network failure, a 500, or a 401 the client could not repair, which is the
+session ending rather than a form field error.
+
+### The enrolment sequence
+
+```ts
+// 1. Start the enrolment. The factor is written inactive, so it does not gate
+//    login yet and a user who scans badly has changed nothing.
+const started = await auth.enrolTotp();
+if (!started.ok) {
+  // 'already-enabled' means disable the existing factor first, which is the
+  // only path the server offers. 'rate-limited' means wait.
+  return setBanner(started.message);
+}
+
+// 2. Show the QR code, with the seed as the typed fallback. This package
+//    renders no QR code and adds no dependency to do it: hand
+//    started.provisioningUri to whatever generator the product already has.
+showQr(started.provisioningUri);
+showTypedFallback(started.secret);
+
+// 3. Activate with the first code from the authenticator. Only now does the
+//    factor count, and only now do recovery codes exist.
+const activated = await auth.activateTotp({ code });
+if (!activated.ok) {
+  switch (activated.reason) {
+    case 'invalid-code':
+      return setFieldError('code', activated.message);
+    case 'no-pending-enrolment':
+      // A stale form: reloaded, or activated in another tab. Start again.
+      return restartEnrolment();
+    case 'rate-limited':
+      return setBanner('Too many attempts. Try again shortly.');
+    case 'unavailable':
+      return setBanner('Two factor sign in is unavailable right now.');
+  }
+}
+
+// 4. Show the recovery codes, once, and say so. The server stores only their
+//    hashes and cannot show them again.
+showRecoveryCodesOnce(activated.recoveryCodes);
+```
+
+Replacing that set later, or turning the factor off, runs the same code check
+the activation did:
+
+```ts
+const fresh = await auth.regenerateRecoveryCodes({ code });
+if (fresh.ok) {
+  showRecoveryCodesOnce(fresh.recoveryCodes); // the old set is already dead
+} else if (fresh.reason === 'invalid-code') {
+  setFieldError('code', fresh.message);
+}
+```
+
+**Both secrets are shown exactly once.** There is no route that reads a seed
+back, so a user who loses it before activating calls `enrolTotp` again and gets
+a new one. The recovery codes come back from the activation that created them,
+and the only way to see a set again is `regenerateRecoveryCodes`, which replaces
+every code and invalidates the printout the user was trying to recover. A screen
+that renders either without saying it will not be shown again is setting up a
+support ticket.
+
+### Step-up
+
+`stepUp` is not a second login. No refresh family is started and the refresh
+cookie is untouched, because the session is not new: the user is proving
+freshness inside it. What changes on the new token is `auth_time`, which becomes
+now, and `amr`, which gains the factor just satisfied. A sensitive route asserts
+on those two rather than on a boolean, which is what makes "was this
+re-authenticated recently" answerable at all.
+
+The new token is adopted into this client's in-memory store and the proactive
+refresh timer is re-armed against it, so the next request carries it with no
+further work at the call site. It is not in the outcome, because there is
+exactly one place an access token lives.
+
+```ts
+const stepped = await auth.stepUp({ code });
+if (stepped.ok) {
+  await deleteTheAccount(); // the token now carries a fresh auth_time
+}
+```
+
+`code` takes a TOTP code or a recovery code, on this route and on the other
+three that verify one. The server tells them apart by shape, so a caller does
+not choose and cannot be made to disclose which kind the user had.
+
+### One refusal, on purpose
+
+`invalid-code` is a single case covering a wrong code, a replayed code, no
+factor enrolled, a factor enrolled but not activated, a spent recovery code and
+a recovery code that never existed. The server answers all six with one message
+so the second leg of login cannot be used to discover which accounts have TOTP
+enabled. A client that split them would be inventing information it does not
+have. Render `outcome.message`, which is the server's own sentence.
+
+Route paths are overridable through `paths`: `totpEnrol`, `totpActivate`,
+`totpDisable`, `recoveryCodes`, `stepUp`.
+
 ## Email verification and password reset
 
 Four methods, one for each of the identity service's link routes. Section 2.6
@@ -190,13 +319,16 @@ Route paths are overridable through `paths`, alongside the rest:
 
 ## Errors
 
-`AUTH_ERROR_CODES` opens with exactly the twelve codes section 7.3 names, and
-appends the five the M3 link routes emit: `INVALID_LINK`, `PASSWORD_TOO_SHORT`,
-`PASSWORD_REJECTED`, `TOO_MANY_ATTEMPTS` and `EMAIL_NOT_CONFIGURED`. Those five
-are not in the standard's list, which was written before the routes existed, and
-they are added rather than left to fall through, because `getAuthErrorCode`
-returning `undefined` means "not an identity outcome I model" and every one of
-these is an outcome a form has to render.
+`AUTH_ERROR_CODES` opens with exactly the twelve codes section 7.3 names, then
+the five the M3 link routes emit: `INVALID_LINK`, `PASSWORD_TOO_SHORT`,
+`PASSWORD_REJECTED`, `TOO_MANY_ATTEMPTS` and `EMAIL_NOT_CONFIGURED`, then the
+six the M4 MFA routes emit: `INVALID_MFA_CODE`, `MFA_TICKET_INVALID`,
+`TOTP_ALREADY_ENABLED`, `NO_PENDING_ENROLMENT`, `MFA_NOT_CONFIGURED` and
+`NOT_AUTHENTICATED`. The eleven after the first twelve are not in the standard's
+list, which was written before those routes existed, and they are added rather
+than left to fall through, because `getAuthErrorCode` returning `undefined`
+means "not an identity outcome I model" and every one of these is an outcome a
+form has to render.
 
 `getAuthErrorCode(error)` returns one of them or `undefined`, and it returns
 `undefined` for a code the standard does not name, so a `switch` on the result
@@ -257,6 +389,13 @@ and the types `EmailRequestOutcome`, `EmailRequestSent`, `EmailRequestRefused`,
 `EmailVerificationOutcome`, `EmailVerificationConfirmed`, `PasswordResetOutcome`,
 `PasswordResetConfirmed`, `PasswordResetRejected`, `LinkRefused`, `InvalidLink`,
 `RateLimited`, `EmailUnavailable`, `AnyRefusal`, `EmailFlowPaths`.
+
+From the MFA flows: `TOTP_FACTOR`, `classifyMfaError`, and the types
+`TotpEnrolmentOutcome`, `TotpEnrolmentStarted`, `TotpActivationOutcome`,
+`TotpActivated`, `TotpDisableOutcome`, `TotpDisabled`, `RecoveryCodesOutcome`,
+`RecoveryCodesIssued`, `StepUpOutcome`, `StepUpSucceeded`, `MfaRefusal`,
+`MfaCodeRejected`, `TotpAlreadyEnabled`, `NoPendingEnrolment`, `MfaRateLimited`,
+`MfaUnavailable`, `MfaPaths`.
 
 `@webbpulse/auth/react`: `AuthProvider`, `useAuth`, `useAuthState`,
 `useAuthClient`, `SessionProvider`, `useSession`, `useSessionState`,
