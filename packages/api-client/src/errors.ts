@@ -172,6 +172,87 @@ export function formatApiErrorMessage(
   return fallback;
 }
 
+/**
+ * Statuses on which a `Retry-After` header is read.
+ *
+ * The same set `client.ts` retries on, and the overlap is the point: the header
+ * is only useful where a caller might try again, and reading it on a 404 would
+ * put a number in front of a call site that has nothing to do with it. RFC 9110
+ * allows the header on a 3xx redirect as well, which this deliberately skips:
+ * `fetch` follows redirects itself, so a 3xx never reaches here as an error.
+ */
+const RETRY_AFTER_STATUSES: ReadonlySet<number> = new Set([
+  408, 425, 429, 500, 502, 503, 504,
+]);
+
+/**
+ * Parses a `Retry-After` header value into whole seconds.
+ *
+ * Handles both forms RFC 9110 section 10.2.3 defines:
+ *
+ * - **delta-seconds**, a non-negative decimal integer such as `120`. Taken as
+ *   it stands. A value with a sign, a decimal point or trailing text is refused
+ *   rather than coerced, because `Number('12abc')` is `NaN` but `Number(' 12 ')`
+ *   is `12`, and quietly accepting the whitespace form while refusing the other
+ *   is a distinction nobody meant to draw.
+ * - **HTTP-date**, such as `Wed, 21 Oct 2026 07:28:00 GMT`. Converted to the
+ *   seconds between `now` and that instant, rounded up so a sub-second wait
+ *   does not read as no wait at all, and floored at zero so a date already past
+ *   reads as `0`.
+ *
+ * `now` is injectable for the tests. It defaults to `Date.now()`, which is the
+ * client's clock: an HTTP-date is only as good as the skew between the two
+ * machines, which is why the header's own specification prefers delta-seconds.
+ *
+ * Returns `undefined` for an absent, empty or unparseable value, so a caller
+ * that cannot read a hint is in the same position as one the server sent none.
+ */
+export function parseRetryAfter(
+  value: string | null | undefined,
+  now: number = Date.now()
+): number | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return undefined;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Number.isFinite(seconds) ? seconds : undefined;
+  }
+  // An HTTP-date in any of RFC 9110's three formats carries a weekday and a
+  // month name, so requiring a letter is what tells one apart from a number
+  // that is not delta-seconds. Without this guard `Date.parse('-5')` succeeds
+  // in Node, reading a malformed delta as the year 5 BCE and handing the caller
+  // a wait of several millennia.
+  if (!/[a-zA-Z]/.test(trimmed)) {
+    return undefined;
+  }
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) {
+    return undefined;
+  }
+  return Math.max(0, Math.ceil((at - now) / 1000));
+}
+
+/**
+ * Reads the retry hint off a response, on the statuses where one is meaningful.
+ *
+ * Split from {@link parseRetryAfter} so the status gate lives beside the set
+ * that defines it rather than at the one call site in `client.ts`.
+ */
+export function retryAfterFromHeaders(
+  status: number,
+  headers: { get(name: string): string | null }
+): number | undefined {
+  if (!RETRY_AFTER_STATUSES.has(status)) {
+    return undefined;
+  }
+  return parseRetryAfter(headers.get('retry-after'));
+}
+
 /** Thrown for any non 2xx response. Carries the status and the parsed body. */
 export class ApiError extends Error {
   /** HTTP status code. */
@@ -192,6 +273,28 @@ export class ApiError extends Error {
    * the OpenTelemetry trace for the same request.
    */
   readonly requestId: string | undefined;
+  /**
+   * Seconds to wait before retrying, read off the `Retry-After` header.
+   *
+   * Set on the statuses this client already treats as worth a second attempt
+   * and where RFC 9110 says the header means something: 429, 503, and the two
+   * other retryable 4xx statuses, 408 and 425. It is `undefined` everywhere
+   * else, and `undefined` on those statuses too when the server sent no header
+   * or sent one this cannot read.
+   *
+   * Both RFC 9110 forms are accepted. `Retry-After: 120` is delta-seconds and
+   * is taken as it stands; `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` is an
+   * HTTP-date and is turned into the seconds between the client's clock and
+   * that instant, floored at zero, so a date already in the past reads as 0
+   * rather than as a negative wait. A skewed client clock therefore shifts the
+   * wait, which is the trade every HTTP-date consumer makes and is why servers
+   * are advised to send delta-seconds.
+   *
+   * This is a hint and not a promise. Treat it as a floor on how long to wait,
+   * and keep whatever backoff the call site already has for the case where it
+   * is absent.
+   */
+  readonly retryAfterSeconds: number | undefined;
 
   constructor(init: {
     status: number;
@@ -200,6 +303,7 @@ export class ApiError extends Error {
     url: string;
     method: string;
     requestId?: string | undefined;
+    retryAfterSeconds?: number | undefined;
   }) {
     super(
       formatApiErrorMessage(
@@ -214,6 +318,7 @@ export class ApiError extends Error {
     this.url = init.url;
     this.method = init.method;
     this.requestId = init.requestId;
+    this.retryAfterSeconds = init.retryAfterSeconds;
     // Restores the prototype chain so `instanceof ApiError` holds even when a
     // consumer compiles this package down to ES5 through its own bundler.
     Object.setPrototypeOf(this, ApiError.prototype);

@@ -309,6 +309,58 @@ describe('retry', () => {
     expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(2);
   });
 
+  it('surfaces a delta-seconds Retry-After on a thrown 429', async () => {
+    const fetchImpl = stubFetch([
+      jsonResponse({}, { status: 429, headers: { 'retry-after': '90' } }),
+    ]);
+    const error = await client(fetchImpl)
+      .get('/x')
+      .catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).retryAfterSeconds).toBe(90);
+  });
+
+  it('surfaces an HTTP-date Retry-After on a thrown 503', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-21T07:28:00Z'));
+    try {
+      const fetchImpl = stubFetch([
+        jsonResponse(
+          {},
+          {
+            status: 503,
+            headers: { 'retry-after': 'Wed, 21 Oct 2026 07:29:00 GMT' },
+          }
+        ),
+      ]);
+      const error = await client(fetchImpl)
+        .post('/x', {})
+        .catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).retryAfterSeconds).toBe(60);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves retryAfterSeconds undefined when no header was sent', async () => {
+    const fetchImpl = stubFetch([jsonResponse({}, { status: 429 })]);
+    const error = await client(fetchImpl)
+      .get('/x')
+      .catch((thrown: unknown) => thrown);
+    expect((error as ApiError).retryAfterSeconds).toBeUndefined();
+  });
+
+  it('does not surface a Retry-After on a status that is not retryable', async () => {
+    const fetchImpl = stubFetch([
+      jsonResponse({}, { status: 404, headers: { 'retry-after': '90' } }),
+    ]);
+    const error = await client(fetchImpl)
+      .get('/x')
+      .catch((thrown: unknown) => thrown);
+    expect((error as ApiError).retryAfterSeconds).toBeUndefined();
+  });
+
   it('never retries a POST, which is not idempotent', async () => {
     const fetchImpl = stubFetch([jsonResponse({}, { status: 503 })]);
     await expect(

@@ -70,13 +70,40 @@ describe('AUTH_ERROR_CODES', () => {
     // Same reason as the M3 block above. `INVALID_MFA_CODE` is the one refusal
     // every failed factor check carries, and `NOT_AUTHENTICATED` is what the
     // five authorized routes answer to a caller with no usable bearer token.
-    expect([...AUTH_ERROR_CODES].slice(17)).toEqual([
+    expect([...AUTH_ERROR_CODES].slice(17, 23)).toEqual([
       'INVALID_MFA_CODE',
       'MFA_TICKET_INVALID',
       'TOTP_ALREADY_ENABLED',
       'NO_PENDING_ENROLMENT',
       'MFA_NOT_CONFIGURED',
       'NOT_AUTHENTICATED',
+    ]);
+  });
+
+  it('adds the codes the M6 OAuth routes emit', () => {
+    // `OAUTH_EMAIL_UNVERIFIED` is not repeated here: 7.3 already named it and
+    // it sits in the first block. These are the rest, and the three that a
+    // settings page branches on by name are `OAUTH_LAST_SIGN_IN_METHOD`,
+    // `OAUTH_ALREADY_LINKED` and `OAUTH_NOT_LINKED`. The provider leg codes
+    // that follow them are named so a log line records which one arrived,
+    // though a user sees one sentence for all of them.
+    expect([...AUTH_ERROR_CODES].slice(23)).toEqual([
+      'OAUTH_LAST_SIGN_IN_METHOD',
+      'OAUTH_ALREADY_LINKED',
+      'OAUTH_NOT_LINKED',
+      'OAUTH_PROVIDER_UNKNOWN',
+      'OAUTH_PROVIDER_UNAVAILABLE',
+      'OAUTH_CANCELLED',
+      'OAUTH_STATE_INVALID',
+      'OAUTH_REDIRECT_NOT_ALLOWED',
+      'OAUTH_EXCHANGE_FAILED',
+      'OAUTH_USERINFO_FAILED',
+      'OAUTH_ID_TOKEN_INVALID',
+      'OAUTH_NONCE_MISMATCH',
+      'OAUTH_CODE_MISSING',
+      'OAUTH_EMAIL_MISSING',
+      'OAUTH_ACCOUNT_MISSING',
+      'REGISTRATION_DISABLED',
     ]);
   });
 });

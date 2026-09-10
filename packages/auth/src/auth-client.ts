@@ -40,6 +40,16 @@ import {
 } from './email-flows.js';
 import { AuthSessionEndedError, getAuthErrorCode } from './errors.js';
 import {
+  classifyOAuthError,
+  parseOAuthLinks,
+  type OAuthLinkOutcome,
+  type OAuthLinksOutcome,
+  type OAuthPaths,
+  type OAuthRefusal,
+  type OAuthStartOptions,
+  type OAuthUnlinkOutcome,
+} from './oauth.js';
+import {
   classifyMfaError,
   type MfaPaths,
   type MfaRefusal,
@@ -147,7 +157,7 @@ export interface WebAuthnAdapter {
 }
 
 /** Where the identity routes live, relative to the base URL. */
-export interface AuthPaths extends EmailFlowPaths, MfaPaths {
+export interface AuthPaths extends EmailFlowPaths, MfaPaths, OAuthPaths {
   /** Defaults to `/api/auth/login`. */
   login?: string;
   /** Defaults to `/api/auth/login/totp`. */
@@ -168,8 +178,6 @@ export interface AuthPaths extends EmailFlowPaths, MfaPaths {
   passkeyLoginOptions?: string;
   /** Defaults to `/api/auth/login/webauthn/verify`. */
   passkeyLoginVerify?: string;
-  /** Defaults to `/api/auth/oauth`. A provider and `/start` are appended. */
-  oauthStart?: string;
 }
 
 const DEFAULT_PATHS: Required<AuthPaths> = {
@@ -184,6 +192,7 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   passkeyLoginOptions: '/api/auth/login/webauthn/options',
   passkeyLoginVerify: '/api/auth/login/webauthn/verify',
   oauthStart: '/api/auth/oauth',
+  oauthLinks: '/api/auth/oauth/links',
   verifyEmail: '/api/auth/verify-email',
   verifyEmailConfirm: '/api/auth/verify-email/confirm',
   passwordReset: '/api/auth/reset',
@@ -322,6 +331,36 @@ const ACTIVATE_REASONS: ReadonlySet<
 const CODE_REASONS: ReadonlySet<
   'invalid-code' | 'rate-limited' | 'unavailable'
 > = new Set(['invalid-code', 'rate-limited', 'unavailable'] as const);
+
+/**
+ * Which refusals each OAuth management route models, on the same rule the link
+ * and MFA routes follow.
+ *
+ * `already-linked` appears only on the attach, `last-sign-in-method` and
+ * `not-linked` only on the detach, and the list route models nothing but a
+ * provider the deployment cannot serve. `rate-limited` is on the attach alone,
+ * because it is the only one of the three that starts an authorization and so
+ * the only one section 5.1's start limit applies to.
+ */
+const LINK_REASONS: ReadonlySet<
+  'already-linked' | 'provider-unavailable' | 'rate-limited'
+> = new Set([
+  'already-linked',
+  'provider-unavailable',
+  'rate-limited',
+] as const);
+
+const LIST_REASONS: ReadonlySet<'provider-unavailable'> = new Set([
+  'provider-unavailable',
+] as const);
+
+const UNLINK_REASONS: ReadonlySet<
+  'last-sign-in-method' | 'not-linked' | 'provider-unavailable'
+> = new Set([
+  'last-sign-in-method',
+  'not-linked',
+  'provider-unavailable',
+] as const);
 
 /** The body the two routes that issue recovery codes answer with. */
 interface RecoveryCodesBody {
@@ -745,17 +784,33 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Starts an OAuth login or link with a full page redirect.
+   * The URL to send the browser to for an OAuth login or link.
    *
-   * Synchronous and returning void, because the page is leaving: there is no
-   * promise for the caller to await and nothing to resolve on the other side.
+   * A URL builder rather than a call, because `GET /oauth/{provider}/start`
+   * answers with a `302` to the provider and neither leg of that is reachable
+   * by `fetch`: a cross-origin redirect cannot be followed by script and the
+   * provider's response is not CORS-readable. This is the value to put in an
+   * `href`, which is the form a "Sign in with Google" button actually wants:
+   * a real link is middle-clickable, is announced as a link, and needs no
+   * click handler.
+   *
    * `mode` distinguishes a login from a link performed by an already signed in
-   * user, which is what stops a callback being replayed into the other meaning.
+   * user. It is recorded on the server-side state row, and the callback acts on
+   * what the state says rather than on what the URL says, which is what stops a
+   * login callback being steered into attaching a provider to somebody's
+   * account. Note that a `mode: 'link'` start needs a bearer token the browser
+   * will not attach to a top-level navigation: use
+   * {@link linkOAuthProvider} for the link flow instead, which is the route
+   * that exists for it.
+   *
+   * @example
+   * ```tsx
+   * <a href={auth.oauthStartUrl('google', { returnTo: '/dashboard' })}>
+   *   Sign in with Google
+   * </a>
+   * ```
    */
-  startOAuth(
-    provider: string,
-    options: { returnTo?: string; mode?: 'login' | 'link' } = {}
-  ): void {
+  oauthStartUrl(provider: string, options: OAuthStartOptions = {}): string {
     const query = new URLSearchParams();
     if (options.returnTo !== undefined) {
       query.set('return_to', options.returnTo);
@@ -763,16 +818,163 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     if (options.mode !== undefined) {
       query.set('mode', options.mode);
     }
+    if (options.redirectUri !== undefined) {
+      query.set('redirect_uri', options.redirectUri);
+    }
     const suffix = query.toString();
     const base = this.client.baseUrl;
     const path = `${this.paths.oauthStart}/${encodeURIComponent(provider)}/start`;
-    const url = `${base}${path}${suffix === '' ? '' : `?${suffix}`}`;
+    return `${base}${path}${suffix === '' ? '' : `?${suffix}`}`;
+  }
+
+  /**
+   * Starts an OAuth login or link with a full page redirect.
+   *
+   * {@link oauthStartUrl} plus the navigation, for a caller driving the flow
+   * from a button rather than a link. Synchronous and returning void, because
+   * the page is leaving: there is no promise to await and nothing to resolve on
+   * the other side.
+   */
+  startOAuth(provider: string, options: OAuthStartOptions = {}): void {
+    const url = this.oauthStartUrl(provider, options);
     const navigate =
       this.options.navigate ??
       ((target: string) => {
         globalThis.location.assign(target);
       });
     navigate(url);
+  }
+
+  /**
+   * Starts a `link` for the signed-in caller, returning the URL to send them to.
+   *
+   * JSON rather than a redirect, unlike the start route, and the difference is
+   * the reason this method exists at all: the link route is called over `fetch`
+   * with an `Authorization` header, and a redirect would be followed by `fetch`
+   * without that header and land somewhere useless. So the server answers with
+   * the authorization URL and the caller assigns it.
+   *
+   * The subject comes from the verified claims on the bearer token, never from
+   * anything in the body, so a caller cannot link a provider to an account that
+   * is not their own.
+   *
+   * @example
+   * ```ts
+   * const outcome = await auth.linkOAuthProvider('github', {
+   *   returnTo: '/settings/security',
+   * });
+   * if (outcome.ok) {
+   *   window.location.assign(outcome.authorizationUrl);
+   * } else {
+   *   setBanner(outcome.message);
+   * }
+   * ```
+   */
+  async linkOAuthProvider(
+    provider: string,
+    options: Omit<OAuthStartOptions, 'mode'> = {}
+  ): Promise<OAuthLinkOutcome> {
+    const body: Record<string, unknown> = {};
+    if (options.returnTo !== undefined) {
+      body['return_to'] = options.returnTo;
+    }
+    if (options.redirectUri !== undefined) {
+      body['redirect_uri'] = options.redirectUri;
+    }
+    try {
+      // No retry: a start writes a state row and burns a rate limit bucket the
+      // standard sets deliberately low, so a replayed one costs a sign-in
+      // attempt for nothing.
+      const response = await this.client.post<{ authorization_url?: unknown }>(
+        this.oauthLinkPath(provider),
+        body,
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      const url = response.data.authorization_url;
+      return {
+        ok: true,
+        authorizationUrl: typeof url === 'string' ? url : '',
+      };
+    } catch (error) {
+      return this.settleOAuthRefusal(error, LINK_REASONS);
+    }
+  }
+
+  /**
+   * Every provider currently attached to the signed-in account.
+   *
+   * The response carries no provider subject. It is the provider's stable id
+   * for the user, it is of no use to a settings page, and echoing an identifier
+   * from another system into a response body is how it ends up in a log or a
+   * bug report. What comes back is the provider name, the address the provider
+   * holds, whether the provider verified it, and two timestamps.
+   */
+  async listOAuthLinks(): Promise<OAuthLinksOutcome> {
+    try {
+      const response = await this.client.get<unknown>(this.paths.oauthLinks, {
+        headers: this.authorizationHeader(),
+      });
+      return { ok: true, links: parseOAuthLinks(response.data) };
+    } catch (error) {
+      return this.settleOAuthRefusal(error, LIST_REASONS);
+    }
+  }
+
+  /**
+   * Detaches a provider, unless it is the last way into the account.
+   *
+   * The refusal that matters is `last-sign-in-method`, and it is a named
+   * outcome rather than a thrown 409 because its remedy is a specific
+   * instruction: set a password first, then unlink. The server counts other
+   * provider links, a password credential, and whatever the product's own hook
+   * reports, which is where passkeys are counted, and only deletes if something
+   * would remain. Removing the last method locks a user out of their own
+   * account permanently and no support path in this design reaches it again.
+   */
+  async unlinkOAuthProvider(provider: string): Promise<OAuthUnlinkOutcome> {
+    try {
+      await this.client.delete(this.oauthLinkPath(provider), {
+        retries: 0,
+        headers: this.authorizationHeader(),
+      });
+      return { ok: true };
+    } catch (error) {
+      return this.settleOAuthRefusal(error, UNLINK_REASONS);
+    }
+  }
+
+  /** `<prefix>/<provider>/link`, the path the attach and the detach share. */
+  private oauthLinkPath(provider: string): string {
+    return `${this.paths.oauthStart}/${encodeURIComponent(provider)}/link`;
+  }
+
+  /**
+   * Turns a thrown OAuth error into a modelled refusal, or rethrows.
+   *
+   * The same shape as `settleMfaRefusal`, and for the same reason: a refusal is
+   * not a session ending, so `status` goes back to what the token says rather
+   * than to `anonymous`, and a 401 the client could not repair is left to throw
+   * because that one **is** the session ending.
+   */
+  private settleOAuthRefusal<TReason extends OAuthRefusal['reason']>(
+    error: unknown,
+    reasons: ReadonlySet<TReason>
+  ): Extract<OAuthRefusal, { reason: TReason }> {
+    const refused = classifyOAuthError(error, reasons);
+    this.setState({
+      status: this.accessToken === null ? 'anonymous' : 'authenticated',
+      hasAccessToken: this.accessToken !== null,
+      error:
+        refused === null
+          ? error instanceof Error
+            ? error
+            : new Error(String(error))
+          : null,
+    });
+    if (refused === null) {
+      throw error;
+    }
+    return refused;
   }
 
   /**

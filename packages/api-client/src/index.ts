@@ -21,6 +21,8 @@ export {
   formatApiErrorMessage,
   getWebbPulseError,
   isWebbPulseErrorBody,
+  parseRetryAfter,
+  retryAfterFromHeaders,
   type ApiErrorBody,
   type ValidationErrorItem,
   type WebbPulseErrorBody,

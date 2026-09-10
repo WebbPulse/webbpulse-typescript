@@ -317,6 +317,148 @@ own success branch navigates.
 Route paths are overridable through `paths`, alongside the rest:
 `verifyEmail`, `verifyEmailConfirm`, `passwordReset`, `passwordResetConfirm`.
 
+## Signing in with a provider
+
+Google and GitHub, against the identity service's five OAuth routes. Two of them
+are browser navigations rather than API calls, which is why the client's surface
+is not five methods of the same shape.
+
+### Sending the user to the provider
+
+`oauthStartUrl(provider, options?)` builds the URL. It is a builder rather than
+a call because `GET /oauth/{provider}/start` answers `302` to the provider, and
+a cross-origin redirect cannot be followed by script: there is nothing for a
+`fetch` to read. Put it in an `href`, which is the form a "Sign in with Google"
+button actually wants, since a real link is middle-clickable and is announced as
+a link:
+
+```tsx
+<a href={auth.oauthStartUrl('google', { returnTo: '/dashboard' })}>
+  Sign in with Google
+</a>
+```
+
+`startOAuth(provider, options?)` is the same URL plus the navigation, for a
+caller driving the flow from a button. It is synchronous and returns void,
+because the page is leaving.
+
+### How the session comes back
+
+The callback runs on the API, not in the SPA, and it finishes by redirecting the
+browser to the frontend. **There is no one-time code to exchange.** The server
+sets the ordinary refresh cookie on that redirect, through the same writer the
+password login uses, so the two paths cannot drift apart on cookie attributes.
+What lands on the frontend is one query parameter saying which of four things
+happened:
+
+| Parameter             | Meaning                         | What to do                            |
+| --------------------- | ------------------------------- | ------------------------------------- |
+| `?oauth=1`            | signed in, refresh cookie set   | `await auth.initialize()`             |
+| `?mfa_ticket=<t>`     | the account has a second factor | `auth.completeTotp({ ticket, code })` |
+| `?oauth_linked=1`     | a provider was attached         | reload the links list                 |
+| `?oauth_error=<CODE>` | refused, or the user cancelled  | render the code                       |
+
+`readOAuthCallback(href)` reads whichever is present and narrows it to a
+discriminated union, so a landing page is a `switch` rather than four
+`searchParams.get` calls and a guess at precedence:
+
+```ts
+const result = readOAuthCallback(window.location.href);
+switch (result?.kind) {
+  case 'signed-in':
+    await auth.initialize();
+    break;
+  case 'mfa-required':
+    setPendingTicket(result.ticket);
+    break;
+  case 'linked':
+    await reloadLinks();
+    break;
+  case 'error':
+    setBanner(describeOAuthCallbackError(result));
+    break;
+}
+history.replaceState(null, '', stripOAuthParams(window.location.href));
+```
+
+`null` means the page was not reached from a callback, which is every direct
+visit and every reload after the parameters were cleared. The precedence when
+more than one is present is fixed: an error first, then a ticket, then a link,
+then a sign-in. A `returnTo` that already carried its own `?oauth=1` would
+otherwise let a stale parameter outrank a live refusal, and reporting a failed
+sign-in as a successful one is the wrong way round to be wrong.
+
+**The access token is never in the URL.** It arrives the way it always does:
+`initialize()` spends the refresh cookie and holds the token in memory. A token
+in a query string is in the browser history, in the `Referer` of the next
+request, and in whatever proxy logged the navigation.
+
+**The MFA ticket is in the URL, and that is a considered trade.** The browser is
+mid-navigation, so the challenge cannot come back as a JSON body the way the
+password path's does: the frontend has to render a code prompt. The ticket is
+short-lived and single use for exactly that reason. Call `stripOAuthParams` and
+`history.replaceState` as soon as it is read, which is what the last line above
+does.
+
+### Linking and unlinking from a settings page
+
+Three ordinary JSON routes behind the authorizer, all carrying the bearer token
+from this client. Each takes its subject from the verified claims, never from
+anything in a body, so a caller cannot touch an account that is not their own.
+
+```ts
+const { links } = await auth.listOAuthLinks();
+// [{ provider: 'google', email, emailVerified, linkedAt, lastLoginAt }]
+
+const started = await auth.linkOAuthProvider('github', {
+  returnTo: '/settings/security',
+});
+if (started.ok) {
+  window.location.assign(started.authorizationUrl);
+}
+
+const removed = await auth.unlinkOAuthProvider('github');
+if (!removed.ok && removed.reason === 'last-sign-in-method') {
+  setBanner(removed.message);
+}
+```
+
+`linkOAuthProvider` answers with a URL rather than redirecting, and the
+difference from the start route is the whole reason the route exists: it is
+called over `fetch` with an `Authorization` header, and a redirect would be
+followed by `fetch` without that header and land somewhere useless.
+
+The list carries no provider subject. It is the provider's stable id for the
+user, it is of no use to a settings page, and echoing an identifier from another
+system into a response body is how it ends up in a log or a bug report.
+
+`unlinkOAuthProvider` refuses to leave an account with no way in, and
+`last-sign-in-method` is the one refusal in this package whose remedy is a
+specific instruction: set a password first, then unlink. That is why it is a
+named outcome rather than a thrown 409, and why the server's own sentence is the
+one to render. The server counts other provider links, a password credential,
+and whatever the product's own hook reports, which is where passkeys are
+counted.
+
+### Which refusals are outcomes
+
+The same rule the link and MFA flows follow. `already-linked`, `not-linked`,
+`last-sign-in-method`, `provider-unavailable` and `rate-limited` are outcomes,
+each modelled only on the route that can legitimately produce it, so an
+`OAUTH_ALREADY_LINKED` arriving from the unlink route throws rather than
+becoming a silent success. A network failure, a 500, and a 401 the transport
+could not repair all throw: the last of those is the session ending, not a
+settings page error state.
+
+`rate-limited` carries `retryAfter` in seconds, read from the `Retry-After`
+header that `@webbpulse/api-client` keeps on `ApiError` as of 0.7.0 and falling
+back to a `retry_after` in the envelope's `details`. Section 5.1 puts the start
+route at 20 per 15 minutes per IP.
+
+Route paths are overridable through `paths`: `oauthStart`, which defaults to
+`/api/auth/oauth` and has the provider and `/start` or `/link` appended, and
+`oauthLinks`, which defaults to `/api/auth/oauth/links`.
+
 ## Errors
 
 `AUTH_ERROR_CODES` opens with exactly the twelve codes section 7.3 names, then
@@ -324,7 +466,10 @@ the five the M3 link routes emit: `INVALID_LINK`, `PASSWORD_TOO_SHORT`,
 `PASSWORD_REJECTED`, `TOO_MANY_ATTEMPTS` and `EMAIL_NOT_CONFIGURED`, then the
 six the M4 MFA routes emit: `INVALID_MFA_CODE`, `MFA_TICKET_INVALID`,
 `TOTP_ALREADY_ENABLED`, `NO_PENDING_ENROLMENT`, `MFA_NOT_CONFIGURED` and
-`NOT_AUTHENTICATED`. The eleven after the first twelve are not in the standard's
+`NOT_AUTHENTICATED`, and finally the sixteen the M6 OAuth routes emit, led by
+the three a settings page branches on by name: `OAUTH_LAST_SIGN_IN_METHOD`,
+`OAUTH_ALREADY_LINKED` and `OAUTH_NOT_LINKED`. The rest after the first twelve
+are not in the standard's
 list, which was written before those routes existed, and they are added rather
 than left to fall through, because `getAuthErrorCode` returning `undefined`
 means "not an identity outcome I model" and every one of these is an outcome a
@@ -396,6 +541,17 @@ From the MFA flows: `TOTP_FACTOR`, `classifyMfaError`, and the types
 `RecoveryCodesIssued`, `StepUpOutcome`, `StepUpSucceeded`, `MfaRefusal`,
 `MfaCodeRejected`, `TotpAlreadyEnabled`, `NoPendingEnrolment`, `MfaRateLimited`,
 `MfaUnavailable`, `MfaPaths`.
+
+From the OAuth flows: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`,
+`OAUTH_RESULT_PARAM`, `OAUTH_LINKED_PARAM`, `OAUTH_MFA_TICKET_PARAM`,
+`OAUTH_ERROR_PARAM`, `OAUTH_CALLBACK_PARAMS`, `readOAuthCallback`,
+`stripOAuthParams`, `describeOAuthCallbackError`, `parseOAuthLinks`,
+`classifyOAuthError`, and the types `OAuthCallbackResult`, `OAuthSignedIn`,
+`OAuthMfaRequired`, `OAuthLinked`, `OAuthCallbackFailed`, `OAuthLink`,
+`OAuthLinkOutcome`, `OAuthLinkStarted`, `OAuthLinksOutcome`, `OAuthLinksLoaded`,
+`OAuthUnlinkOutcome`, `OAuthUnlinked`, `OAuthRefusal`, `OAuthLastSignInMethod`,
+`OAuthNotLinked`, `OAuthAlreadyLinked`, `OAuthProviderUnavailable`,
+`OAuthRateLimited`, `OAuthMode`, `OAuthStartOptions`, `OAuthPaths`.
 
 `@webbpulse/auth/react`: `AuthProvider`, `useAuth`, `useAuthState`,
 `useAuthClient`, `SessionProvider`, `useSession`, `useSessionState`,
