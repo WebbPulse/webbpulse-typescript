@@ -101,10 +101,17 @@ client and inherit its refresh-once behaviour on a 401.
 ```ts
 await auth.enrolTotp(); // { secret, provisioningUri }
 await auth.activateTotp({ code }); // { recoveryCodes }
-await auth.disableTotp(); // no code required
-await auth.regenerateRecoveryCodes(); // { recoveryCodes }
+await auth.disableTotp({ code }); // { ok: true }
+await auth.regenerateRecoveryCodes({ code }); // { recoveryCodes }
 await auth.stepUp({ code }); // adopts a fresher access token
 ```
+
+**Four of the five take a code**, and every `code` above accepts either a
+current TOTP code or an unspent recovery code. Disable and regenerate ask for
+one because a bearer token on its own is a weaker thing to hold than a bearer
+token plus a live factor, and those two either remove the second factor or void
+the printout that survives losing the phone. Both answer a wrong code with the
+same `invalid-code` refusal an activation does.
 
 **They return outcomes rather than throwing**, in the style of the link flows
 and for a sharper version of the same reason: a user mistyping a six digit code
@@ -153,6 +160,18 @@ if (!activated.ok) {
 showRecoveryCodesOnce(activated.recoveryCodes);
 ```
 
+Replacing that set later, or turning the factor off, runs the same code check
+the activation did:
+
+```ts
+const fresh = await auth.regenerateRecoveryCodes({ code });
+if (fresh.ok) {
+  showRecoveryCodesOnce(fresh.recoveryCodes); // the old set is already dead
+} else if (fresh.reason === 'invalid-code') {
+  setFieldError('code', fresh.message);
+}
+```
+
 **Both secrets are shown exactly once.** There is no route that reads a seed
 back, so a user who loses it before activating calls `enrolTotp` again and gets
 a new one. The recovery codes come back from the activation that created them,
@@ -182,9 +201,9 @@ if (stepped.ok) {
 }
 ```
 
-`code` takes a TOTP code or a recovery code. The server tells them apart by
-shape, so a caller does not choose and cannot be made to disclose which kind the
-user had.
+`code` takes a TOTP code or a recovery code, on this route and on the other
+three that verify one. The server tells them apart by shape, so a caller does
+not choose and cannot be made to disclose which kind the user had.
 
 ### One refusal, on purpose
 

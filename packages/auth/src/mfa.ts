@@ -35,6 +35,13 @@
  * deliberate, and it is why {@link MfaCodeRejected} is one case rather than
  * six. A client that split it would be inventing information it does not have.
  *
+ * Four of the five routes take a code: activation, disable, recovery code
+ * regeneration and step-up. Disable and regenerate ask for one because a
+ * bearer token alone is a weaker thing to hold than a bearer token plus a live
+ * factor, and both of those routes either remove the second factor or void the
+ * printout that survives losing it. Either accepts a current TOTP code or an
+ * unspent recovery code, the same pair `verify_challenge` accepts everywhere.
+ *
  * The one thing that is disclosed is the rate limit, which is a signal about
  * the caller rather than about the account.
  *
@@ -191,7 +198,7 @@ export interface RecoveryCodesIssued {
 
 /** What {@link AuthClient.regenerateRecoveryCodes} resolves to. */
 export type RecoveryCodesOutcome =
-  RecoveryCodesIssued | MfaRateLimited | MfaUnavailable;
+  RecoveryCodesIssued | MfaCodeRejected | MfaRateLimited | MfaUnavailable;
 
 /** A step-up that produced a fresher access token inside the same session. */
 export interface StepUpSucceeded {

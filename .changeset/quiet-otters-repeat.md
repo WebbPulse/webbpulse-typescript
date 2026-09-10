@@ -31,6 +31,13 @@ issues with the activation, also once, since the server stores only their
 hashes. `regenerateRecoveryCodes` replaces the set and invalidates every
 previous code, which is the point of regenerating.
 
+`disableTotp` and `regenerateRecoveryCodes` both require a `code`, either a
+current TOTP code or an unspent recovery code, and both model `invalid-code`.
+A bearer token on its own is a weaker thing to hold than a bearer token plus a
+live factor, and those two routes either remove the second factor or void the
+printout that survives losing the phone, so each asks the user to prove the
+factor still works first.
+
 `stepUp` is not a second login. No refresh family is started and the refresh
 cookie is untouched, because the session is not new. What changes on the new
 token is `auth_time`, which becomes now, and `amr`, which gains the factor just

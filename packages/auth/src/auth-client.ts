@@ -302,9 +302,9 @@ const RESET_CONFIRM_REASONS: ReadonlySet<
  * code that is a legitimate outcome on one route cannot become a silent success
  * on another.
  *
- * `already-enabled` appears only on enrol, `no-pending-enrolment` only on
- * activate, and `invalid-code` only where a code is actually presented. The
- * regenerate route takes no code at all, so it can produce neither.
+ * `already-enabled` appears only on enrol and `no-pending-enrolment` only on
+ * activate. `invalid-code` appears on every route that presents a code, which
+ * is all of them except enrol: activate, disable, regenerate and step-up.
  */
 const ENROL_REASONS: ReadonlySet<
   'already-enabled' | 'rate-limited' | 'unavailable'
@@ -322,11 +322,6 @@ const ACTIVATE_REASONS: ReadonlySet<
 const CODE_REASONS: ReadonlySet<
   'invalid-code' | 'rate-limited' | 'unavailable'
 > = new Set(['invalid-code', 'rate-limited', 'unavailable'] as const);
-
-const RECOVERY_REASONS: ReadonlySet<'rate-limited' | 'unavailable'> = new Set([
-  'rate-limited',
-  'unavailable',
-] as const);
 
 /** The body the two routes that issue recovery codes answer with. */
 interface RecoveryCodesBody {
@@ -1044,21 +1039,19 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * is disabled leaves a set of credentials that satisfy a factor the user
    * believes is gone.
    *
-   * The route requires no code, only the bearer token, so `code` is optional
-   * here and is sent only when a caller supplies one. That is a deliberately
-   * thin wrapper over what the server actually asks for rather than a local
-   * policy: a product that wants to demand a fresh factor before disabling one
-   * should call {@link stepUp} first and gate its own UI on the result, which
-   * is what `amr` and `auth_time` on the new token exist for.
+   * Requires a code, which is either a current TOTP code or an unspent
+   * recovery code. Turning the second factor off is the single action an
+   * attacker holding nothing but a stolen access token would most want, so the
+   * route asks the user to prove the factor still works before removing it.
+   * A wrong or replayed code comes back as `invalid-code`.
    */
-  async disableTotp(
-    input: { code?: string } = {}
-  ): Promise<TotpDisableOutcome> {
-    const body =
-      input.code === undefined || input.code === '' ? {} : { code: input.code };
-    return this.runMfaCall(this.paths.totpDisable, body, CODE_REASONS, () => ({
-      ok: true as const,
-    }));
+  async disableTotp(input: { code: string }): Promise<TotpDisableOutcome> {
+    return this.runMfaCall(
+      this.paths.totpDisable,
+      { code: input.code },
+      CODE_REASONS,
+      () => ({ ok: true as const })
+    );
   }
 
   /**
@@ -1069,14 +1062,19 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * they regenerated. Show the new set with the same "this is the only time you
    * will see these" framing the activation uses.
    *
-   * Takes no code. The bearer token is the whole authorization the route wants,
-   * which is why this models no `invalid-code` outcome.
+   * Requires a code, the same current TOTP code or unspent recovery code
+   * {@link disableTotp} takes. Regenerating voids the printout that is a
+   * user's way back in after losing their phone, so the route asks them to
+   * prove the factor is live before it does that. A wrong or replayed code
+   * comes back as `invalid-code`.
    */
-  async regenerateRecoveryCodes(): Promise<RecoveryCodesOutcome> {
+  async regenerateRecoveryCodes(input: {
+    code: string;
+  }): Promise<RecoveryCodesOutcome> {
     return this.runMfaCall(
       this.paths.recoveryCodes,
-      {},
-      RECOVERY_REASONS,
+      { code: input.code },
+      CODE_REASONS,
       (data: RecoveryCodesBody) => ({
         ok: true as const,
         recoveryCodes: asStringArray(data.recovery_codes),

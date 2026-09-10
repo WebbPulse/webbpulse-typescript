@@ -395,40 +395,50 @@ describe('activateTotp', () => {
 });
 
 describe('disableTotp', () => {
-  it('posts nothing when no code is given, because the route wants none', async () => {
+  it('sends the code the route needs before it removes the factor', async () => {
     const { auth, fetchMock } = await signedIn({
       '/api/auth/totp/disable': () => jsonResponse({ disabled: true }),
     });
 
-    const outcome = await auth.disableTotp();
+    const outcome = await auth.disableTotp({ code: '123456' });
 
-    expect(bodyOf(fetchMock, '/api/auth/totp/disable')).toEqual({});
+    expect(bodyOf(fetchMock, '/api/auth/totp/disable')).toEqual({
+      code: '123456',
+    });
     expect(outcome).toEqual({ ok: true });
     expect(headerOf(fetchMock, '/api/auth/totp/disable', 'authorization')).toBe(
       'Bearer access-1'
     );
   });
 
-  it('passes a code through when a caller supplies one', async () => {
+  it('sends a recovery code the same way it sends a TOTP code', async () => {
+    // Either satisfies verify_challenge, so the client does not try to tell
+    // them apart before sending. The server decides what the string was.
     const { auth, fetchMock } = await signedIn({
       '/api/auth/totp/disable': () => jsonResponse({ disabled: true }),
     });
 
-    await auth.disableTotp({ code: '123456' });
+    await auth.disableTotp({ code: 'ABCDE-FGHIJ-KLMNO-PQRST' });
 
     expect(bodyOf(fetchMock, '/api/auth/totp/disable')).toEqual({
-      code: '123456',
+      code: 'ABCDE-FGHIJ-KLMNO-PQRST',
     });
   });
 
-  it('treats an empty code as no code', async () => {
-    const { auth, fetchMock } = await signedIn({
-      '/api/auth/totp/disable': () => jsonResponse({ disabled: true }),
+  it('refuses to disable on a bad code rather than throwing', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/totp/disable': () =>
+        envelope(401, 'INVALID_MFA_CODE', 'That code is not valid.'),
     });
 
-    await auth.disableTotp({ code: '' });
+    const outcome = await auth.disableTotp({ code: '000000' });
 
-    expect(bodyOf(fetchMock, '/api/auth/totp/disable')).toEqual({});
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'invalid-code',
+      code: 'INVALID_MFA_CODE',
+      message: 'That code is not valid.',
+    });
   });
 });
 
@@ -439,21 +449,45 @@ describe('regenerateRecoveryCodes', () => {
         jsonResponse({ recovery_codes: RECOVERY_CODES }),
     });
 
-    const outcome = await auth.regenerateRecoveryCodes();
+    const outcome = await auth.regenerateRecoveryCodes({ code: '123456' });
 
     expect(outcome).toEqual({ ok: true, recoveryCodes: RECOVERY_CODES });
-    expect(bodyOf(fetchMock, '/api/auth/recovery-codes')).toEqual({});
+    expect(bodyOf(fetchMock, '/api/auth/recovery-codes')).toEqual({
+      code: '123456',
+    });
   });
 
-  it('rethrows an INVALID_MFA_CODE, which this route cannot legitimately send', async () => {
-    // The route takes no code at all, so a code refusal arriving from it is a
-    // server bug. Modelling it would let a bug become a rendered form state.
+  it('models INVALID_MFA_CODE, because this route verifies a code too', async () => {
+    // Regenerating voids the printout a user falls back on, so the route asks
+    // them to prove the factor is live first. A mistyped code is a form state,
+    // not an exception.
     const { auth } = await signedIn({
-      '/api/auth/recovery-codes': () => envelope(401, 'INVALID_MFA_CODE'),
-      '/api/auth/refresh': () => envelope(401, 'SESSION_REVOKED'),
+      '/api/auth/recovery-codes': () =>
+        envelope(401, 'INVALID_MFA_CODE', 'That code is not valid.'),
     });
 
-    await expect(auth.regenerateRecoveryCodes()).rejects.toThrow();
+    const outcome = await auth.regenerateRecoveryCodes({ code: '000000' });
+
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'invalid-code',
+      code: 'INVALID_MFA_CODE',
+      message: 'That code is not valid.',
+    });
+  });
+
+  it('reports the verify limit rather than throwing', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/recovery-codes': () => envelope(429, undefined),
+    });
+
+    const outcome = await auth.regenerateRecoveryCodes({ code: '123456' });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) {
+      throw new Error('expected a refusal');
+    }
+    expect(outcome.reason).toBe('rate-limited');
   });
 });
 
@@ -569,8 +603,8 @@ describe('paths', () => {
 
     await auth.enrolTotp();
     await auth.activateTotp({ code: '123456' });
-    await auth.disableTotp();
-    await auth.regenerateRecoveryCodes();
+    await auth.disableTotp({ code: '123456' });
+    await auth.regenerateRecoveryCodes({ code: '123456' });
     await auth.stepUp({ code: '123456' });
 
     const called = fetchMock.mock.calls.map(
