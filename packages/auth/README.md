@@ -88,13 +88,119 @@ The ticket is held in `state.pendingMfa` as well, so a component that navigated
 between the two steps can pick it up from the store rather than threading it
 through a router.
 
+## Email verification and password reset
+
+Four methods, one for each of the identity service's link routes. Section 2.6
+calls verification and reset one primitive, "a single-use, time-limited, signed
+link", and these keep that symmetry: the two flows differ only in which pair of
+routes they call and which page the mailed link lands on.
+
+```ts
+// Anonymous. Works on a signed out page, which is the point: a user who never
+// finished signing up has no session, and the resend has to work for them.
+await auth.requestEmailVerification({ email });
+await auth.requestPasswordReset({ email });
+
+// Called by the landing pages the mailed links point at.
+await auth.confirmEmailVerification({ token });
+await auth.confirmPasswordReset({ token, newPassword });
+```
+
+**These four return outcomes rather than throwing.** Every other method on the
+client rejects on failure, which is right for a login: there is no result to
+hand back. These are different, because their likely non-success is not an
+exception but an answer a form has to render next to a field, such as "this link
+has expired" or "that password is too short". So they resolve to a discriminated
+union in the same style as `LoginOutcome`, and reject only for a network failure
+or a 500, which is what a caller genuinely could not have anticipated.
+
+```ts
+const outcome = await auth.confirmPasswordReset({ token, newPassword });
+if (outcome.ok) {
+  router.navigate('/login');
+} else {
+  switch (outcome.reason) {
+    case 'invalid-link':
+      setBanner('This link is no longer valid. Request a new one.');
+      break;
+    case 'password-rejected':
+      // The link is spent as well, so this needs a new link and a new password.
+      setFieldError('password', outcome.message);
+      break;
+    case 'rate-limited':
+      setBanner('Too many attempts. Try again shortly.');
+      break;
+    case 'unavailable':
+      setBanner('Password reset is unavailable right now.');
+      break;
+  }
+}
+```
+
+### Reading the token off the landing page
+
+The links are mailed as `<frontend_base_url>/verify-email?token=…` and
+`<frontend_base_url>/reset-password?token=…`, so the token is in the address bar
+and nowhere else by the time a component mounts. `VERIFY_EMAIL_PATH` and
+`RESET_PASSWORD_PATH` are those two SPA paths, and they must equal
+`VERIFY_LINK_PATH` and `RESET_LINK_PATH` in the backend's
+`webbpulse.identity.verification`, which is what builds the URL. Nothing enforces
+that across the two repositories at build time, so both sides carry a test
+asserting the literal.
+
+```ts
+import { readLinkToken, RESET_PASSWORD_PATH } from '@webbpulse/auth';
+
+const token = readLinkToken({ expectedPath: RESET_PASSWORD_PATH });
+if (token === null) {
+  setBanner('This link is missing its token. Request a new one.');
+}
+```
+
+`expectedPath` is optional and worth passing. A single page handling both links
+would otherwise read the verification token while sitting on the reset page and
+present it to the wrong endpoint, which the backend refuses as a wrong-purpose
+token.
+
+`RESET_PASSWORD_PATH` is the SPA page, not the API route. The API confirms a
+reset at `/api/auth/reset/confirm`; the page is what collects the new password
+and calls it. That indirection is deliberate on the backend's side: a `GET` that
+consumed the token would be spent by the first mail scanner that follows the
+link to check it for malware, before the user ever clicked.
+
+### Two things the request side deliberately does not tell you
+
+**Whether the address exists.** Section 5.4 puts both request routes in the
+enumeration-resistance table: an unknown address, an already verified one and one
+that just got a link all answer 200 with the same body. `EmailRequestOutcome` has
+no `sent: false` because there is no second case to model, and a caller must not
+try to infer one. Render "if that address has an account, a link is on its way"
+and nothing more specific. The reset route returns that exact sentence in
+`detail`, so prefer showing the server's copy over writing a local one.
+
+**Anything about a successful reset except that it happened.** A reset revokes
+every refresh family for the account, this browser's included, so
+`confirmPasswordReset` drops the client's own token on success. The user signs in
+again with the new password, which is the intended end of the flow. It does not
+fire `onSessionEnded`, because the caller is standing on the reset page and its
+own success branch navigates.
+
+Route paths are overridable through `paths`, alongside the rest:
+`verifyEmail`, `verifyEmailConfirm`, `passwordReset`, `passwordResetConfirm`.
+
 ## Errors
 
-Section 7.3 names twelve error codes, and `AUTH_ERROR_CODES` is exactly that
-list. `getAuthErrorCode(error)` returns one of them or `undefined`, and it
-returns `undefined` for a code the standard does not name, so a `switch` on the
-result falls through to a generic path rather than matching a string nobody
-promised.
+`AUTH_ERROR_CODES` opens with exactly the twelve codes section 7.3 names, and
+appends the five the M3 link routes emit: `INVALID_LINK`, `PASSWORD_TOO_SHORT`,
+`PASSWORD_REJECTED`, `TOO_MANY_ATTEMPTS` and `EMAIL_NOT_CONFIGURED`. Those five
+are not in the standard's list, which was written before the routes existed, and
+they are added rather than left to fall through, because `getAuthErrorCode`
+returning `undefined` means "not an identity outcome I model" and every one of
+these is an outcome a form has to render.
+
+`getAuthErrorCode(error)` returns one of them or `undefined`, and it returns
+`undefined` for a code the standard does not name, so a `switch` on the result
+falls through to a generic path rather than matching a string nobody promised.
 
 ```ts
 import { getAuthErrorCode, describeAuthError } from '@webbpulse/auth';
@@ -144,6 +250,13 @@ Core: `AuthClient`, `createAuthClient`, `AUTH_ERROR_CODES`,
 `AuthMfaRequired`, `LoginOutcome`, `MfaChallenge`, `PasswordCredentials`,
 `AuthTokenProvider`, `WebAuthnAdapter`, `LoginResult`, `SessionManagerOptions`,
 `SessionMode`, `SessionState`, `SessionStatus`.
+
+From the link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`,
+`LINK_TOKEN_PARAM`, `readLinkToken`, `retryAfterSeconds`, `classifyLinkError`,
+and the types `EmailRequestOutcome`, `EmailRequestSent`, `EmailRequestRefused`,
+`EmailVerificationOutcome`, `EmailVerificationConfirmed`, `PasswordResetOutcome`,
+`PasswordResetConfirmed`, `PasswordResetRejected`, `LinkRefused`, `InvalidLink`,
+`RateLimited`, `EmailUnavailable`, `AnyRefusal`, `EmailFlowPaths`.
 
 `@webbpulse/auth/react`: `AuthProvider`, `useAuth`, `useAuthState`,
 `useAuthClient`, `SessionProvider`, `useSession`, `useSessionState`,

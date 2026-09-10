@@ -31,10 +31,12 @@ function envelopeError(
 }
 
 describe('AUTH_ERROR_CODES', () => {
-  it('is exactly the set section 7.3 names', () => {
+  it('opens with exactly the twelve codes section 7.3 names, in order', () => {
     // Transcribed from the standard, British spelling included: these are wire
-    // values the backend emits, not prose to normalise.
-    expect([...AUTH_ERROR_CODES]).toEqual([
+    // values the backend emits, not prose to normalise. Asserted as a prefix
+    // rather than as the whole array, so the M3 link codes appended after them
+    // cannot quietly reorder or displace one of the twelve.
+    expect([...AUTH_ERROR_CODES].slice(0, 12)).toEqual([
       'MFA_REQUIRED',
       'INVALID_CREDENTIALS',
       'ACCOUNT_LOCKED',
@@ -47,6 +49,20 @@ describe('AUTH_ERROR_CODES', () => {
       'PASSWORD_TOO_LONG',
       'OAUTH_EMAIL_UNVERIFIED',
       'PASSKEY_NOT_RECOGNISED',
+    ]);
+  });
+
+  it('adds the codes the M3 link flows emit', () => {
+    // Not in 7.3, which was written before the verification and reset routes
+    // existed. They are listed here rather than left to fall through
+    // getAuthErrorCode as undefined, because that value means "not an identity
+    // outcome I model" and every one of these is one a form has to render.
+    expect([...AUTH_ERROR_CODES].slice(12)).toEqual([
+      'INVALID_LINK',
+      'PASSWORD_TOO_SHORT',
+      'PASSWORD_REJECTED',
+      'TOO_MANY_ATTEMPTS',
+      'EMAIL_NOT_CONFIGURED',
     ]);
   });
 });

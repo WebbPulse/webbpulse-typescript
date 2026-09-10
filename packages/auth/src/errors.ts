@@ -14,11 +14,29 @@
 import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
 
 /**
- * The codes the frontend must handle, verbatim from 7.3.
+ * The codes the frontend must handle.
  *
- * `PASSKEY_NOT_RECOGNISED` carries the British spelling because that is the
- * spelling the standard fixes and the backend emits. It is a wire value, not
- * prose, so it is transcribed rather than normalised.
+ * The first twelve are verbatim from 7.3. `PASSKEY_NOT_RECOGNISED` carries the
+ * British spelling because that is the spelling the standard fixes and the
+ * backend emits. These are wire values, not prose, so they are transcribed
+ * rather than normalised.
+ *
+ * The five after them are emitted by the M3 link flows and are not in 7.3's
+ * list, which was written before those routes existed. They are added here
+ * rather than left to fall through `getAuthErrorCode` as `undefined`, because
+ * that function's contract is that `undefined` means "not an identity outcome I
+ * model", and every one of these is an identity outcome a form has to render:
+ *
+ * - `INVALID_LINK`: the one refusal every failed link confirmation carries.
+ *   Unknown, expired, already spent and wrong purpose are deliberately one code
+ *   with one message, because the difference between them is information about
+ *   somebody else's token.
+ * - `PASSWORD_TOO_SHORT`, `PASSWORD_REJECTED`: section 5.6's policy refusals,
+ *   alongside `WEAK_PASSWORD` and `PASSWORD_TOO_LONG` which 7.3 already names.
+ * - `TOO_MANY_ATTEMPTS`: the per-account lockout, which is distinct from
+ *   `RATE_LIMITED` and is what the backend actually emits.
+ * - `EMAIL_NOT_CONFIGURED`: an identity deployment with no sender. A fault
+ *   rather than a user error, and worth telling apart from a rate limit.
  */
 export const AUTH_ERROR_CODES = [
   'MFA_REQUIRED',
@@ -33,6 +51,11 @@ export const AUTH_ERROR_CODES = [
   'PASSWORD_TOO_LONG',
   'OAUTH_EMAIL_UNVERIFIED',
   'PASSKEY_NOT_RECOGNISED',
+  'INVALID_LINK',
+  'PASSWORD_TOO_SHORT',
+  'PASSWORD_REJECTED',
+  'TOO_MANY_ATTEMPTS',
+  'EMAIL_NOT_CONFIGURED',
 ] as const;
 
 /** One of the codes in {@link AUTH_ERROR_CODES}. */
