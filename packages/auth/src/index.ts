@@ -14,6 +14,28 @@ export {
   type WebAuthnAdapter,
 } from './auth-client.js';
 export {
+  LINK_TOKEN_PARAM,
+  RESET_PASSWORD_PATH,
+  VERIFY_EMAIL_PATH,
+  classifyLinkError,
+  readLinkToken,
+  retryAfterSeconds,
+  type AnyRefusal,
+  type EmailFlowPaths,
+  type EmailRequestOutcome,
+  type EmailRequestRefused,
+  type EmailRequestSent,
+  type EmailUnavailable,
+  type EmailVerificationConfirmed,
+  type EmailVerificationOutcome,
+  type InvalidLink,
+  type LinkRefused,
+  type PasswordResetConfirmed,
+  type PasswordResetOutcome,
+  type PasswordResetRejected,
+  type RateLimited,
+} from './email-flows.js';
+export {
   AUTH_ERROR_CODES,
   AuthSessionEndedError,
   describeAuthError,

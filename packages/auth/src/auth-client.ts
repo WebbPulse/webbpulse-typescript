@@ -31,6 +31,13 @@ import {
   type ApiClientOptions,
 } from '@webbpulse/api-client';
 
+import {
+  classifyLinkError,
+  type EmailFlowPaths,
+  type EmailRequestOutcome,
+  type EmailVerificationOutcome,
+  type PasswordResetOutcome,
+} from './email-flows.js';
 import { AuthSessionEndedError, getAuthErrorCode } from './errors.js';
 
 /** Status of the session, as a single field. */
@@ -130,7 +137,7 @@ export interface WebAuthnAdapter {
 }
 
 /** Where the identity routes live, relative to the base URL. */
-export interface AuthPaths {
+export interface AuthPaths extends EmailFlowPaths {
   /** Defaults to `/api/auth/login`. */
   login?: string;
   /** Defaults to `/api/auth/login/totp`. */
@@ -167,6 +174,10 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   passkeyLoginOptions: '/api/auth/login/webauthn/options',
   passkeyLoginVerify: '/api/auth/login/webauthn/verify',
   oauthStart: '/api/auth/oauth',
+  verifyEmail: '/api/auth/verify-email',
+  verifyEmailConfirm: '/api/auth/verify-email/confirm',
+  passwordReset: '/api/auth/reset',
+  passwordResetConfirm: '/api/auth/reset/confirm',
 };
 
 /** Construction options. */
@@ -244,6 +255,31 @@ interface TokenResponseBody {
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v) => typeof v === 'string') : [];
 }
+
+/**
+ * Which refusals each link route models, per route.
+ *
+ * Explicit sets rather than one permissive classifier, so a code that is a
+ * legitimate outcome on one route cannot become a silent success on another. A
+ * `PASSWORD_TOO_SHORT` arriving from the verification confirm route is a server
+ * bug, and the right response to it is to throw rather than to invent a state
+ * the caller can render.
+ */
+const EMAIL_REQUEST_REASONS: ReadonlySet<'rate-limited' | 'unavailable'> =
+  new Set(['rate-limited', 'unavailable'] as const);
+
+const CONFIRM_LINK_REASONS: ReadonlySet<
+  'invalid-link' | 'rate-limited' | 'unavailable'
+> = new Set(['invalid-link', 'rate-limited', 'unavailable'] as const);
+
+const RESET_CONFIRM_REASONS: ReadonlySet<
+  'invalid-link' | 'rate-limited' | 'unavailable' | 'password-rejected'
+> = new Set([
+  'invalid-link',
+  'rate-limited',
+  'unavailable',
+  'password-rejected',
+] as const);
 
 /**
  * The auth client.
@@ -719,6 +755,173 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
         }),
         { notify: true, recordError: false }
       );
+    }
+  }
+
+  // -------------------------------------------------- email link flows
+
+  /**
+   * Asks the backend to mail a verification link.
+   *
+   * Anonymous and keyed by address, matching the route: a user who never
+   * finished signing up has no session to authenticate with, and the resend has
+   * to work for exactly that person. It does not read `state.user`, so it works
+   * on a signed out page.
+   *
+   * **Resolves the same way whatever the address is.** Section 5.4 puts this in
+   * the enumeration-resistance table, so an unknown address, an address that is
+   * already verified and an address that just got a link all answer 200 with
+   * the same body. There is deliberately nothing here to tell them apart, and a
+   * caller must not try: render "if that address needs verifying, a link is on
+   * its way" and nothing more specific.
+   *
+   * Returns `ok: false` only for a rate limit or an identity deployment with no
+   * sender. It rejects for a network failure or a 500.
+   */
+  async requestEmailVerification(input: {
+    email: string;
+  }): Promise<EmailRequestOutcome> {
+    return this.runEmailRequest(this.paths.verifyEmail, input.email);
+  }
+
+  /**
+   * Confirms a verification link and marks the address verified.
+   *
+   * Anonymous, and a POST: the link in the email lands on
+   * {@link VERIFY_EMAIL_PATH} in the SPA, which reads the token with
+   * {@link readLinkToken} and calls this. The backend deliberately does not
+   * confirm on a `GET`, because a mail scanner following the link to check it
+   * for malware would spend the token before the user ever clicked.
+   *
+   * Returns `ok: false, reason: 'invalid-link'` for a token that is unknown,
+   * expired, already spent, or a reset token presented here by mistake. Those
+   * four are one outcome with one message on purpose: the difference between
+   * them is information about somebody else's token.
+   */
+  async confirmEmailVerification(input: {
+    token: string;
+  }): Promise<EmailVerificationOutcome> {
+    try {
+      const response = await this.client.post<{ user_id?: unknown }>(
+        this.paths.verifyEmailConfirm,
+        { token: input.token },
+        // No retry. The token is single use, so a retried request presents a
+        // token the first attempt already spent and is refused as invalid.
+        { retries: 0 }
+      );
+      const userId = response.data.user_id;
+      return { ok: true, userId: typeof userId === 'string' ? userId : null };
+    } catch (error) {
+      const refused = classifyLinkError(error, CONFIRM_LINK_REASONS);
+      if (refused === null) {
+        throw error;
+      }
+      return refused;
+    }
+  }
+
+  /**
+   * Asks the backend to mail a password reset link.
+   *
+   * Like {@link requestEmailVerification}, this answers identically whether or
+   * not the address has an account, and section 5.4 fixes the wording the
+   * server returns in `detail`: "If that address has an account, a link is on
+   * its way." Render that rather than a local sentence, so one carefully
+   * phrased line is the only thing users ever see here.
+   */
+  async requestPasswordReset(input: {
+    email: string;
+  }): Promise<EmailRequestOutcome> {
+    return this.runEmailRequest(this.paths.passwordReset, input.email);
+  }
+
+  /**
+   * Spends a reset link and sets a new password.
+   *
+   * On success **every session for that account is gone**, this browser's
+   * included: a reset is the remedy for a compromise, so the backend revokes
+   * every refresh family and clears the refresh cookie. This client therefore
+   * drops its own token too, rather than holding one the server will refuse on
+   * its next use. The user signs in again with the new password, which is the
+   * intended end of the flow.
+   *
+   * Three distinct refusals, because the remedies differ: `invalid-link` means
+   * ask for a new link, `password-rejected` means the link is spent *and* the
+   * password was no good so ask for a new link and choose another, and
+   * `rate-limited` means wait.
+   *
+   * `familyIds` is the exact-revocation seam the backend's `logout_all` uses.
+   * Almost no caller has it, and omitting it is the normal case.
+   */
+  async confirmPasswordReset(input: {
+    token: string;
+    newPassword: string;
+    familyIds?: string[];
+  }): Promise<PasswordResetOutcome> {
+    const body: Record<string, unknown> = {
+      token: input.token,
+      // Snake case, because that is what the route reads off the body.
+      new_password: input.newPassword,
+    };
+    if (input.familyIds !== undefined) {
+      body['family_ids'] = input.familyIds;
+    }
+    try {
+      await this.client.post(this.paths.passwordResetConfirm, body, {
+        retries: 0,
+      });
+      // The reset revoked every family, so any token held here is dead. Ending
+      // the session locally keeps memory honest about that. `notify` is false:
+      // the caller is standing on the reset page and is about to be sent to the
+      // sign in form by its own success branch, so firing `onSessionEnded` here
+      // would be a second, competing navigation.
+      this.endSession(
+        new AuthSessionEndedError({
+          message: 'The password was reset and every session was ended.',
+          reason: 'logged-out',
+        }),
+        { notify: false, recordError: false }
+      );
+      return { ok: true };
+    } catch (error) {
+      const refused = classifyLinkError(error, RESET_CONFIRM_REASONS);
+      if (refused === null) {
+        throw error;
+      }
+      return refused;
+    }
+  }
+
+  /**
+   * The shared body of the two request routes.
+   *
+   * Written once because the two are the same shape by design, and because the
+   * property that matters here is a negative one: neither of them may leak
+   * whether the address exists. One implementation is one place to check that.
+   */
+  private async runEmailRequest(
+    path: string,
+    email: string
+  ): Promise<EmailRequestOutcome> {
+    try {
+      const response = await this.client.post<{ detail?: unknown }>(
+        path,
+        { email },
+        // No retry. A retry spends a second slot in a bucket the standard sets
+        // at three per hour per address, and mails a second link for one ask.
+        { retries: 0 }
+      );
+      const detail = response.data.detail;
+      return {
+        ok: true,
+        detail: typeof detail === 'string' ? detail : undefined,
+      };
+    } catch (error) {
+      const refused = classifyLinkError(error, EMAIL_REQUEST_REASONS);
+      if (refused === null) {
+        throw error;
+      }
+      return refused;
     }
   }
 
