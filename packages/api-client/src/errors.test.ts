@@ -171,7 +171,6 @@ describe('isWebbPulseErrorBody', () => {
   });
 
   it('rejects a FastAPI detail body', () => {
-    // The discriminant is `success: false`, which a `detail` body never sets.
     expect(isWebbPulseErrorBody({ detail: 'Not found' })).toBe(false);
   });
 
@@ -194,8 +193,6 @@ describe('isWebbPulseErrorBody', () => {
   });
 
   it('accepts an envelope missing status and request_id', () => {
-    // Deliberately permissive: a proxy that drops a key should not cost the
-    // caller the message, which is the field that matters.
     expect(isWebbPulseErrorBody({ success: false, message: 'Gone' })).toBe(
       true
     );
@@ -208,8 +205,6 @@ describe('formatApiErrorMessage with the WebbPulse envelope', () => {
   });
 
   it('prefers the envelope message over a detail on the same body', () => {
-    // Not a shape the backend produces, but the precedence has to be stated:
-    // `message` is what `error_body` writes for a caller to read.
     expect(
       formatApiErrorMessage({ ...envelope(), detail: 'framework wording' })
     ).toBe('No such build list.');
@@ -245,9 +240,6 @@ describe('getWebbPulseError', () => {
   });
 
   it('leaves the optional fields undefined when the backend omitted them', () => {
-    // A service that has not enabled `error_codes` or `validation_details`
-    // sends the four base fields, and a `switch` on errorCode has to be able
-    // to see that as one case rather than as a missing property.
     const info = getWebbPulseError(apiError(envelope()));
     expect(info.errorCode).toBeUndefined();
     expect(info.details).toBeUndefined();
@@ -267,8 +259,6 @@ describe('getWebbPulseError', () => {
   });
 
   it('reads the status from the response, not the body', () => {
-    // The two disagree only when something rewrote one of them, and the
-    // response is the one the browser actually saw.
     const info = getWebbPulseError(apiError(envelope({ status: 500 }), 502));
     expect(info.status).toBe(502);
   });
@@ -291,8 +281,6 @@ describe('getWebbPulseError', () => {
   });
 
   it('always yields a renderable message', () => {
-    // The point of the accessor: a call site renders `.message` with no
-    // fallback of its own, so it can never be empty.
     const bare = new ApiError({
       status: 500,
       statusText: 'Internal Server Error',
@@ -307,13 +295,11 @@ describe('getWebbPulseError', () => {
 });
 
 describe('parseRetryAfter', () => {
-  // RFC 9110 section 10.2.3 defines two forms, and a server may send either.
   it('reads the delta-seconds form', () => {
     expect(parseRetryAfter('120')).toBe(120);
   });
 
   it('reads a zero wait', () => {
-    // Distinct from `undefined`: the server said "now", not "no hint".
     expect(parseRetryAfter('0')).toBe(0);
   });
 
@@ -327,7 +313,6 @@ describe('parseRetryAfter', () => {
   });
 
   it('rounds a fractional HTTP-date wait up', () => {
-    // 1500ms must not read as one second: the caller would retry too early.
     const now = Date.parse('Wed, 21 Oct 2026 07:28:00 GMT');
     expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:01 GMT', now + 500)).toBe(1);
     expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:02 GMT', now + 500)).toBe(2);
@@ -350,8 +335,6 @@ describe('parseRetryAfter', () => {
   });
 
   it('refuses a signed or fractional delta rather than coercing it', () => {
-    // `Number('-5')` and `Number('1.5')` both succeed, and neither is
-    // delta-seconds. Accepting them would hand a call site a negative wait.
     expect(parseRetryAfter('-5')).toBeUndefined();
     expect(parseRetryAfter('1.5')).toBeUndefined();
     expect(parseRetryAfter('12abc')).toBeUndefined();
@@ -376,8 +359,6 @@ describe('retryAfterFromHeaders', () => {
   });
 
   it('ignores the header on a status that is not retryable', () => {
-    // A 404 with a `Retry-After` is not a wait a caller should act on, and
-    // surfacing one would put a countdown in front of a permanent failure.
     expect(retryAfterFromHeaders(404, headersWith('45'))).toBeUndefined();
     expect(retryAfterFromHeaders(400, headersWith('45'))).toBeUndefined();
   });
@@ -401,8 +382,6 @@ describe('ApiError.retryAfterSeconds', () => {
   });
 
   it('is undefined when the field was not supplied', () => {
-    // Every existing construction site omits it, and none of them changes
-    // shape: the field reads `undefined` exactly as an absent header does.
     expect(apiError(envelope()).retryAfterSeconds).toBeUndefined();
   });
 });

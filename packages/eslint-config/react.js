@@ -1,14 +1,8 @@
-// React flat config, layered on the base.
-//
-// The React plugins are peer dependencies rather than dependencies: the two
-// applications are on different plugin sets today (CarModPicker adds react-x
-// and react-dom on top of react-hooks and react-refresh, Portfolio runs only
-// the latter two), and forcing the union on both from a shared package would
-// make this config a blocker for whichever one is slower to adopt. A consumer
-// passes the plugins it has.
 import { baseConfig } from './base.js';
 
 /**
+ * The base config plus React rules, enabled for whichever plugins are passed in.
+ *
  * @param {object} [options]
  * @param {string[]} [options.project] tsconfig paths for the typed rules.
  * @param {string} [options.tsconfigRootDir] directory those paths resolve from.

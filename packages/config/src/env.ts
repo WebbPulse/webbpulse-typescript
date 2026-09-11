@@ -1,10 +1,6 @@
 /**
- * Typed accessors over a Vite `import.meta.env` bag, with validation.
- *
- * Deliberately takes the environment as an argument rather than reading
- * `import.meta.env` itself. That keeps the package testable in Node, keeps it
- * out of the way of Vite's compile time string replacement, and lets an
- * application pass a merged bag when it needs to.
+ * Typed, validating accessors over a Vite `import.meta.env` bag. The bag is an
+ * argument rather than read directly, so this stays testable outside Vite.
  */
 
 /** The subset of `import.meta.env` this package relies on. */
@@ -41,15 +37,8 @@ export class ConfigReader {
   }
 
   /**
-   * Reads one key as a trimmed string, or `undefined` when it is absent or
-   * blank.
-   *
-   * Only primitives are accepted. Vite replaces `import.meta.env.VITE_*` with
-   * string literals, so an object arriving here means the caller passed a
-   * hand built bag with a nested value. Stringifying it would yield
-   * "[object Object]", which then passes every check below and fails much later
-   * as a request to a URL literally containing that text. Recording an issue
-   * instead surfaces it at startup, which is the whole point of this package.
+   * Reads one key as a trimmed string, or `undefined` when absent or blank.
+   * Non-primitives record an issue rather than stringifying to "[object Object]".
    */
   private raw(key: string): string | undefined {
     const value = this.env[key];
@@ -86,12 +75,8 @@ export class ConfigReader {
   }
 
   /**
-   * Reads a URL. Accepts an absolute URL or a root relative path.
-   *
-   * The relative form is not a loophole: both applications legitimately use
-   * `/api` in local development, where the Vite dev server proxies it to the
-   * backend, and in production where the SPA and the API sit behind one
-   * CloudFront distribution.
+   * Reads a URL, accepting an absolute URL or a root relative path such as
+   * `/api`, which is the form both applications use behind one distribution.
    */
   url(
     key: string,

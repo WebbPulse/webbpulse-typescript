@@ -1,95 +1,8 @@
 /**
- * The client half of the identity service's M5 surface: WebAuthn passkeys.
- *
- * Seven routes on the server, and unlike the M6 OAuth set every one of them is
- * an ordinary `fetch`. What is unusual here is not the transport but the fact
- * that each ceremony is **two round trips with a browser API in between**:
- *
- * | Route | What the client does |
- * | --- | --- |
- * | `POST /passkeys/register/options` | fetch options, bearer token |
- * | `POST /passkeys/register/verify` | post what `navigator.credentials.create` returned |
- * | `POST /login/passkey/options` | fetch options, anonymous |
- * | `POST /login/passkey/verify` | post what `navigator.credentials.get` returned |
- * | `GET /passkeys` | ordinary `fetch` with a bearer token |
- * | `PATCH /passkeys/{credential_id}` | rename |
- * | `DELETE /passkeys/{credential_id}` | remove |
- *
- * {@link AuthClient.registerPasskey} and {@link AuthClient.signInWithPasskey}
- * each run both legs, because the two halves are useless apart: the options are
- * spent by exactly one attempt and holding them across a user interaction is
- * how a ceremony ends up half finished with a challenge row already consumed.
- *
- * ## The challenge id is ours and the options are the specification's
- *
- * The options routes answer `{ challenge_id, publicKey }`. The inner document
- * is WebAuthn JSON exactly as the specification defines it, camelCase and all,
- * because it goes straight to the browser and a helpfully renamed field is a
- * field the browser does not understand. `challenge_id` is snake_case with the
- * rest of this API, because it is the server's own handle on the challenge row.
- *
- * The verify routes take `{ challenge_id, credential }`, where `credential` is
- * the browser's response serialised to JSON. So the client has to carry the
- * `challenge_id` from the first leg to the second and must not send it to the
- * browser, which is the whole reason these methods run both legs themselves.
- *
- * **The challenge is a row on the server, not a token, and it is single use.**
- * It is spent by one attempt whatever the outcome, so a failed ceremony cannot
- * be retried with the same options: a retry starts again from the options leg,
- * which is what both methods do naturally by being one call.
- *
- * ## base64url, in both directions
- *
- * WebAuthn's JavaScript API speaks `ArrayBuffer` and the wire speaks
- * base64url, so something has to convert. Recent browsers do it themselves
- * through `PublicKeyCredential.parseCreationOptionsFromJSON`,
- * `parseRequestOptionsFromJSON` and the credential's own `toJSON`, and those
- * are used when present. {@link toCreationOptions}, {@link toRequestOptions}
- * and {@link credentialToJSON} are the fallback for a browser that has neither,
- * and they convert exactly the fields the specification declares as
- * `BufferSource`: nothing else is touched, so an option this version has never
- * heard of still reaches the browser unchanged.
- *
- * The shapes are py_webauthn's `PublicKeyCredentialCreationOptionsJSON` and
- * `PublicKeyCredentialRequestOptionsJSON` going in, and its
- * `RegistrationResponseJSON` and `AuthenticationResponseJSON` coming back.
- *
- * ## Why these return outcomes rather than throwing
- *
- * The same rule the M3 link flows, the M4 MFA flows and the M6 OAuth flows
- * follow: a refusal a page has to render inline is an outcome, and anything a
- * caller could not have anticipated stays an exception. The refusals that
- * matter here are:
- *
- * - `PASSKEY_REJECTED`, the one answer every failed ceremony gets. Wrong
- *   challenge, expired challenge, an assertion that does not verify, a
- *   credential the server does not know and a credential whose user is gone are
- *   deliberately one code with one message, so neither login route becomes an
- *   oracle for which credentials or accounts exist.
- * - `PASSKEY_ALREADY_REGISTERED`, an authenticator enrolled once already. One
- *   answer whether it is on this account or somebody else's, for the same
- *   reason.
- * - `LAST_CREDENTIAL`, the refusal with a specific remedy: this is the only
- *   passkey and there is no password, so deleting it would strand the user
- *   outside their own account. A settings page has to say "set a password
- *   first", and no generic error toast knows to say that.
- * - `PASSKEY_LOGIN_DISABLED`, passwordless sign-in switched off for the
- *   deployment. A sign-in page should hide the button rather than render an
- *   error, which is why it is a named outcome.
- * - `PASSKEYS_DISABLED`, the capability absent altogether.
- * - `PASSKEY_NOT_FOUND`, usually a stale settings page.
- * - `PASSKEY_NAME_REQUIRED`, an empty rename.
- * - a rate limit, which section 5.1 puts at thirty per fifteen minutes on each
- *   login leg and ten per hour on enrolment.
- *
- * ## The one thing that is not a refusal
- *
- * A user who dismisses the browser's passkey prompt gets a `DOMException`, most
- * often `NotAllowedError`, from `navigator.credentials` itself rather than from
- * the server. That is not an error either: it is the same gesture as pressing
- * Cancel on an OAuth consent screen. {@link isPasskeyCancellation} recognises
- * it, and both ceremony methods turn it into a `cancelled` outcome so a page
- * does not show a failure for a user who simply changed their mind.
+ * The client half of the identity service's WebAuthn passkey surface. Each
+ * ceremony is two round trips with a browser API in between, so
+ * {@link AuthClient} runs both legs itself: the challenge is a single use row
+ * and holding options across a user interaction strands it.
  */
 
 import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
@@ -97,11 +10,8 @@ import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
 import { type AuthErrorCode, getAuthErrorCode } from './errors.js';
 
 /**
- * One passkey as `GET /passkeys` renders it.
- *
- * The public key is deliberately **not** in this document. It discloses
- * nothing, being public, but a frontend has no use for it and a response body
- * carrying key material invites somebody to start comparing it to something.
+ * One passkey as `GET /passkeys` renders it. The public key is deliberately not
+ * in the document: a frontend has no use for it.
  */
 export interface Passkey {
   /** base64url, and the identifier the rename and delete routes take. */
@@ -113,9 +23,8 @@ export interface Passkey {
   /** ISO 8601 instant of the most recent sign-in through it, when there is one. */
   lastUsedAt: string | undefined;
   /**
-   * The transports the authenticator reported: `usb`, `nfc`, `ble`,
-   * `internal`, `hybrid`. Empty when the browser reported none, which is not an
-   * error.
+   * The transports the authenticator reported. Empty when the browser reported
+   * none, which is not an error.
    */
   transports: string[];
   /** The authenticator model's identifier, or `''` when it reported none. */
@@ -125,10 +34,8 @@ export interface Passkey {
   /** Whether it currently is backed up. */
   backupState: boolean;
   /**
-   * Whether the authenticator verified the user at enrolment.
-   *
-   * A credential enrolled with user verification is the one that signs in
-   * without a second factor later. See {@link PasskeySignedIn}.
+   * Whether the authenticator verified the user at enrolment. Such a credential
+   * signs in without a second factor later. See {@link PasskeySignedIn}.
    */
   userVerified: boolean;
 }
@@ -142,10 +49,8 @@ interface PasskeyRefusalFields {
 }
 
 /**
- * A ceremony the server would not accept.
- *
- * One case rather than five, because the server answers one code for five
- * reasons on purpose. See the module docstring.
+ * A ceremony the server would not accept. One case rather than five, so neither
+ * login route becomes an oracle for which credentials or accounts exist.
  */
 export interface PasskeyRejected extends PasskeyRefusalFields {
   reason: 'rejected';
@@ -157,12 +62,9 @@ export interface PasskeyAlreadyRegistered extends PasskeyRefusalFields {
 }
 
 /**
- * A delete that would leave the account with no way in.
- *
- * The remedy is a specific instruction, "set a password first, then remove
- * this passkey", which is why this is a named outcome rather than a thrown 409.
- * It applies only to the last passkey on an account with no password: with two
- * enrolled, either can go.
+ * A delete that would leave the account with no way in. Applies only to the last
+ * passkey on an account with no password, and the remedy is to set a password
+ * first.
  */
 export interface PasskeyLastCredential extends PasskeyRefusalFields {
   reason: 'last-credential';
@@ -179,13 +81,9 @@ export interface PasskeyNameRequired extends PasskeyRefusalFields {
 }
 
 /**
- * Passkeys this deployment cannot use.
- *
- * Either the capability is off altogether (`PASSKEYS_DISABLED`) or passwordless
- * sign-in specifically is off while enrolment still works
- * (`PASSKEY_LOGIN_DISABLED`). Both are deployment configuration rather than
- * user error, and a page should hide the affected control rather than render a
- * failure. `code` tells the two apart when a caller cares.
+ * Passkeys this deployment cannot use: either the capability is off altogether
+ * or passwordless sign-in alone is, with `code` telling the two apart. A page
+ * should hide the affected control rather than render a failure.
  */
 export interface PasskeysUnavailable extends PasskeyRefusalFields {
   reason: 'unavailable';
@@ -200,12 +98,8 @@ export interface PasskeyRateLimited extends PasskeyRefusalFields {
 
 /**
  * The user dismissed the browser's prompt, or the browser refused to run the
- * ceremony.
- *
- * Not a server refusal at all: this comes from `navigator.credentials`. It is
- * the same gesture as Cancel on an OAuth consent screen and should not be
- * rendered as an error. `code` is always `undefined` and `message` is local,
- * because there was no envelope.
+ * ceremony. Not a server refusal, so `code` is always `undefined` and the
+ * message is local.
  */
 export interface PasskeyCancelled {
   ok: false;
@@ -255,13 +149,9 @@ export interface PasskeySignedIn {
 }
 
 /**
- * A sign-in that still needs a second factor.
- *
- * Reached when the authenticator reported **no** user verification and the
- * account has TOTP enrolled. A passkey that verified the user is two factors in
- * one gesture and never lands here. Finish with `completeTotp({ ticket, code })`,
- * the same method the password path uses, because it is the same ticket and the
- * same route.
+ * A sign-in that still needs a second factor, reached when the authenticator
+ * reported no user verification and the account has TOTP enrolled. Finish with
+ * `completeTotp({ ticket, code })`, as on the password path.
  */
 export interface PasskeyMfaRequired {
   ok: true;
@@ -324,20 +214,16 @@ export interface PasskeyPaths {
   /** Defaults to `/api/auth/login/passkey/verify`. */
   passkeyLoginVerify?: string;
   /**
-   * Defaults to `/api/auth/passkeys`.
-   *
-   * The collection for the list, and the base the rename and the delete append
-   * a credential id to.
+   * Defaults to `/api/auth/passkeys`: the collection for the list, and the base
+   * the rename and the delete append a credential id to.
    */
   passkeys?: string;
 }
 
 /**
- * What the two options routes answer.
- *
- * `publicKey` is WebAuthn JSON as the specification defines it and is passed to
- * the browser untouched. `challengeId` never reaches the browser: it is the
- * server's handle on the challenge row and goes back on the verify leg.
+ * What the two options routes answer. `publicKey` is WebAuthn JSON passed to the
+ * browser untouched; `challengeId` never reaches the browser and goes back on
+ * the verify leg.
  */
 export interface PasskeyChallenge {
   challengeId: string;
@@ -345,13 +231,9 @@ export interface PasskeyChallenge {
 }
 
 /**
- * The WebAuthn surface the client uses.
- *
- * Typed structurally rather than against the DOM `CredentialsContainer`, so the
- * package type checks in a Node test run with no `navigator` and a test can
- * supply a stub without constructing a real credential. Both methods take the
- * full `CredentialCreationOptions` / `CredentialRequestOptions` wrapper, so an
- * adapter can be `navigator.credentials` itself.
+ * The WebAuthn surface the client uses. Typed structurally rather than against
+ * the DOM, so the package type checks in Node and a test can supply a stub,
+ * while `navigator.credentials` itself still satisfies it.
  */
 export interface WebAuthnAdapter {
   /** Wraps `navigator.credentials.create`. */
@@ -361,15 +243,9 @@ export interface WebAuthnAdapter {
 }
 
 /**
- * Whether this browser can do WebAuthn at all.
- *
- * Checks for `PublicKeyCredential` on the global, which is what the
- * specification says is present exactly when the API is. Call it before
- * rendering a "Sign in with a passkey" button: a button that throws when it is
- * pressed is worse than no button.
- *
- * False in Node, in a test run with no DOM, and in a browser served over plain
- * HTTP, since WebAuthn is a secure-context API.
+ * Whether this browser can do WebAuthn at all. Call it before rendering a
+ * passkey button. False in Node and over plain HTTP, since WebAuthn is a
+ * secure-context API.
  */
 export function passkeysSupported(): boolean {
   return (
@@ -380,23 +256,13 @@ export function passkeysSupported(): boolean {
 }
 
 /**
- * Whether this browser can offer passkeys in an autofill dropdown.
- *
- * Conditional mediation is what puts a passkey in the same dropdown as a saved
- * username, so a user signs in without pressing a passkey button at all. It is
- * a separate capability from {@link passkeysSupported} and a browser can have
- * one without the other, which is why this is a second function and an async
- * one: the answer comes from a promise.
- *
- * Resolves false rather than rejecting when the API is absent or throws, so a
- * caller can `await` it unconditionally on the render path.
+ * Whether this browser can offer passkeys in an autofill dropdown. A separate
+ * capability from {@link passkeysSupported}, and async because the answer comes
+ * from a promise. Resolves false rather than rejecting when the API is absent.
  *
  * @example
  * ```ts
  * if (await conditionalMediationAvailable()) {
- *   // Start a discoverable sign-in that resolves when the user picks a
- *   // passkey from the autofill dropdown, and mark the username input
- *   // autocomplete="username webauthn".
  *   void auth.signInWithPasskey({ mediation: 'conditional' });
  * }
  * ```
@@ -415,24 +281,16 @@ export async function conditionalMediationAvailable(): Promise<boolean> {
   try {
     return (await ctor.isConditionalMediationAvailable()) === true;
   } catch {
-    // A browser that has the method but throws is a browser that cannot do it.
     return false;
   }
 }
 
 /**
  * True when a thrown value is the user dismissing the browser's prompt.
- *
- * `NotAllowedError` is what every browser raises for a cancelled or timed out
- * ceremony, and the specification is explicit that it must not distinguish the
- * two: telling a caller which one happened would say whether a credential
- * existed. `AbortError` is what an `AbortSignal` produces, which is how a
- * conditional sign-in is torn down when the user submits a password instead.
- *
- * Recognised by `name` rather than with `instanceof DOMException`, because
- * `DOMException` is not defined in every runtime this package type checks in
- * and a test stub raising a plain object with the right `name` should classify
- * the same way a browser's does.
+ * `NotAllowedError` covers a cancelled or timed out ceremony, which the
+ * specification refuses to distinguish, and `AbortError` a torn down
+ * conditional sign-in. Recognised by `name`, since `DOMException` is not
+ * defined in every runtime this package type checks in.
  */
 export function isPasskeyCancellation(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) {
@@ -467,13 +325,9 @@ export function bufferToBase64Url(value: ArrayBuffer | Uint8Array): string {
 }
 
 /**
- * `PublicKeyCredentialCreationOptionsJSON` to the browser's option object.
- *
- * The fallback for a browser with no `parseCreationOptionsFromJSON`. Exactly
- * three things are `BufferSource` in the creation options: the challenge, the
- * user id, and the id of each entry in `excludeCredentials`. Everything else is
- * copied through untouched, so an option this version has never heard of still
- * reaches the browser.
+ * `PublicKeyCredentialCreationOptionsJSON` to the browser's option object, the
+ * fallback for a browser with no `parseCreationOptionsFromJSON`. Converts only
+ * the three `BufferSource` fields and copies everything else through untouched.
  */
 export function toCreationOptions(
   json: Record<string, unknown>
@@ -499,10 +353,8 @@ export function toCreationOptions(
 
 /**
  * `PublicKeyCredentialRequestOptionsJSON` to the browser's option object.
- *
- * Two `BufferSource` fields this time: the challenge, and the id of each entry
- * in `allowCredentials`. A discoverable request has an empty `allowCredentials`
- * or none at all, and both are left as they arrived.
+ * Converts the challenge and each `allowCredentials` id; a discoverable request
+ * has neither and is left as it arrived.
  */
 export function toRequestOptions(
   json: Record<string, unknown>
@@ -530,17 +382,10 @@ function descriptorToBuffers(entry: unknown): unknown {
 }
 
 /**
- * A `PublicKeyCredential` to the JSON the server expects.
- *
- * The fallback for a browser whose credentials have no `toJSON`. Produces
- * py_webauthn's `RegistrationResponseJSON` or `AuthenticationResponseJSON`
- * depending on which fields the response carries, which is how the two
- * ceremonies are told apart: an attestation has `attestationObject` and an
- * assertion has `signature`.
- *
- * Returns the value unchanged when it is already a plain object, so a test stub
- * can hand back a literal and a browser that did the conversion itself is not
- * converted twice.
+ * A `PublicKeyCredential` to the JSON the server expects, for a browser whose
+ * credentials have no `toJSON`. The ceremonies are told apart by their fields:
+ * an attestation has `attestationObject` and an assertion has `signature`.
+ * A value that is already a plain object is returned unchanged.
  */
 export function credentialToJSON(credential: unknown): Record<string, unknown> {
   if (typeof credential !== 'object' || credential === null) {
@@ -557,7 +402,6 @@ export function credentialToJSON(credential: unknown): Record<string, unknown> {
 
   const rawId = source['rawId'];
   if (rawId === undefined) {
-    // Already plain JSON, from a test stub or a browser that converted for us.
     return source;
   }
 
@@ -583,13 +427,11 @@ export function credentialToJSON(credential: unknown): Record<string, unknown> {
     clientDataJSON: encodeBuffer(fields['clientDataJSON']),
   };
   if (fields['attestationObject'] !== undefined) {
-    // Registration.
     inner['attestationObject'] = encodeBuffer(fields['attestationObject']);
     if (typeof fields['getTransports'] === 'function') {
       inner['transports'] = (fields['getTransports'] as () => unknown)();
     }
   } else {
-    // Authentication.
     inner['authenticatorData'] = encodeBuffer(fields['authenticatorData']);
     inner['signature'] = encodeBuffer(fields['signature']);
     inner['userHandle'] =
@@ -611,10 +453,8 @@ function encodeBuffer(value: unknown): string {
 }
 
 /**
- * Reads a challenge off an options route's body.
- *
- * Both options routes answer the same shape, so one reader serves both.
- * Defends each field rather than trusting the body, because this crosses a
+ * Reads a challenge off an options route's body. Both routes answer the same
+ * shape, and each field is defended rather than trusted, because this crosses a
  * repository boundary with nothing enforcing it at build time.
  */
 export function parsePasskeyChallenge(body: unknown): PasskeyChallenge {
@@ -684,12 +524,8 @@ export function parsePasskeys(body: unknown): Passkey[] {
 }
 
 /**
- * Reads a retry hint in seconds off a 429.
- *
- * The `Retry-After` header first, which is where the rate limit dependency puts
- * it and which `@webbpulse/api-client` keeps on `ApiError`, then a `retry_after`
- * in the envelope's `details`. The same reader `oauth.ts` uses, for the same
- * reason.
+ * Reads a retry hint in seconds off a 429: the `Retry-After` header first, then
+ * a `retry_after` in the envelope's `details`.
  */
 function retryAfterOf(error: ApiError): number | undefined {
   if (error.retryAfterSeconds !== undefined) {
@@ -707,22 +543,11 @@ function retryAfterOf(error: ApiError): number | undefined {
 }
 
 /**
- * Classifies a thrown error from one of the seven routes, or returns null.
- *
+ * Classifies a thrown error from one of the passkey routes, or returns null.
  * `expected` is the set of reasons the calling method models, so a refusal that
- * is a legitimate outcome on one route cannot become a silent success on
- * another: `listPasskeys` never returns `last-credential`, and one arriving
- * there would be a server bug worth throwing on.
- *
- * A 401 carrying `NOT_AUTHENTICATED` is deliberately **not** classified, for
- * the reason `classifyOAuthError` gives: it means the bearer token was missing
- * or dead, which `@webbpulse/api-client` has already tried to repair with one
- * refresh and one replay, and turning it into an outcome would hide a session
- * that ended behind a settings-page error state.
- *
- * A cancelled browser prompt is classified here too, when the caller models it,
- * because both ceremony methods have to treat it exactly as they treat a server
- * refusal: as a non-exceptional outcome.
+ * is an outcome on one route cannot become a silent success on another. A
+ * cancelled browser prompt classifies here too, since both ceremony methods
+ * treat it exactly as they treat a server refusal.
  */
 export function classifyPasskeyError<
   TReason extends PasskeyRefusal['reason'],
@@ -735,12 +560,9 @@ export function classifyPasskeyError<
 }
 
 /**
- * The untyped body of {@link classifyPasskeyError}.
- *
- * Split out for the reason `classify` in `oauth.ts` is: TypeScript cannot prove
- * a concrete `{ reason: 'rate-limited' }` satisfies an unresolved `TReason`,
- * even though the runtime `expected.has` guard is exactly that proof. The cast
- * lives here once rather than at each call site.
+ * The untyped body of {@link classifyPasskeyError}. Split out because
+ * TypeScript cannot prove a concrete reason object satisfies an unresolved
+ * `TReason`, so the cast lives here once rather than at each call site.
  */
 function classify(
   error: unknown,
@@ -795,8 +617,6 @@ function classify(
     return { ...base, reason: 'rejected' };
   }
   if (error.status === 429 && expected.has('rate-limited')) {
-    // The rate limit dependency raises a bare 429 with no error_code, so this
-    // branches on the status rather than on a code that is not there.
     return { ...base, reason: 'rate-limited', retryAfter: retryAfterOf(error) };
   }
   return null;

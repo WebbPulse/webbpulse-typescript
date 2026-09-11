@@ -105,8 +105,6 @@ describe('AuthProvider', () => {
   });
 
   it('makes one refresh call under StrictMode double mounting', async () => {
-    // StrictMode double mounts every effect in development. Two rotations of
-    // the same cookie is exactly what the server reads as reuse.
     const { client, fetchMock } = clientWith(() =>
       jsonResponse({ access_token: 'a1', expires_in: 600 })
     );
@@ -184,8 +182,6 @@ describe('useAuth', () => {
   });
 
   it('keeps its methods stable across state changes', async () => {
-    // A component putting these in a dependency array must not re-run its
-    // effect on every session transition.
     const seen: (() => unknown)[] = [];
     function Capture(): React.ReactNode {
       const { logout } = useAuth<User>();

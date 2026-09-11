@@ -1,16 +1,3 @@
-# Publishes the shared packages to CodeArtifact.
-#
-# Triggered by a version tag. The reusable workflow publishes one package per
-# call, so the matrix fans out over the workspaces. Each call is idempotent: it
-# looks the version up in the repository first and skips one that is already
-# there, so a re-run of a tag is green rather than a failure.
-#
-# This is a workspaces repository: the only lockfile is at the root and the
-# shared devDependencies (tsup, typescript) live in the root node_modules. The
-# reusable workflow therefore gets cache-dependency-path pointing at the root
-# lockfile and an install-command that installs from the root, while
-# working-directory stays packages/<name> because the workflow reads that
-# package.json and runs npm publish there.
 name: Publish
 
 on:
@@ -27,15 +14,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Publish order matters. api-client is a runtime dependency of auth, and both
-  # config packages are devDependencies of the rest, so the leaves go first and
-  # a consumer never resolves a version whose dependency is not yet on the
-  # registry. The dependency edges here are the ones in the package manifests.
   foundations:
+    name: Publish the packages no other workspace depends on
     strategy:
-      # Not fail-fast: one package failing should not cancel siblings that have
-      # already uploaded, since a partial publish is resumable and a cancelled
-      # one is harder to reason about.
       fail-fast: false
       matrix:
         package:
@@ -52,10 +33,6 @@ jobs:
       working-directory: packages/${{ matrix.package }}
       package-manager: 'npm'
       cache-dependency-path: package-lock.json
-      # Install from the repository root so the shared devDependencies are
-      # present, then build this one workspace. dist still lands in this
-      # package directory, where the publish step runs. --if-present because
-      # tsconfig and eslint-config ship their source files and have no build.
       install-command: npm ci --no-progress --prefix ../..
       build-command: >-
         npm run build --if-present --prefix ../..
@@ -68,8 +45,8 @@ jobs:
       role-to-assume: ${{ secrets.CODEARTIFACT_PUBLISH_ROLE_ARN }}
       codeartifact-domain-owner: ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }}
 
-  # auth depends on api-client, so it goes after the first wave.
   dependents:
+    name: Publish the packages that depend on the first wave
     needs: foundations
     strategy:
       fail-fast: false
@@ -85,7 +62,6 @@ jobs:
       working-directory: packages/${{ matrix.package }}
       package-manager: 'npm'
       cache-dependency-path: package-lock.json
-      # Same reasoning as the foundations job above.
       install-command: npm ci --no-progress --prefix ../..
       build-command: >-
         npm run build --if-present --prefix ../..

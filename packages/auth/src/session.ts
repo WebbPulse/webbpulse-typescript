@@ -1,13 +1,9 @@
 import { ApiError, type ApiClient } from '@webbpulse/api-client';
 
 /**
- * Session state, in the shape both applications need.
- *
- * `status` is a single field rather than the separate `isAuthenticated` and
- * `isLoading` booleans CarModPicker's AuthContext carries. Those two can
- * express `{ isAuthenticated: true, isLoading: true }`, which is meaningless,
- * and Portfolio's `useState(false)` plus mount effect produces exactly the
- * flash of signed out UI that a distinct `'unknown'` state prevents.
+ * Session state. `status` is one field rather than separate booleans, so an
+ * impossible pair cannot be expressed and `'unknown'` prevents a flash of
+ * signed out UI before the first check resolves.
  */
 export type SessionStatus =
   'unknown' | 'loading' | 'authenticated' | 'anonymous';
@@ -21,20 +17,13 @@ export interface SessionState<TUser> {
 }
 
 /**
- * How a session is carried.
- *
- * Cookie only since 0.4.0. The `'token'` mode kept a bearer token in
- * `localStorage`, which section 7.1 of the identity standard removes: a token
- * any script on the page can read, that survives the tab, is the standard XSS
- * prize. `AuthClient` is the replacement for anything that needs a bearer
- * token, and it holds it in memory.
- *
- * The type is kept as a one-member union rather than deleted so an existing
- * `mode: 'cookie'` call site still reads the same, and a `mode: 'token'` one
- * fails to compile with the mode named rather than with a missing export.
+ * How a session is carried. Cookie only: a bearer token in `localStorage` is
+ * readable by any script on the page, so `AuthClient` holds one in memory
+ * instead. Kept as a one-member union so a removed mode names itself.
  */
 export type SessionMode = 'cookie';
 
+/** Construction options for a {@link SessionManager}. */
 export interface SessionManagerOptions<TUser, TCredentials> {
   /** Client used for every session call. */
   client: ApiClient;
@@ -47,25 +36,20 @@ export interface SessionManagerOptions<TUser, TCredentials> {
   /** Path ending the session. Defaults to `/auth/logout`. */
   logoutPath?: string;
   /**
-   * Encodes credentials for the login request.
-   *
-   * Defaults to sending the object as JSON, which is Portfolio's
-   * `/admin/login`. CarModPicker posts form encoded to an OAuth2 password
-   * flow endpoint, so it passes a function returning `URLSearchParams`.
+   * Encodes credentials for the login request. Defaults to JSON; return
+   * `URLSearchParams` for a form encoded endpoint such as an OAuth2 password
+   * flow.
    */
   encodeCredentials?: (credentials: TCredentials) => unknown;
   /**
-   * Reports whether a login response completed the session.
-   *
-   * Return `false` when the API signalled that a second factor is still
-   * needed, so the manager leaves the state anonymous and the caller drives
-   * the next leg from `raw`. Defaults to treating every non-error response as
-   * complete, which is what a cookie session that issued its cookie means.
+   * Reports whether a login response completed the session. Return `false`
+   * when a second factor is still needed, so the state stays anonymous and the
+   * caller drives the next leg from `raw`.
    */
   isLoginComplete?: (response: unknown) => boolean;
   /**
    * Pulls the user out of a login response, or returns `null` to make the
-   * manager fetch the current user separately after logging in.
+   * manager fetch the current user separately.
    */
   extractUser?: (response: unknown) => TUser | null;
 }
@@ -86,11 +70,9 @@ function defaultExtractUser<TUser>(response: unknown): TUser | null {
 }
 
 /**
- * Framework free session manager.
- *
- * Holds the state, exposes the flows as plain async methods, and notifies
- * subscribers on every change. The React entry point at `@webbpulse/auth/react`
- * is a thin binding over this; nothing here imports React.
+ * Framework free session manager. Holds the state, exposes the flows as async
+ * methods, and notifies subscribers on every change; the React entry point is a
+ * thin binding over it.
  */
 export class SessionManager<TUser = unknown, TCredentials = unknown> {
   private readonly options: SessionManagerOptions<TUser, TCredentials>;
@@ -128,11 +110,8 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
   }
 
   /**
-   * Fetches the current user and updates the state.
-   *
-   * A 401 is an expected answer, not a failure: it means nobody is signed in.
-   * It resolves to `null` with status `'anonymous'` and clears any stale token,
-   * and only a non-401 error is recorded on the state.
+   * Fetches the current user and updates the state. A 401 means nobody is
+   * signed in, so it resolves to `null` as `'anonymous'` rather than an error.
    */
   async refresh(): Promise<TUser | null> {
     if (this.inFlight !== null) {
@@ -172,12 +151,9 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
   }
 
   /**
-   * Signs in.
-   *
-   * Stores the token when the response carries one, then resolves the user
-   * either from the login response or, when the API does not embed it, with a
-   * follow up call to the current user endpoint. Errors propagate: a failed
-   * login must be visible to the form that triggered it.
+   * Signs in, resolving the user from the login response or with a follow up
+   * call when the API does not embed it. Errors propagate so the form that
+   * triggered the login can show them.
    */
   async login(credentials: TCredentials): Promise<LoginResult<TUser>> {
     this.setState({ ...this.state, status: 'loading', error: null });
@@ -195,14 +171,10 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
       const extractUser = this.options.extractUser ?? defaultExtractUser<TUser>;
       let user = extractUser(response.data);
       if (user === null && complete) {
-        // The API authenticated us but did not embed the user, so ask for it.
         user = await this.refresh();
       }
 
       if (user === null) {
-        // No user and an incomplete flow, a pending second factor being the
-        // usual reason. Leave the caller to drive the next step from `raw`
-        // rather than claiming a session that does not exist.
         this.setState({ status: 'anonymous', user: null, error: null });
       } else {
         this.setState({ status: 'authenticated', user, error: null });
@@ -216,17 +188,15 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
   }
 
   /**
-   * Signs out.
-   *
-   * Clears local state whether or not the server call succeeds. A network
-   * failure must not strand the user in a session the UI still believes in.
+   * Signs out, clearing local state whether or not the server call succeeds so
+   * a network failure cannot strand the user in a session the UI believes in.
    */
   async logout(): Promise<void> {
     this.setState({ ...this.state, status: 'loading', error: null });
     try {
       await this.options.client.post(this.options.logoutPath ?? '/auth/logout');
+      // eslint-disable-next-line no-empty
     } catch {
-      // Deliberately swallowed. The local session is ended regardless.
     } finally {
       this.setState({ status: 'anonymous', user: null, error: null });
     }

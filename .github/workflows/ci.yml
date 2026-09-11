@@ -1,9 +1,3 @@
-# Continuous integration for the shared TypeScript packages.
-#
-# The heavy lifting is in the organisation's reusable workflow. This file only
-# supplies the inputs that differ for a package repository rather than a Vite
-# application: the working directory is the repository root, not frontend/, and
-# the build runs across every workspace.
 name: CI
 
 on:
@@ -21,14 +15,13 @@ concurrency:
 
 jobs:
   typescript:
+    name: typescript
     uses: WebbPulse/.github/.github/workflows/typescript-ci.yml@v2
     permissions:
       contents: read
       id-token: write
     with:
       node-version: '22'
-      # The reusable workflow defaults this to frontend/, which is right for the
-      # two applications and wrong here: package.json is at the repository root.
       working-directory: '.'
       package-manager: 'npm'
       lint-command: 'npm run lint'
@@ -36,15 +29,9 @@ jobs:
       typecheck-command: 'npm run type-check'
       test-command: 'npm run test:run -- --coverage'
       build-command: 'npm run build'
-      # No CodeArtifact login. This repository publishes the @webbpulse scope
-      # rather than consuming it, so every dependency resolves from the public
-      # registry and CI needs no AWS credentials to install.
 
-  # A published package that changes without a changeset is a package that
-  # ships under a version already on the registry, which the publish workflow
-  # then skips as a duplicate. Catching it here is cheaper than working out
-  # afterwards why a release did nothing.
   changeset:
+    name: changeset
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -67,8 +54,6 @@ jobs:
             echo "No package sources changed."
             exit 0
           fi
-          # A release PR raised by the version step consumes the changesets it
-          # is applying, so it legitimately carries none.
           if git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- '**/CHANGELOG.md' | grep -q .; then
             echo "Changelogs updated, treating this as a release pull request."
             exit 0
@@ -81,17 +66,6 @@ jobs:
           echo "::error title=Missing changeset::Package sources changed but no changeset was added. Run 'npm run changeset'."
           exit 1
 
-  # The one stable name for `main-protection` to require, so auto-merge means merge on
-  # green rather than merge on mergeable.
-  #
-  # It has to be a job in this workflow rather than the reusable workflow's own gate: a
-  # job inside a called workflow reports as `<caller-job> / <job>`, which here would be
-  # `typescript / all-checks-passed`, and that is not a bare name a ruleset can require.
-  #
-  # `skipped` counts as success, which is what the `changeset` job needs: it is
-  # conditional on `github.event_name == 'pull_request'`, so it is skipped on every push
-  # to main and would otherwise block the gate there. `failure` and `cancelled` both fail,
-  # cancellation because a cancelled job has proven nothing.
   all-checks-passed:
     name: all-checks-passed
     runs-on: ubuntu-latest

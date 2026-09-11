@@ -32,10 +32,6 @@ function envelopeError(
 
 describe('AUTH_ERROR_CODES', () => {
   it('opens with exactly the twelve codes section 7.3 names, in order', () => {
-    // Transcribed from the standard, British spelling included: these are wire
-    // values the backend emits, not prose to normalise. Asserted as a prefix
-    // rather than as the whole array, so the M3 link codes appended after them
-    // cannot quietly reorder or displace one of the twelve.
     expect([...AUTH_ERROR_CODES].slice(0, 12)).toEqual([
       'MFA_REQUIRED',
       'INVALID_CREDENTIALS',
@@ -53,10 +49,6 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the codes the M3 link flows emit', () => {
-    // Not in 7.3, which was written before the verification and reset routes
-    // existed. They are listed here rather than left to fall through
-    // getAuthErrorCode as undefined, because that value means "not an identity
-    // outcome I model" and every one of these is one a form has to render.
     expect([...AUTH_ERROR_CODES].slice(12, 17)).toEqual([
       'INVALID_LINK',
       'PASSWORD_TOO_SHORT',
@@ -67,9 +59,6 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the codes the M4 MFA routes emit', () => {
-    // Same reason as the M3 block above. `INVALID_MFA_CODE` is the one refusal
-    // every failed factor check carries, and `NOT_AUTHENTICATED` is what the
-    // five authorized routes answer to a caller with no usable bearer token.
     expect([...AUTH_ERROR_CODES].slice(17, 23)).toEqual([
       'INVALID_MFA_CODE',
       'MFA_TICKET_INVALID',
@@ -81,12 +70,6 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the codes the M6 OAuth routes emit', () => {
-    // `OAUTH_EMAIL_UNVERIFIED` is not repeated here: 7.3 already named it and
-    // it sits in the first block. These are the rest, and the three that a
-    // settings page branches on by name are `OAUTH_LAST_SIGN_IN_METHOD`,
-    // `OAUTH_ALREADY_LINKED` and `OAUTH_NOT_LINKED`. The provider leg codes
-    // that follow them are named so a log line records which one arrived,
-    // though a user sees one sentence for all of them.
     expect([...AUTH_ERROR_CODES].slice(23, 39)).toEqual([
       'OAUTH_LAST_SIGN_IN_METHOD',
       'OAUTH_ALREADY_LINKED',
@@ -108,12 +91,6 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the codes the M5 passkey routes emit', () => {
-    // `PASSKEY_NOT_RECOGNISED` is not repeated here: it is 7.3's own code and
-    // sits in the first block. It is a different thing from `PASSKEY_REJECTED`,
-    // which is what the seven routes actually emit for a ceremony that did not
-    // verify, and which folds five distinct failures into one answer so that
-    // neither login route becomes an oracle. `LAST_CREDENTIAL` is the one whose
-    // remedy is a specific instruction, so a settings page branches on it.
     expect([...AUTH_ERROR_CODES].slice(39)).toEqual([
       'PASSKEY_REJECTED',
       'PASSKEY_ALREADY_REGISTERED',
@@ -150,8 +127,6 @@ describe('getAuthErrorCode', () => {
   });
 
   it('returns undefined for a code the contract does not name', () => {
-    // An application branching on the result falls through to its generic
-    // path rather than matching a string the standard never promised.
     expect(
       getAuthErrorCode(envelopeError(409, 'DUPLICATE_NAME'))
     ).toBeUndefined();

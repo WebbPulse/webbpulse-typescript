@@ -1,11 +1,7 @@
 /**
- * The 401 retry pipeline of section 7.2 of the identity standard.
- *
- * The auth client is stubbed rather than imported: this package must not depend
- * on `@webbpulse/auth`, and the contract it actually relies on is the narrow
- * `AuthTokenProvider`. A stub is also the only way to assert that exactly one
- * refresh happened for a burst of concurrent 401s, since a real client would
- * hide that behind its own single flight.
+ * The 401 retry pipeline. The auth client is stubbed, both because this package
+ * must not depend on `@webbpulse/auth` and because a stub is the only way to
+ * count the rotations a burst of concurrent 401s produces.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -38,11 +34,9 @@ function unauthorized(): Response {
 }
 
 /**
- * A stub auth provider with a real single-flight refresh.
- *
- * The single flight is the behaviour under test on the auth side, and it is
- * reproduced here so the concurrent case asserts what a real client would do.
- * `refreshCalls` counts the actual rotations, not the number of callers.
+ * A stub auth provider with a real single-flight refresh, so the concurrent case
+ * asserts what a real client would do. `refreshCalls` counts rotations rather
+ * than callers.
  */
 function stubAuth(options: {
   tokens: (string | null)[];
@@ -63,7 +57,6 @@ function stubAuth(options: {
       state.refreshCalls += 1;
       options.onRefresh?.();
       inFlight = (async () => {
-        // A microtask, so concurrent callers genuinely overlap.
         await Promise.resolve();
         index += 1;
         const next = options.tokens[index] ?? null;
@@ -124,14 +117,11 @@ describe('401 refresh and replay', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(auth.refreshCalls).toBe(1);
-    // The replay carries the new token, not the one that just failed.
     expect(bearerOn(fetchMock, 0)).toBe('Bearer expired');
     expect(bearerOn(fetchMock, 1)).toBe('Bearer fresh');
   });
 
   it('throws on a second 401 without refreshing again', async () => {
-    // The classic interceptor bug is that the replay's 401 starts another
-    // refresh, and one expired token becomes an infinite loop.
     const fetchMock = vi.fn(() => Promise.resolve(unauthorized()));
     const auth = stubAuth({ tokens: ['expired', 'fresh'] });
     const client = clientWith(fetchMock, { auth });
@@ -143,9 +133,6 @@ describe('401 refresh and replay', () => {
   });
 
   it('replays a POST, which the transport retry would never do', async () => {
-    // The transport refuses to retry an unsafe method, and rightly. A 401
-    // replay is a different case: the first attempt was rejected before it
-    // reached the handler, so nothing happened that a replay would repeat.
     let calls = 0;
     const fetchMock = vi.fn(() => {
       calls += 1;
@@ -169,7 +156,6 @@ describe('401 refresh and replay', () => {
 
     await expect(client.get('/widgets')).rejects.toBeInstanceOf(ApiError);
 
-    // One attempt only. There is no token to replay with.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(auth.refreshCalls).toBe(1);
   });
@@ -202,8 +188,6 @@ describe('401 refresh and replay', () => {
   });
 
   it('honours skipAuthRetry, which the identity routes set', async () => {
-    // `/api/auth/refresh` cannot refresh itself, and a 401 from
-    // `/api/auth/login` means the password was wrong.
     const fetchMock = vi.fn(() => Promise.resolve(unauthorized()));
     const auth = stubAuth({ tokens: ['expired', 'fresh'] });
     const client = clientWith(fetchMock, { auth });
@@ -233,10 +217,6 @@ describe('401 refresh and replay', () => {
 
 describe('concurrent 401s', () => {
   it('trigger exactly one refresh across every in-flight request', async () => {
-    // This is the frontend half of the concurrency problem in 2.6. Ten
-    // rotations for ten parallel requests would look like refresh token reuse,
-    // and the server would revoke the family and sign the user out of a
-    // perfectly good session.
     const seen: string[] = [];
     const fetchMock = vi.fn((_url: string | URL, init: RequestInit = {}) => {
       const bearer = new Headers(init.headers).get('authorization') ?? '';
@@ -259,7 +239,6 @@ describe('concurrent 401s', () => {
     for (const result of results) {
       expect(result.data).toEqual({ ok: true });
     }
-    // Ten first attempts with the expired token, ten replays with the new one.
     expect(fetchMock).toHaveBeenCalledTimes(20);
     expect(seen.filter((b) => b === 'Bearer fresh')).toHaveLength(10);
   });
@@ -277,15 +256,12 @@ describe('concurrent 401s', () => {
 
     expect(auth.refreshCalls).toBe(1);
     expect(results.every((r) => r.status === 'rejected')).toBe(true);
-    // Eight first attempts and no replays, because there is no token.
     expect(fetchMock).toHaveBeenCalledTimes(8);
   });
 });
 
 describe('token source precedence', () => {
   it('reads the auth client rather than getAuthToken', async () => {
-    // The auth client holds the token a refresh replaces, so the older source
-    // would attach a stale one.
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
     const auth = stubAuth({ tokens: ['from-auth-client'] });
     const client = clientWith(fetchMock, {

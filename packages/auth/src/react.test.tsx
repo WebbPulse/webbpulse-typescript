@@ -100,9 +100,6 @@ describe('SessionProvider', () => {
   });
 
   it('treats the unknown state as loading so no signed out UI flashes', () => {
-    // Portfolio's useState(false) plus a mount effect renders one frame of
-    // signed out UI. The distinct unknown status is what prevents that, so it
-    // has to read as loading before the first fetch settles.
     const manager = managerWith([jsonResponse(ALICE)]);
 
     render(
@@ -133,12 +130,6 @@ describe('SessionProvider', () => {
   });
 
   it('makes one request under StrictMode double mounting', async () => {
-    // StrictMode runs effects twice in development, so the provider calls
-    // refresh twice. The manager de-duplicates concurrent refreshes, so the
-    // network must still see exactly one request. Asserting on the fetch count
-    // rather than on refresh's return value is the point: refresh is async, so
-    // each call returns its own wrapper promise even when both await the same
-    // in flight work.
     const fetchMock = vi.fn(() => Promise.resolve(jsonResponse(ALICE)));
     const manager = new SessionManager<User>({
       client: createApiClient({
@@ -170,10 +161,9 @@ describe('useSessionManager', () => {
       useSessionManager();
       return null;
     }
-    // React logs the error boundary trace; silence it for this expected throw.
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {
-      /* intentionally silent */
-    });
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
 
     expect(() => render(<Orphan />)).toThrow(
       /useSessionManager must be used within a SessionProvider/

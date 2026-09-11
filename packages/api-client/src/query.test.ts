@@ -17,8 +17,6 @@ describe('serializeQuery', () => {
   });
 
   it('repeats the key for array values rather than bracket encoding', () => {
-    // Load bearing: the backend's `ids` and `category_ids` parameters depend on
-    // the repeated form, and both migration inventories call it out.
     expect(serializeQuery({ ids: [1, 2, 3] })).toBe('ids=1&ids=2&ids=3');
   });
 
@@ -65,8 +63,6 @@ describe('joinUrl', () => {
   });
 
   it('preserves a trailing slash on the path', () => {
-    // Portfolio's collection GETs carry a trailing slash and its item routes do
-    // not; the distinction reaches TrailingSlashMiddleware and must survive.
     expect(joinUrl('https://api.example.com', '/projects/')).toBe(
       'https://api.example.com/projects/'
     );

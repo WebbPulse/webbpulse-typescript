@@ -1,5 +1,4 @@
 {
-  "//": "Solution style root. Each package type checks itself via its own tsconfig; this file exists so an editor opening the repository root resolves the packages.",
   "files": [],
   "include": [],
   "references": [

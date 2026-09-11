@@ -95,10 +95,7 @@ function headerOf(
   return headers.get(name);
 }
 
-/**
- * The token bodies the identity service actually writes, transcribed from the
- * M4 route tests in `webbpulse-python`.
- */
+/** The token bodies the identity service writes, transcribed from its own tests. */
 const LOGIN_TOKENS = {
   access_token: 'access-1',
   token_type: 'Bearer',
@@ -141,10 +138,9 @@ async function signedIn(
 
 describe('the login challenge', () => {
   /**
-   * The single most load-bearing assertion across the two repositories. The
-   * first leg answers 200 with a challenge rather than 401, because nothing was
-   * refused: the password was correct. A client that read this as a failure
-   * would leave every MFA user with no way to sign in.
+   * The first leg answers 200 with a challenge rather than 401, because the
+   * password was correct and nothing was refused. Reading it as a failure would
+   * leave every MFA user unable to sign in.
    */
   it('is a successful outcome, not a rejection', async () => {
     const fetchMock = routedFetch({
@@ -176,14 +172,10 @@ describe('the login challenge', () => {
   });
 
   it('names the factor the backend names', () => {
-    // Mirrors `TOTP_FACTOR` in `webbpulse.identity.mfa`, which is what appears
-    // in the `factors` array and in the enrol route paths.
     expect(TOTP_FACTOR).toBe('totp');
   });
 
   it('is completed with the field name the route reads', async () => {
-    // `mfa_ticket`, not `ticket`. A rename type-checks on both sides and breaks
-    // every sign in, which is the class of failure this test exists to catch.
     const fetchMock = routedFetch({
       '/api/auth/login/totp': () => jsonResponse(LOGIN_TOKENS),
     });
@@ -233,8 +225,6 @@ describe('enrolTotp', () => {
   });
 
   it('reports an active factor as already-enabled rather than throwing', async () => {
-    // 409 TOTP_ALREADY_ENABLED. The server refuses rather than replacing a
-    // working authenticator, and the remedy is disable then enrol.
     const { auth } = await signedIn({
       '/api/auth/totp/enrol': () =>
         envelope(
@@ -270,9 +260,6 @@ describe('enrolTotp', () => {
   });
 
   it('leaves the session state alone on a refusal', async () => {
-    // A wrong code or a 409 is not a session ending. The client stays
-    // authenticated and nothing lands in `state.error` for a page level
-    // boundary to render.
     const { auth } = await signedIn({
       '/api/auth/totp/enrol': () => envelope(409, 'TOTP_ALREADY_ENABLED'),
     });
@@ -293,9 +280,6 @@ describe('enrolTotp', () => {
   });
 
   it('rethrows a 401, because that is the session ending and not a bad code', async () => {
-    // NOT_AUTHENTICATED means the bearer token is gone. api-client has already
-    // tried one refresh and one replay by the time this arrives, so turning it
-    // into a form field error would hide a session that ended.
     const { auth } = await signedIn({
       '/api/auth/totp/enrol': () =>
         envelope(401, 'NOT_AUTHENTICATED', 'Sign in first.'),
@@ -322,9 +306,6 @@ describe('activateTotp', () => {
   });
 
   it('returns the ten codes the server issues', async () => {
-    // RECOVERY_CODE_COUNT is ten in `webbpulse.identity.mfa`. The count is not
-    // enforced here, but a set that came back short would be a wire bug worth
-    // seeing in a test that reads the real body.
     const { auth } = await signedIn({
       '/api/auth/totp/activate': () =>
         jsonResponse({ activated: true, recovery_codes: RECOVERY_CODES }),
@@ -340,9 +321,6 @@ describe('activateTotp', () => {
   });
 
   it('reports a wrong code as one refusal, whatever was wrong with it', async () => {
-    // The server answers with one failure for every reason: wrong, replayed,
-    // no factor, an inactive factor. Splitting it here would be inventing
-    // information the client does not have.
     const { auth } = await signedIn({
       '/api/auth/totp/activate': () =>
         envelope(401, 'INVALID_MFA_CODE', 'That code is not valid.'),
@@ -388,8 +366,6 @@ describe('activateTotp', () => {
     if (outcome.ok || outcome.reason !== 'rate-limited') {
       throw new Error('expected a rate limit');
     }
-    // The limiter sends the wait in a Retry-After header, which ApiError does
-    // not keep, so this is undefined more often than not.
     expect(outcome.retryAfter).toBeUndefined();
   });
 });
@@ -412,8 +388,6 @@ describe('disableTotp', () => {
   });
 
   it('sends a recovery code the same way it sends a TOTP code', async () => {
-    // Either satisfies verify_challenge, so the client does not try to tell
-    // them apart before sending. The server decides what the string was.
     const { auth, fetchMock } = await signedIn({
       '/api/auth/totp/disable': () => jsonResponse({ disabled: true }),
     });
@@ -458,9 +432,6 @@ describe('regenerateRecoveryCodes', () => {
   });
 
   it('models INVALID_MFA_CODE, because this route verifies a code too', async () => {
-    // Regenerating voids the printout a user falls back on, so the route asks
-    // them to prove the factor is live first. A mistyped code is a form state,
-    // not an exception.
     const { auth } = await signedIn({
       '/api/auth/recovery-codes': () =>
         envelope(401, 'INVALID_MFA_CODE', 'That code is not valid.'),
@@ -537,8 +508,6 @@ describe('stepUp', () => {
   });
 
   it('keeps the old token on a wrong code', async () => {
-    // A refused step-up is not a session ending. The user is still signed in
-    // with the token they had, and the only thing they lost is the elevation.
     const { auth } = await signedIn({
       '/api/auth/step-up': () =>
         envelope(401, 'INVALID_MFA_CODE', 'That code is not valid.'),
@@ -567,8 +536,6 @@ describe('stepUp', () => {
   });
 
   it('reports MFA_NOT_CONFIGURED as unavailable rather than as a bad code', async () => {
-    // A deployment fault. The user can do nothing about it and "that code is
-    // wrong" would be a lie.
     const { auth } = await signedIn({
       '/api/auth/step-up': () =>
         envelope(
@@ -618,8 +585,6 @@ describe('paths', () => {
   });
 
   it('are overridable for an issuer mounted somewhere else', async () => {
-    // An issuer with no path gives origin routes, which is the other shape the
-    // router supports.
     const fetchMock = routedFetch({
       '/totp/enrol': () => jsonResponse(ENROLMENT),
     });
@@ -646,8 +611,6 @@ describe('classifyMfaError', () => {
   });
 
   it('returns null for a code the calling route does not model', async () => {
-    // The guard that stops a refusal from one route becoming a silent success
-    // on another.
     const { auth } = await signedIn({
       '/api/auth/totp/enrol': () => envelope(409, 'NO_PENDING_ENROLMENT'),
     });

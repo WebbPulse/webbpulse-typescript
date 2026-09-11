@@ -99,9 +99,6 @@ describe('toEnvelope', () => {
   });
 
   it('uses the fallback message for a thrown non Error value', async () => {
-    // Deliberately not an Error. A consumer's own code can throw anything, and
-    // the envelope has to stay an envelope rather than propagating it, so the
-    // rule is off for this line specifically.
     const result = await toEnvelope<never>(
       () => {
         // eslint-disable-next-line @typescript-eslint/only-throw-error

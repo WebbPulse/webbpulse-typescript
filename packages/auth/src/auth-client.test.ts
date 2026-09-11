@@ -33,12 +33,9 @@ function envelope(status: number, code: string, message = 'Denied.'): Response {
 }
 
 /**
- * A fetch stub routed by URL rather than by call order.
- *
- * Order-queued stubs are unusable for the concurrency tests here: the whole
- * point of those is that several requests are in flight at once, so which of
- * them reaches the stub first is exactly the thing under test and must not also
- * decide what it gets back.
+ * A fetch stub routed by URL rather than by call order, since the concurrency
+ * tests put several requests in flight at once and arrival order is the thing
+ * under test rather than the thing that picks the response.
  */
 function routedFetch(routes: {
   [pathSuffix: string]: (call: number, init: RequestInit) => Response | Error;
@@ -108,8 +105,6 @@ describe('AuthClient construction', () => {
   });
 
   it('sends credentials on every request, so the cookie is attached', async () => {
-    // Without this the refresh cookie is never sent cross origin, and silent
-    // refresh cannot work at all. Section 7.1 and 5.5.
     const fetchMock = routedFetch({
       '/api/auth/refresh': () =>
         jsonResponse({ access_token: 'a1', expires_in: 600 }),
@@ -125,12 +120,9 @@ describe('AuthClient construction', () => {
 
 describe('AuthClient storage', () => {
   /**
-   * The rule the whole design rests on: the access token is in memory and
-   * nowhere a script can read it back after a reload.
-   *
-   * The assertion is on the storage APIs rather than on the absence of a
-   * particular key, because a future implementation writing under a different
-   * name would pass a key-specific check and still be wrong.
+   * The access token is in memory and nowhere a script can read it back after a
+   * reload. Asserted on the storage APIs rather than on one key, which a rename
+   * would slip past.
    */
   it('never touches localStorage, sessionStorage, or document.cookie', async () => {
     const localSet = vi.fn();
@@ -192,8 +184,6 @@ describe('AuthClient storage', () => {
     await auth.login({ email: 'a@b.test', password: 'pw' });
     expect(auth.getAccessToken()).toBe('a1');
 
-    // A reload constructs a fresh client. Nothing carries over, which is the
-    // property that makes the token unreachable to a later script.
     const reloaded = authWith(fetchMock);
     expect(reloaded.getAccessToken()).toBeNull();
   });
@@ -223,13 +213,10 @@ describe('AuthClient.initialize', () => {
 
     await expect(auth.initialize()).resolves.toBeNull();
     expect(auth.getState().status).toBe('anonymous');
-    // Not an error the page should render. Nobody was signed in.
     expect(auth.getState().error).toBeNull();
   });
 
   it('does not fire onSessionEnded for a first time visitor', async () => {
-    // A visitor who never had a session must not be bounced to a login screen
-    // they did not ask for.
     const onSessionEnded = vi.fn();
     const fetchMock = routedFetch({
       '/api/auth/refresh': () => envelope(401, 'INVALID_TOKEN'),
@@ -241,8 +228,6 @@ describe('AuthClient.initialize', () => {
   });
 
   it('shares one request between concurrent calls', async () => {
-    // React StrictMode double mounts every provider in development, so this is
-    // the normal case and not an edge one.
     const gate = deferred<Response>();
     const fetchMock = vi.fn(() => gate.promise);
     const auth = authWith(fetchMock);
@@ -259,8 +244,6 @@ describe('AuthClient.initialize', () => {
   });
 
   it('does not retry the refresh call', async () => {
-    // The server rotates on the first attempt, so a retry presents a consumed
-    // token and reads as reuse, which revokes the family.
     const fetchMock = routedFetch({
       '/api/auth/refresh': () => envelope(500, 'INTERNAL_ERROR'),
     });
@@ -283,8 +266,6 @@ describe('AuthClient.refresh single flight', () => {
     gate.resolve(jsonResponse({ access_token: 'a1', expires_in: 600 }));
     const tokens = await Promise.all(calls);
 
-    // Ten rotations would look like refresh token reuse to the server, which
-    // revokes the whole family and signs the user out of a correct session.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(tokens).toEqual(Array.from({ length: 10 }, () => 'a1'));
   });
@@ -425,8 +406,6 @@ describe('AuthClient.login', () => {
   });
 
   it('returns the MFA challenge rather than a token on the first leg', async () => {
-    // The first leg returns no access token by design (2.6). This is a
-    // successful outcome, not an error.
     const fetchMock = routedFetch({
       '/api/auth/login': () =>
         jsonResponse({
@@ -504,8 +483,6 @@ describe('AuthClient.login', () => {
   });
 
   it('keeps the session when loadUser fails', async () => {
-    // The token is valid; the profile endpoint is a separate concern. Signing
-    // someone out over it would be a worse outcome than a null user.
     const fetchMock = routedFetch({
       '/api/auth/login': () =>
         jsonResponse({ access_token: 'a1', expires_in: 600 }),
@@ -544,7 +521,6 @@ describe('AuthClient.logout', () => {
       String(call[0]).includes('/api/auth/logout')
     );
     expect(logoutCall).toBeDefined();
-    // The bearer token goes out so the server can revoke the right family.
     const headers = new Headers((logoutCall?.[1] as RequestInit).headers);
     expect(headers.get('authorization')).toBe('Bearer a1');
 
@@ -606,7 +582,6 @@ describe('AuthClient proactive refresh', () => {
 
     await auth.login({ email: 'a@b.test', password: 'pw' });
 
-    // 600 seconds at 0.8 is 480 seconds.
     expect(scheduled.at(-1)?.ms).toBe(480_000);
 
     scheduled.at(-1)?.handler();
@@ -670,8 +645,6 @@ describe('AuthClient proactive refresh', () => {
     await auth.logout();
     expect(cleared).toContain('handle');
 
-    // Disposing cancels again rather than leaving a timer holding the process
-    // open, and leaves the client safe to read.
     auth.dispose();
     expect(auth.getState().status).toBe('anonymous');
   });
@@ -807,8 +780,6 @@ describe('AuthClient passkeys', () => {
 
 describe('AuthClient subscriptions', () => {
   it('hands out a new state object per transition', async () => {
-    // useSyncExternalStore compares snapshots by reference, so a mutation in
-    // place would leave React on a stale render.
     const fetchMock = routedFetch({
       '/api/auth/refresh': () =>
         jsonResponse({ access_token: 'a1', expires_in: 600 }),

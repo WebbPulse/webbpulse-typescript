@@ -35,7 +35,6 @@ function client(
   return new ApiClient({
     baseUrl: BASE,
     fetch: fetchImpl,
-    // Retries off and no delay unless a test asks, so the suite stays fast.
     retries: 0,
     retryBaseDelayMs: 0,
     generateRequestId: () => 'fixed-request-id',
@@ -81,7 +80,6 @@ describe('ApiClient requests', () => {
   });
 
   it('passes URLSearchParams through without forcing a content type', async () => {
-    // CarModPicker's login posts form encoded to the OAuth2 password endpoint.
     const fetchImpl = stubFetch([jsonResponse({ access_token: 't' })]);
     const body = new URLSearchParams({ username: 'a', password: 'b' });
     await client(fetchImpl).post('/auth/token', body);
@@ -234,8 +232,6 @@ describe('auth headers', () => {
     const fetchImpl = stubFetch([jsonResponse({})]);
     await expect(
       client(fetchImpl, {
-        // The type forbids this; a consumer without strict types can still do
-        // it, and the old behaviour was a silent "Bearer [object Promise]".
         getAuthToken: (() => Promise.resolve('tok')) as unknown as () => string,
       }).get('/x')
     ).rejects.toThrowError(TypeError);
@@ -288,7 +284,6 @@ describe('retry', () => {
     await expect(
       client(fetchImpl, { retries: 2 }).get('/x')
     ).rejects.toThrowError(ApiError);
-    // The first try plus two retries.
     expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(3);
   });
 
@@ -384,8 +379,6 @@ describe('retry', () => {
     ]);
     const started = Date.now();
     await client(fetchImpl, { retries: 1, retryBaseDelayMs: 40 }).get('/x');
-    // Full jitter means the delay is between 0 and the ceiling, so this asserts
-    // only that the call completed rather than a lower bound that would flake.
     expect(Date.now() - started).toBeLessThan(2000);
     expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(2);
   });
