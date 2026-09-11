@@ -1,27 +1,9 @@
 /**
- * The auth client of section 7.1 of the identity standard.
- *
- * The access token lives in one instance-scoped field and nowhere else. Not
- * `localStorage`, not `sessionStorage`, not a cookie the page can read. A page
- * reload loses it, which is correct, and the silent refresh on startup is what
- * repairs it: the refresh token is in an httpOnly cookie the browser attaches
- * to `/api/auth/refresh`, so a valid cookie signs the user back in without a
- * login screen and an invalid one renders anonymous.
- *
- * The three invariants that are easy to get wrong, and are all tested:
- *
- * 1. **One in-flight refresh.** Concurrent callers share a promise. Ten
- *    parallel 401s must produce one rotation, because ten rotations look like
- *    token reuse to the server, which revokes the family and signs the user out
- *    (2.6). The 10 second grace window on the server forgives what slips
- *    through; single flight stops it being the normal case.
- * 2. **Retry once, never recurse.** A 401 triggers one refresh and one replay.
- *    A second 401 ends the session. This lives in `@webbpulse/api-client`, which
- *    talks to this client through the narrow {@link AuthTokenProvider} contract
- *    so it keeps no dependency on this package.
- * 3. **`credentials: "include"` on every call.** Without it the refresh cookie
- *    is never attached cross origin, and every product serves its frontend and
- *    its API on different hosts under one registrable domain (5.5).
+ * The auth client of section 7.1 of the identity standard. The access token
+ * lives in one instance-scoped field and nowhere a script can read back after a
+ * reload; the httpOnly refresh cookie repairs it on startup. Three invariants
+ * hold: one in-flight refresh, one retry per 401 with no recursion, and
+ * `credentials: 'include'` on every call.
  */
 
 import {
@@ -95,10 +77,8 @@ export interface AuthState<TUser> {
   /** The signed in user, when the product supplied a `loadUser` hook. */
   user: TUser | null;
   /**
-   * Whether an access token is currently held.
-   *
-   * Separate from `status` because a proactive refresh moves `status` to
-   * `'loading'` while the old token is still valid and still being sent.
+   * Whether an access token is currently held. Separate from `status`, which a
+   * proactive refresh moves to `'loading'` while the old token is still valid.
    */
   hasAccessToken: boolean;
   /** Last error from a session operation, cleared on the next success. */
@@ -110,8 +90,8 @@ export interface AuthState<TUser> {
 /** What the server returns when a login needs a second factor. */
 export interface MfaChallenge {
   /**
-   * The short lived MFA ticket. `aud` is `<issuer>/mfa`, it lasts 5 minutes and
-   * it is single use, so it is not an access token and buys nothing on its own.
+   * The short lived MFA ticket. Audience-scoped, single use and five minutes
+   * long, so it is not an access token and buys nothing on its own.
    */
   ticket: string;
   /** The factors this account can satisfy, for example `['totp','webauthn']`. */
@@ -145,10 +125,8 @@ export interface PasswordCredentials {
 
 /**
  * The token side of the client, as `@webbpulse/api-client` sees it.
- *
- * Deliberately narrow. api-client depends on this shape and not on this
- * package, so the dependency edge stays one way: auth depends on api-client,
- * never the reverse.
+ * Deliberately narrow, so the dependency edge stays one way: auth depends on
+ * api-client, never the reverse.
  */
 export interface AuthTokenProvider {
   /** The access token held in memory, or null. Synchronous by design. */
@@ -207,51 +185,38 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
 /** Construction options. */
 export interface AuthClientOptions<TUser = unknown> {
   /**
-   * Origin of the API. Ignored when `client` is supplied.
-   *
-   * One of `baseUrl` and `client` is required.
+   * Origin of the API, ignored when `client` is supplied. One of `baseUrl` and
+   * `client` is required.
    */
   baseUrl?: string;
   /**
-   * An existing client to make identity calls through.
-   *
-   * Supply this to share one retry policy, one request id factory and one
-   * fetch implementation with the rest of the application. Never give it a
-   * `getAuthToken` pointing back at this client: the identity routes that need
-   * a bearer token get one from this client directly, and the ones that do not
-   * must be callable with an expired token (2.3).
+   * An existing client to make identity calls through, to share one retry
+   * policy and fetch implementation with the rest of the application. Never give
+   * it a `getAuthToken` pointing back at this client.
    */
   client?: ApiClient;
   /** Route overrides, when a product mounts identity somewhere else. */
   paths?: AuthPaths;
   /**
-   * Loads the signed in user after a login or a successful refresh.
-   *
-   * Optional, because the standard does not put a user in the token response
-   * and not every product needs one in state. When omitted, `state.user` stays
-   * null and `status` still tracks the token.
+   * Loads the signed in user after a login or a successful refresh. Optional:
+   * when omitted, `state.user` stays null and `status` still tracks the token.
    */
   loadUser?: (client: ApiClient) => Promise<TUser | null>;
   /**
-   * Called once each time the session ends: a refresh that failed, or a logout.
-   *
-   * This is the navigation hook from 7.1, `onSessionEnded: () => router.navigate('/login')`.
-   * It does not fire on a startup refresh that simply found no cookie, because
-   * a first time visitor was never in a session and bouncing them to a login
-   * screen they did not ask for is wrong. Read `status === 'anonymous'` for
-   * that case.
+   * Called once each time the session ends, whether by a failed refresh or a
+   * logout. It does not fire on a startup refresh that found no cookie; read
+   * `status === 'anonymous'` for that.
    */
   onSessionEnded?: (error: AuthSessionEndedError) => void;
   /**
    * Fraction of `expires_in` at which the proactive refresh timer fires.
-   * Defaults to 0.8, which is the figure in 7.1.
+   * Defaults to 0.8.
    */
   proactiveRefreshRatio?: number;
   /**
-   * Turns the proactive refresh timer off. Defaults to false.
-   *
-   * Worth setting in a test or in server side rendering, where a dangling
-   * timer keeps a process alive.
+   * Turns the proactive refresh timer off. Defaults to false, and worth setting
+   * in a test or in server side rendering where a dangling timer holds a process
+   * open.
    */
   disableProactiveRefresh?: boolean;
   /** WebAuthn adapter. Defaults to `navigator.credentials` when present. */
@@ -281,13 +246,9 @@ function asStringArray(value: unknown): string[] {
 }
 
 /**
- * Which refusals each link route models, per route.
- *
- * Explicit sets rather than one permissive classifier, so a code that is a
- * legitimate outcome on one route cannot become a silent success on another. A
- * `PASSWORD_TOO_SHORT` arriving from the verification confirm route is a server
- * bug, and the right response to it is to throw rather than to invent a state
- * the caller can render.
+ * Which refusals each link route models. Explicit sets rather than one
+ * permissive classifier, so a code that is a legitimate outcome on one route
+ * cannot become a silent success on another.
  */
 const EMAIL_REQUEST_REASONS: ReadonlySet<'rate-limited' | 'unavailable'> =
   new Set(['rate-limited', 'unavailable'] as const);
@@ -306,14 +267,9 @@ const RESET_CONFIRM_REASONS: ReadonlySet<
 ] as const);
 
 /**
- * Which refusals each MFA route models, per route, on the same rule the link
- * routes follow: an explicit set rather than one permissive classifier, so a
- * code that is a legitimate outcome on one route cannot become a silent success
- * on another.
- *
- * `already-enabled` appears only on enrol and `no-pending-enrolment` only on
- * activate. `invalid-code` appears on every route that presents a code, which
- * is all of them except enrol: activate, disable, regenerate and step-up.
+ * Which refusals each MFA route models, on the same rule the link routes follow.
+ * `invalid-code` appears on every route that presents a code, which is all of
+ * them except enrol.
  */
 const ENROL_REASONS: ReadonlySet<
   'already-enabled' | 'rate-limited' | 'unavailable'
@@ -333,14 +289,9 @@ const CODE_REASONS: ReadonlySet<
 > = new Set(['invalid-code', 'rate-limited', 'unavailable'] as const);
 
 /**
- * Which refusals each OAuth management route models, on the same rule the link
- * and MFA routes follow.
- *
- * `already-linked` appears only on the attach, `last-sign-in-method` and
- * `not-linked` only on the detach, and the list route models nothing but a
- * provider the deployment cannot serve. `rate-limited` is on the attach alone,
- * because it is the only one of the three that starts an authorization and so
- * the only one section 5.1's start limit applies to.
+ * Which refusals each OAuth management route models, on the same rule again.
+ * `rate-limited` is on the attach alone, since it is the only one of the three
+ * that starts an authorization.
  */
 const LINK_REASONS: ReadonlySet<
   'already-linked' | 'provider-unavailable' | 'rate-limited'
@@ -363,14 +314,9 @@ const UNLINK_REASONS: ReadonlySet<
 ] as const);
 
 /**
- * The refusals each passkey method models, on the same rule again.
- *
- * `already-registered` appears only on enrolment, `last-credential` only on the
- * delete, and `name-required` only on the rename. `cancelled` and
- * `rate-limited` are on the two ceremony methods alone: they are the only ones
- * that open a browser prompt and the only ones section 5.1's limits apply to.
- * `unavailable` is on all five, because a deployment with passkeys switched off
- * refuses every one of the seven routes.
+ * The refusals each passkey method models, on the same rule again. `cancelled`
+ * and `rate-limited` are on the two ceremony methods alone, and `unavailable` on
+ * all five, since a deployment with passkeys off refuses every route.
  */
 const REGISTER_REASONS: ReadonlySet<
   | 'rejected'
@@ -404,13 +350,8 @@ const DELETE_REASONS: ReadonlySet<
 
 /**
  * WebAuthn creation options for the browser, preferring the browser's own
- * parser.
- *
- * `PublicKeyCredential.parseCreationOptionsFromJSON` is the specification's own
- * conversion and is used wherever it exists, because it will keep pace with
- * fields added after this version was written. {@link toCreationOptions} is the
- * fallback, and it converts exactly the three fields the specification declares
- * as `BufferSource`.
+ * `parseCreationOptionsFromJSON`, which keeps pace with fields added after this
+ * version. {@link toCreationOptions} is the fallback.
  */
 function parseCreationOptions(json: Record<string, unknown>): unknown {
   const ctor = (
@@ -455,19 +396,15 @@ interface RecoveryCodesBody {
  *   onSessionEnded: () => router.navigate('/login'),
  * });
  *
- * await auth.initialize();          // silent refresh on load
+ * await auth.initialize();
  * await auth.login({ email, password });
- * auth.getAccessToken();            // in memory, may be null
+ * auth.getAccessToken();
  * ```
  */
 export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   /**
-   * The access token. The one place it exists.
-   *
-   * `private` is a compile time guard rather than a runtime one, but the point
-   * is not to defend against a determined caller in the same realm: it is that
-   * there is exactly one copy and it dies with the tab. Nothing in this class
-   * writes it anywhere a script can read back after a reload.
+   * The access token. The one place it exists: there is exactly one copy and it
+   * dies with the tab.
    */
   private accessToken: string | null = null;
 
@@ -506,14 +443,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       this.client = createApiClient({
         ...options.clientOptions,
         baseUrl: options.baseUrl,
-        // Every request sends the cookie. Without this the refresh cookie is
-        // never attached cross origin and silent refresh cannot work at all.
         credentials: options.clientOptions?.credentials ?? 'include',
       });
     }
   }
-
-  // ---------------------------------------------------------------- state
 
   /** Current snapshot. Stable by reference until something changes. */
   getState(): AuthState<TUser> {
@@ -521,10 +454,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * The access token held in memory, or null.
-   *
-   * Synchronous, which is what lets `@webbpulse/api-client` read it on the hot
-   * path without awaiting on every request.
+   * The access token held in memory, or null. Synchronous, so
+   * `@webbpulse/api-client` can read it on the hot path without awaiting.
    */
   getAccessToken(): string | null {
     return this.accessToken;
@@ -546,11 +477,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Adopts a new access token and arms the proactive refresh.
-   *
-   * The only writer of `this.accessToken` other than the clear path, so the
-   * timer and the state can never disagree with the token about whether a
-   * session exists.
+   * Adopts a new access token and arms the proactive refresh. The only writer of
+   * the token other than the clear path, so the timer and the state can never
+   * disagree with it about whether a session exists.
    */
   private adoptToken(token: string, expiresIn: number | undefined): void {
     this.accessToken = token;
@@ -558,20 +487,15 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Drops the token and everything derived from it.
-   *
-   * Called on logout and on a refresh that failed. It never clears the cookie
-   * itself, because the cookie is httpOnly and only the server can: a logout
-   * that could not reach the server leaves the cookie in place, and the next
-   * silent refresh either revives the session or gets a 401 and ends here
-   * again. Either outcome is correct; leaving stale state in memory is not.
+   * Drops the token and everything derived from it, on logout and on a failed
+   * refresh. It never clears the cookie, which is httpOnly and the server's to
+   * clear; the next silent refresh either revives the session or ends here
+   * again.
    */
   private clearToken(): void {
     this.accessToken = null;
     this.cancelProactiveRefresh();
   }
-
-  // -------------------------------------------------------------- timers
 
   private scheduleProactiveRefresh(expiresIn: number | undefined): void {
     this.cancelProactiveRefresh();
@@ -591,9 +515,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       ((handler: () => void, ms: number) => globalThis.setTimeout(handler, ms));
     this.proactiveTimer = setTimeoutImpl(() => {
       this.proactiveTimer = null;
-      // A proactive refresh that fails is not an error the user asked for, so
-      // it is swallowed here. `refresh` has already cleared the session and
-      // notified `onSessionEnded` by the time this rejection arrives.
       void this.refresh().catch(() => undefined);
     }, delayMs);
   }
@@ -611,11 +532,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Releases the proactive refresh timer and drops every subscriber.
-   *
-   * Call it when the application tears down. A live timer holds a Node process
-   * open and keeps a torn down single page application refreshing a session
-   * nothing is watching.
+   * Releases the proactive refresh timer and drops every subscriber. Call it on
+   * teardown: a live timer holds a Node process open and keeps refreshing a
+   * session nothing is watching.
    */
   dispose(): void {
     this.disposed = true;
@@ -623,18 +542,11 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     this.listeners.clear();
   }
 
-  // ------------------------------------------------------------- startup
-
   /**
-   * The silent refresh on load, from 7.1.
-   *
-   * Calls the refresh endpoint once with credentials. A valid cookie signs the
-   * user in with no login screen; anything else renders anonymous. It resolves
-   * rather than rejecting on a missing session, because "nobody is signed in"
-   * is an expected answer at startup and not a failure the caller must catch.
-   *
-   * Idempotent: concurrent calls, which React StrictMode's double mount
-   * produces on every dev render, share one request.
+   * The silent refresh on load. A valid cookie signs the user in with no login
+   * screen and anything else renders anonymous, resolving rather than rejecting
+   * because no session is an expected answer at startup. Idempotent, so
+   * StrictMode's double mount makes one request.
    */
   async initialize(): Promise<TUser | null> {
     if (this.initializePromise !== null) {
@@ -649,8 +561,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
         }
         return await this.settleAuthenticated(undefined);
       } catch {
-        // performRefresh has already set the anonymous state. A startup
-        // refresh with no cookie is the normal first visit, not an error.
         return null;
       } finally {
         this.initializePromise = null;
@@ -660,20 +570,11 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     return this.initializePromise;
   }
 
-  // ------------------------------------------------------------- refresh
-
   /**
-   * Refreshes the access token, sharing one in-flight request.
-   *
-   * This is the single-flight of 7.1. The promise is stored before it is
-   * awaited, so a caller arriving during the request joins it rather than
-   * starting a second rotation. It is cleared in a `finally`, so the next
-   * caller after it settles starts a fresh one.
-   *
-   * Resolves to the new token, or to null when the session is gone. It does not
-   * reject on a refused refresh: every caller of this treats "no session" as an
-   * outcome, and the rejection would otherwise have to be caught in three
-   * places that all do the same thing.
+   * Refreshes the access token, sharing one in-flight request: the promise is
+   * stored before it is awaited, so a caller arriving mid-request joins it
+   * rather than starting a second rotation. Resolves to null when the session is
+   * gone rather than rejecting.
    */
   async refresh(): Promise<string | null> {
     if (this.refreshInFlight !== null) {
@@ -693,10 +594,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * One actual call to the refresh endpoint.
-   *
-   * Separate from `refresh` so `initialize` can distinguish a startup refresh,
-   * which must not fire `onSessionEnded`, from a mid session one, which must.
+   * One actual call to the refresh endpoint. Separate from `refresh` so
+   * `initialize` can distinguish a startup refresh, which must not fire
+   * `onSessionEnded`, from a mid session one, which must.
    */
   private async performRefresh(opts: {
     startup: boolean;
@@ -705,8 +605,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       const response = await this.client.post<TokenResponseBody>(
         this.paths.refresh,
         undefined,
-        // A refresh must not retry. The server rotates the token on the first
-        // attempt, so a retry presents a consumed token and looks like reuse.
         { retries: 0 }
       );
       const token = response.data.access_token;
@@ -734,11 +632,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
         cause: error,
       });
       this.endSession(ended, {
-        // A startup refresh that finds no cookie is a first time visitor, not a
-        // session that ended, so it must not bounce them to a login screen.
         notify: !opts.startup,
-        // A refused refresh is an expected outcome and not worth surfacing as a
-        // page level error. A 500 from the refresh endpoint is worth keeping.
         recordError: !(error instanceof ApiError && error.isUnauthorized),
       });
       throw ended;
@@ -763,16 +657,11 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     }
   }
 
-  // --------------------------------------------------------------- login
-
   /**
-   * Signs in with a password.
-   *
-   * Resolves to `{ mfaRequired: true, ticket, factors }` when the account needs
-   * a second factor, which is a successful outcome and not an error: the first
-   * leg returns no access token by design (2.6). Call `completeTotp` or
-   * `completeTotp` with the ticket to finish. A failed login rejects, so
-   * the form that triggered it can render the reason.
+   * Signs in with a password. Resolves to `{ mfaRequired: true, ticket, factors }`
+   * when the account needs a second factor, which is a successful outcome to
+   * finish with `completeTotp`. A failed login rejects, so the form can render
+   * the reason.
    */
   async login(credentials: PasswordCredentials): Promise<LoginOutcome<TUser>> {
     return this.runTokenCall(this.paths.login, credentials);
@@ -796,19 +685,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Enrols a new passkey on the signed-in account.
-   *
-   * Both legs are authorized routes, so both carry the bearer token, which is
-   * why this rejects rather than prompting when no session is held. The two
-   * legs are one method because the challenge between them is single use and
-   * spent by one attempt whatever the outcome: holding the options across a
-   * user interaction is how a ceremony ends up half finished with the row
-   * already consumed. A failed attempt starts again from the options leg, which
-   * is what calling this again does.
-   *
-   * `name` is the label the settings page will show. The server trims it,
-   * caps it at 64 characters, and substitutes `Passkey` when it is empty, so
-   * omitting it is fine.
+   * Enrols a new passkey on the signed-in account. Both legs are one method
+   * because the challenge between them is single use and spent by one attempt,
+   * so a failed ceremony starts again from the options leg. `name` is the
+   * settings-page label, which the server trims, caps and defaults.
    *
    * @example
    * ```ts
@@ -865,30 +745,12 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Signs in with a passkey.
-   *
-   * Two legs again, and one method for the same reason. Omit `email` for the
-   * ordinary discoverable flow: the server answers with no `allowCredentials`
-   * and the authenticator offers whatever it holds for the relying party. Pass
-   * one when the sign-in form already collected an address, which produces an
-   * `allowCredentials` list so the browser prompts for the right credential.
-   *
-   * **An unknown address is not an error and is not distinguishable from a
-   * known one.** The server answers any address with a challenge and an empty
-   * list, byte-identical to a genuine discoverable request, so this route
-   * cannot be used to find out which addresses have accounts.
-   *
-   * Resolves to `{ ok: true, kind: 'mfa-required', ticket }` when the
-   * authenticator reported no user verification and the account has TOTP
-   * enrolled. Finish it with `completeTotp({ ticket, code })`, the same method
-   * the password path uses. A passkey that verified the user is two factors in
-   * one gesture and signs in outright.
-   *
-   * `mediation: 'conditional'` puts the passkey in the browser's autofill
-   * dropdown instead of a modal prompt. Check
-   * {@link conditionalMediationAvailable} first, and pass an `AbortSignal` so
-   * the pending ceremony can be torn down if the user submits a password
-   * instead.
+   * Signs in with a passkey. Omit `email` for the discoverable flow; pass one
+   * when the form already collected an address. An unknown address answers
+   * identically to a known one, so this cannot be used to find accounts.
+   * Resolves to an `mfa-required` outcome when the authenticator reported no
+   * user verification and the account has TOTP, to be finished with
+   * `completeTotp`. `mediation: 'conditional'` uses the autofill dropdown.
    *
    * @example
    * ```ts
@@ -948,11 +810,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Every passkey on the signed-in account.
-   *
-   * The public key is not in the response. It discloses nothing, being public,
-   * but a settings page has no use for it and a body carrying key material
-   * invites somebody to start comparing it to something.
+   * Every passkey on the signed-in account. The public key is not in the
+   * response: a settings page has no use for it.
    */
   async listPasskeys(): Promise<PasskeyListOutcome> {
     try {
@@ -966,11 +825,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Relabels one of the caller's own passkeys.
-   *
-   * The server trims the name, caps it at 64 characters and refuses an empty
-   * one with `name-required`, which is a form-field error rather than a thrown
-   * failure and so is an outcome here.
+   * Relabels one of the caller's own passkeys. The server trims and caps the
+   * name and refuses an empty one with `name-required`, which is a form-field
+   * error and so an outcome here.
    */
   async renamePasskey(
     credentialId: string,
@@ -995,15 +852,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Removes one of the caller's own passkeys.
-   *
-   * The refusal that matters is `last-credential`: this is the only passkey on
-   * an account with no password, so removing it would strand the user outside
-   * their own account with no support path back. It is a named outcome rather
-   * than a thrown 409 because its remedy is a specific instruction, "set a
-   * password first, then remove this passkey", and a generic failure toast does
-   * not say that. It applies only to the last one; with two enrolled, either
-   * can go.
+   * Removes one of the caller's own passkeys. Refused with `last-credential`
+   * when it is the only one on an account with no password, which is an outcome
+   * rather than a throw because the remedy is to set a password first.
    */
   async deletePasskey(credentialId: string): Promise<PasskeyDeleteOutcome> {
     try {
@@ -1028,8 +879,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     body: Record<string, unknown>,
     init: { headers?: Record<string, string> } = {}
   ): Promise<PasskeyChallenge> {
-    // No retry: an options call writes a challenge row and burns a rate limit
-    // bucket, so a replayed one costs an attempt for nothing.
     const response = await this.client.post<unknown>(path, body, {
       retries: 0,
       ...init,
@@ -1038,12 +887,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Turns a thrown passkey error into a modelled refusal, or rethrows.
-   *
-   * The same shape as `settleOAuthRefusal`, and for the same reason: a refusal
-   * is not a session ending, so `status` goes back to what the token says
-   * rather than to `anonymous`, and a 401 the client could not repair is left
-   * to throw because that one **is** the session ending.
+   * Turns a thrown passkey error into a modelled refusal, or rethrows. A refusal
+   * is not a session ending, so `status` goes back to what the token says, while
+   * a 401 the client could not repair is left to throw.
    */
   private settlePasskeyRefusal<TReason extends PasskeyRefusal['reason']>(
     error: unknown,
@@ -1067,24 +913,12 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * The URL to send the browser to for an OAuth login or link.
-   *
-   * A URL builder rather than a call, because `GET /oauth/{provider}/start`
-   * answers with a `302` to the provider and neither leg of that is reachable
-   * by `fetch`: a cross-origin redirect cannot be followed by script and the
-   * provider's response is not CORS-readable. This is the value to put in an
-   * `href`, which is the form a "Sign in with Google" button actually wants:
-   * a real link is middle-clickable, is announced as a link, and needs no
-   * click handler.
-   *
-   * `mode` distinguishes a login from a link performed by an already signed in
-   * user. It is recorded on the server-side state row, and the callback acts on
-   * what the state says rather than on what the URL says, which is what stops a
-   * login callback being steered into attaching a provider to somebody's
-   * account. Note that a `mode: 'link'` start needs a bearer token the browser
-   * will not attach to a top-level navigation: use
-   * {@link linkOAuthProvider} for the link flow instead, which is the route
-   * that exists for it.
+   * The URL to send the browser to for an OAuth login or link. A builder rather
+   * than a call, since the start route answers with a cross-origin redirect that
+   * script cannot follow, and an `href` is what a provider button wants. `mode`
+   * is recorded on the server-side state row, so a login callback cannot be
+   * steered into an attach; use {@link linkOAuthProvider} for the link flow,
+   * which needs a bearer token a navigation will not carry.
    *
    * @example
    * ```tsx
@@ -1111,12 +945,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Starts an OAuth login or link with a full page redirect.
-   *
-   * {@link oauthStartUrl} plus the navigation, for a caller driving the flow
-   * from a button rather than a link. Synchronous and returning void, because
-   * the page is leaving: there is no promise to await and nothing to resolve on
-   * the other side.
+   * Starts an OAuth login or link with a full page redirect. {@link oauthStartUrl}
+   * plus the navigation, for a caller driving the flow from a button. Returns
+   * void, because the page is leaving.
    */
   startOAuth(provider: string, options: OAuthStartOptions = {}): void {
     const url = this.oauthStartUrl(provider, options);
@@ -1129,17 +960,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Starts a `link` for the signed-in caller, returning the URL to send them to.
-   *
-   * JSON rather than a redirect, unlike the start route, and the difference is
-   * the reason this method exists at all: the link route is called over `fetch`
-   * with an `Authorization` header, and a redirect would be followed by `fetch`
-   * without that header and land somewhere useless. So the server answers with
-   * the authorization URL and the caller assigns it.
-   *
-   * The subject comes from the verified claims on the bearer token, never from
-   * anything in the body, so a caller cannot link a provider to an account that
-   * is not their own.
+   * Starts a link for the signed-in caller, returning the URL to send them to.
+   * JSON rather than a redirect, because this route is called with an
+   * `Authorization` header that `fetch` would drop on a redirect. The subject
+   * comes from the verified token claims, never from the body.
    *
    * @example
    * ```ts
@@ -1165,9 +989,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       body['redirect_uri'] = options.redirectUri;
     }
     try {
-      // No retry: a start writes a state row and burns a rate limit bucket the
-      // standard sets deliberately low, so a replayed one costs a sign-in
-      // attempt for nothing.
       const response = await this.client.post<{ authorization_url?: unknown }>(
         this.oauthLinkPath(provider),
         body,
@@ -1184,13 +1005,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Every provider currently attached to the signed-in account.
-   *
-   * The response carries no provider subject. It is the provider's stable id
-   * for the user, it is of no use to a settings page, and echoing an identifier
-   * from another system into a response body is how it ends up in a log or a
-   * bug report. What comes back is the provider name, the address the provider
-   * holds, whether the provider verified it, and two timestamps.
+   * Every provider currently attached to the signed-in account. The provider
+   * subject is not in the response, since echoing another system's identifier
+   * into a body is how it ends up in a log.
    */
   async listOAuthLinks(): Promise<OAuthLinksOutcome> {
     try {
@@ -1204,15 +1021,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Detaches a provider, unless it is the last way into the account.
-   *
-   * The refusal that matters is `last-sign-in-method`, and it is a named
-   * outcome rather than a thrown 409 because its remedy is a specific
-   * instruction: set a password first, then unlink. The server counts other
-   * provider links, a password credential, and whatever the product's own hook
-   * reports, which is where passkeys are counted, and only deletes if something
-   * would remain. Removing the last method locks a user out of their own
-   * account permanently and no support path in this design reaches it again.
+   * Detaches a provider, unless it is the last way into the account. Refused
+   * with `last-sign-in-method`, a named outcome rather than a throw because the
+   * remedy is to set a password first: removing the last method locks the user
+   * out permanently.
    */
   async unlinkOAuthProvider(provider: string): Promise<OAuthUnlinkOutcome> {
     try {
@@ -1232,12 +1044,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Turns a thrown OAuth error into a modelled refusal, or rethrows.
-   *
-   * The same shape as `settleMfaRefusal`, and for the same reason: a refusal is
-   * not a session ending, so `status` goes back to what the token says rather
-   * than to `anonymous`, and a 401 the client could not repair is left to throw
-   * because that one **is** the session ending.
+   * Turns a thrown OAuth error into a modelled refusal, or rethrows. A refusal is
+   * not a session ending, so `status` goes back to what the token says, while a
+   * 401 the client could not repair is left to throw.
    */
   private settleOAuthRefusal<TReason extends OAuthRefusal['reason']>(
     error: unknown,
@@ -1261,13 +1070,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Signs out.
-   *
-   * Calls the backend, which revokes the whole refresh family rather than the
-   * single token and clears the cookie, then clears memory. The memory clear
-   * happens whether or not the call succeeded: a network failure must not
-   * strand the user in a session the UI still believes in. It fires
-   * `onSessionEnded` exactly once, with reason `'logged-out'`.
+   * Signs out. Calls the backend, which revokes the whole refresh family and
+   * clears the cookie, then clears memory whether or not the call succeeded, and
+   * fires `onSessionEnded` exactly once.
    */
   async logout(options: { everywhere?: boolean } = {}): Promise<void> {
     const path =
@@ -1276,9 +1081,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     this.setState({ status: 'loading', error: null });
     try {
       await this.client.post(path, undefined, { retries: 0, headers });
+      // eslint-disable-next-line no-empty
     } catch {
-      // Deliberately swallowed. The local session ends regardless, and the
-      // cookie is either already gone or will be refused on its next use.
     } finally {
       this.endSession(
         new AuthSessionEndedError({
@@ -1290,25 +1094,12 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     }
   }
 
-  // -------------------------------------------------- email link flows
-
   /**
-   * Asks the backend to mail a verification link.
-   *
-   * Anonymous and keyed by address, matching the route: a user who never
-   * finished signing up has no session to authenticate with, and the resend has
-   * to work for exactly that person. It does not read `state.user`, so it works
-   * on a signed out page.
-   *
-   * **Resolves the same way whatever the address is.** Section 5.4 puts this in
-   * the enumeration-resistance table, so an unknown address, an address that is
-   * already verified and an address that just got a link all answer 200 with
-   * the same body. There is deliberately nothing here to tell them apart, and a
-   * caller must not try: render "if that address needs verifying, a link is on
-   * its way" and nothing more specific.
-   *
-   * Returns `ok: false` only for a rate limit or an identity deployment with no
-   * sender. It rejects for a network failure or a 500.
+   * Asks the backend to mail a verification link. Anonymous and keyed by
+   * address, since the user who needs it has no session. It resolves the same
+   * way whatever the address is, so a caller must not try to tell an unknown
+   * address from a known one. Returns `ok: false` only for a rate limit or a
+   * deployment with no sender.
    */
   async requestEmailVerification(input: {
     email: string;
@@ -1317,18 +1108,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Confirms a verification link and marks the address verified.
-   *
-   * Anonymous, and a POST: the link in the email lands on
-   * {@link VERIFY_EMAIL_PATH} in the SPA, which reads the token with
-   * {@link readLinkToken} and calls this. The backend deliberately does not
-   * confirm on a `GET`, because a mail scanner following the link to check it
-   * for malware would spend the token before the user ever clicked.
-   *
-   * Returns `ok: false, reason: 'invalid-link'` for a token that is unknown,
-   * expired, already spent, or a reset token presented here by mistake. Those
-   * four are one outcome with one message on purpose: the difference between
-   * them is information about somebody else's token.
+   * Confirms a verification link and marks the address verified. Anonymous, and
+   * a POST, so a mail scanner following the link cannot spend the token.
+   * Unknown, expired, spent and wrong-purpose tokens are one `invalid-link`
+   * outcome, because the difference is information about somebody else's token.
    */
   async confirmEmailVerification(input: {
     token: string;
@@ -1337,8 +1120,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       const response = await this.client.post<{ user_id?: unknown }>(
         this.paths.verifyEmailConfirm,
         { token: input.token },
-        // No retry. The token is single use, so a retried request presents a
-        // token the first attempt already spent and is refused as invalid.
         { retries: 0 }
       );
       const userId = response.data.user_id;
@@ -1353,13 +1134,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Asks the backend to mail a password reset link.
-   *
-   * Like {@link requestEmailVerification}, this answers identically whether or
-   * not the address has an account, and section 5.4 fixes the wording the
-   * server returns in `detail`: "If that address has an account, a link is on
-   * its way." Render that rather than a local sentence, so one carefully
-   * phrased line is the only thing users ever see here.
+   * Asks the backend to mail a password reset link. Answers identically whether
+   * or not the address has an account; render the server's `detail` rather than
+   * a local sentence.
    */
   async requestPasswordReset(input: {
     email: string;
@@ -1368,22 +1145,11 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Spends a reset link and sets a new password.
-   *
-   * On success **every session for that account is gone**, this browser's
-   * included: a reset is the remedy for a compromise, so the backend revokes
-   * every refresh family and clears the refresh cookie. This client therefore
-   * drops its own token too, rather than holding one the server will refuse on
-   * its next use. The user signs in again with the new password, which is the
-   * intended end of the flow.
-   *
-   * Three distinct refusals, because the remedies differ: `invalid-link` means
-   * ask for a new link, `password-rejected` means the link is spent *and* the
-   * password was no good so ask for a new link and choose another, and
-   * `rate-limited` means wait.
-   *
-   * `familyIds` is the exact-revocation seam the backend's `logout_all` uses.
-   * Almost no caller has it, and omitting it is the normal case.
+   * Spends a reset link and sets a new password. Every session for the account
+   * is revoked, this browser's included, so the client drops its own token and
+   * the user signs in again. Three refusals, because the remedies differ:
+   * `invalid-link`, `password-rejected` and `rate-limited`. `familyIds` is an
+   * exact-revocation seam almost no caller has.
    */
   async confirmPasswordReset(input: {
     token: string;
@@ -1392,7 +1158,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }): Promise<PasswordResetOutcome> {
     const body: Record<string, unknown> = {
       token: input.token,
-      // Snake case, because that is what the route reads off the body.
       new_password: input.newPassword,
     };
     if (input.familyIds !== undefined) {
@@ -1402,11 +1167,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       await this.client.post(this.paths.passwordResetConfirm, body, {
         retries: 0,
       });
-      // The reset revoked every family, so any token held here is dead. Ending
-      // the session locally keeps memory honest about that. `notify` is false:
-      // the caller is standing on the reset page and is about to be sent to the
-      // sign in form by its own success branch, so firing `onSessionEnded` here
-      // would be a second, competing navigation.
       this.endSession(
         new AuthSessionEndedError({
           message: 'The password was reset and every session was ended.',
@@ -1425,11 +1185,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * The shared body of the two request routes.
-   *
-   * Written once because the two are the same shape by design, and because the
-   * property that matters here is a negative one: neither of them may leak
-   * whether the address exists. One implementation is one place to check that.
+   * The shared body of the two request routes. Written once because the two are
+   * the same shape by design, and because one implementation is one place to
+   * check that neither leaks whether the address exists.
    */
   private async runEmailRequest(
     path: string,
@@ -1439,8 +1197,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       const response = await this.client.post<{ detail?: unknown }>(
         path,
         { email },
-        // No retry. A retry spends a second slot in a bucket the standard sets
-        // at three per hour per address, and mails a second link for one ask.
         { retries: 0 }
       );
       const detail = response.data.detail;
@@ -1457,25 +1213,13 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     }
   }
 
-  // --------------------------------------------------- TOTP and step-up
-
   /**
-   * Starts a TOTP enrolment and returns the seed, once.
-   *
-   * The factor is written **inactive**, so it does not gate login and does not
-   * appear in a challenge until {@link activateTotp} sees a correct code. A user
-   * who scans badly and walks away has changed nothing about their account.
-   *
-   * Call it again and the previous pending enrolment is replaced with a new
-   * seed rather than redisplayed: there is no route that reads a seed back, and
-   * a read-back route would turn every stolen access token into a copy of the
-   * user's second factor. An account that already has an **active** factor is
-   * refused with `already-enabled` instead, because silently replacing a working
-   * authenticator is how a user ends up with a factor they cannot satisfy. The
-   * path to replacing one is disable, then enrol.
-   *
-   * Render `provisioningUri` as a QR code and `secret` as the typed fallback.
-   * This package generates no QR code and adds no dependency to do it.
+   * Starts a TOTP enrolment and returns the seed, once. The factor is written
+   * inactive, so it gates nothing until {@link activateTotp} sees a correct
+   * code. Calling again replaces a pending enrolment with a new seed; an account
+   * with an active factor is refused with `already-enabled`, and the path to
+   * replacing one is disable then enrol. Render `provisioningUri` as a QR code
+   * and `secret` as the typed fallback.
    */
   async enrolTotp(): Promise<TotpEnrolmentOutcome> {
     return this.runMfaCall(
@@ -1494,16 +1238,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Activates a pending enrolment with its first correct code.
-   *
-   * Returns the recovery codes the server issues with the activation. They are
-   * generated here rather than at enrolment because a set the user never
-   * activated is a set of live credentials for a factor that does not exist,
-   * and they are shown **exactly once**: the server stores only their hashes.
-   * A UI that renders them without saying so is setting up a support ticket.
-   *
-   * The code just used cannot be replayed as a login code seconds later: the
-   * activation records the step it consumed.
+   * Activates a pending enrolment with its first correct code, returning the
+   * recovery codes the server issues with it. They are shown exactly once, since
+   * the server stores only their hashes, and the code just used cannot be
+   * replayed as a login code.
    */
   async activateTotp(input: { code: string }): Promise<TotpActivationOutcome> {
     return this.runMfaCall(
@@ -1518,17 +1256,11 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Removes the factor and every recovery code with it.
-   *
-   * Both, always, on the server side: leaving recovery codes behind after TOTP
-   * is disabled leaves a set of credentials that satisfy a factor the user
-   * believes is gone.
-   *
-   * Requires a code, which is either a current TOTP code or an unspent
-   * recovery code. Turning the second factor off is the single action an
-   * attacker holding nothing but a stolen access token would most want, so the
-   * route asks the user to prove the factor still works before removing it.
-   * A wrong or replayed code comes back as `invalid-code`.
+   * Removes the factor and every recovery code with it, since codes left behind
+   * satisfy a factor the user believes is gone. Requires a current TOTP code or
+   * an unspent recovery code, because turning the second factor off is what a
+   * stolen access token would most want. A bad code comes back as
+   * `invalid-code`.
    */
   async disableTotp(input: { code: string }): Promise<TotpDisableOutcome> {
     return this.runMfaCall(
@@ -1540,18 +1272,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Replaces every recovery code with a fresh set, returned once.
-   *
-   * The old set is deleted first, so a user who regenerates because a printout
-   * was lost has actually invalidated the printout, which is the entire reason
-   * they regenerated. Show the new set with the same "this is the only time you
-   * will see these" framing the activation uses.
-   *
-   * Requires a code, the same current TOTP code or unspent recovery code
-   * {@link disableTotp} takes. Regenerating voids the printout that is a
-   * user's way back in after losing their phone, so the route asks them to
-   * prove the factor is live before it does that. A wrong or replayed code
-   * comes back as `invalid-code`.
+   * Replaces every recovery code with a fresh set, returned once. The old set is
+   * deleted first, which is the point of regenerating after a lost printout.
+   * Requires a code for the same reason {@link disableTotp} does.
    */
   async regenerateRecoveryCodes(input: {
     code: string;
@@ -1568,23 +1291,12 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Re-authenticates inside the current session for a fresher access token.
-   *
-   * Not a second login. No refresh family is started and the refresh cookie is
-   * untouched, because the session is not new: the user is proving freshness
-   * within it. What changes on the new token is `auth_time`, which becomes now,
-   * and `amr`, which gains the factor just satisfied. A sensitive route asserts
-   * on those two rather than on a boolean, which is what makes "was this
-   * re-authenticated recently" answerable at all.
-   *
-   * The new token is adopted into this client's in-memory store on success and
-   * the proactive refresh timer is re-armed against its lifetime, so the next
-   * request carries it with no further work at the call site. It is not in the
-   * outcome, because there is exactly one place an access token lives.
-   *
-   * `code` takes a TOTP code or a recovery code. The server tells them apart by
-   * shape, so a caller does not choose and cannot be made to disclose which
-   * kind the user had.
+   * Re-authenticates inside the current session for a fresher access token. Not
+   * a second login: no refresh family is started and the cookie is untouched,
+   * but the new token's `auth_time` and `amr` let a sensitive route assert on
+   * freshness. The token is adopted into the in-memory store and the timer
+   * re-armed, so it is not in the outcome. `code` takes a TOTP or recovery code,
+   * which the server tells apart by shape.
    */
   async stepUp(input: { code: string }): Promise<StepUpOutcome> {
     this.setState({ status: 'loading', error: null });
@@ -1619,10 +1331,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
 
   /**
    * The shared body of the four MFA calls that are a plain post and a mapping.
-   *
-   * Written once because all four are the same shape: bearer token, no retry,
-   * an outcome on a modelled refusal, and a rethrow on anything else. `stepUp`
-   * is not routed through it, because it is the only one that adopts a token
+   * `stepUp` is not routed through it, being the only one that adopts a token
    * and so has a success path of its own.
    */
   private async runMfaCall<
@@ -1636,10 +1345,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     toOutcome: (data: TBody) => TOk
   ): Promise<TOk | Extract<MfaRefusal, { reason: TReason }>> {
     try {
-      // No retry. Every one of these either spends a single-use code or burns a
-      // rate limit bucket the standard sets deliberately low, and a replayed
-      // enrolment start would throw away the seed the user is mid-way through
-      // scanning.
       const response = await this.client.post<TBody>(path, body, {
         retries: 0,
         headers: this.authorizationHeader(),
@@ -1651,13 +1356,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Turns a thrown MFA error into a modelled refusal, or rethrows.
-   *
-   * The state write is what a caller would otherwise have to remember: a
-   * refusal is not a session ending, so `status` goes back to what the token
-   * says rather than to `anonymous`, and the error is not parked in
-   * `state.error` for a page level boundary to render. A 401 the client could
-   * not repair is left to throw, because that one **is** the session ending.
+   * Turns a thrown MFA error into a modelled refusal, or rethrows. A refusal is
+   * not a session ending, so `status` goes back to what the token says and the
+   * error is not parked in `state.error`, while a 401 the client could not
+   * repair is left to throw.
    */
   private settleMfaRefusal<TReason extends MfaRefusal['reason']>(
     error: unknown,
@@ -1680,8 +1382,6 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     return refused;
   }
 
-  // ------------------------------------------------------------- helpers
-
   private authorizationHeader(): Record<string, string> {
     return this.accessToken === null
       ? {}
@@ -1689,13 +1389,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * The WebAuthn adapter, defaulting to `navigator.credentials`.
-   *
-   * The adapter receives the whole `CredentialCreationOptions` wrapper rather
-   * than the bare `publicKey` document, because a conditional sign-in also
-   * needs `mediation` and `signal` in that wrapper and there is nowhere else to
-   * put them. That makes `navigator.credentials` itself a valid adapter, which
-   * is why the default is a passthrough rather than a rewrap.
+   * The WebAuthn adapter, defaulting to `navigator.credentials`. It receives the
+   * whole options wrapper rather than the bare `publicKey` document, because a
+   * conditional sign-in also needs `mediation` and `signal`, which is what makes
+   * `navigator.credentials` itself a valid adapter.
    */
   private requireWebAuthn(): WebAuthnAdapter {
     if (this.options.webAuthn !== undefined) {
@@ -1717,11 +1414,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
 
   /**
    * Posts to a route that answers with a token, an MFA challenge, or an error.
-   *
-   * Shared by every login shaped call, so the MFA branch, the token adoption
-   * and the error handling are written once. None of these routes retries: they
-   * are POSTs the client already refuses to retry, and a duplicate login attempt
-   * would burn a rate limit bucket for no gain.
+   * Shared by every login shaped call, so the MFA branch, the token adoption and
+   * the error handling are written once. None of these routes retries.
    */
   private async runTokenCall(
     path: string,
@@ -1776,11 +1470,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Moves to the authenticated state, loading the user when a hook was given.
-   *
-   * A `loadUser` that throws does not undo the session: the token is valid, the
-   * user endpoint is a separate concern, and signing someone out because their
-   * profile failed to load would be a worse outcome than a null user.
+   * Moves to the authenticated state, loading the user when a hook was given. A
+   * `loadUser` that throws does not undo the session: the token is valid, and a
+   * null user is a better outcome than signing someone out.
    */
   private async settleAuthenticated(
     embeddedUser: TUser | undefined

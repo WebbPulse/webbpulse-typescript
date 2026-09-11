@@ -1,22 +1,7 @@
 /**
- * Opt in `{ data, error }` envelope over the throwing client.
- *
- * The client rejects on a non 2xx, and that stays the default: a rejection is
- * the contract both application inventories recommended, because an envelope
- * nobody is type forced to check is an envelope call sites forget to check.
- *
- * What the envelope is good for is the migration. Portfolio's `services/api.ts`
- * has roughly sixty call sites reading `response.error`, and converting the
- * transport and every one of those call sites in a single change is a large
- * diff with no safe intermediate state. So Portfolio wrote a twelve line
- * adapter around `ApiError` and `formatApiErrorMessage` to hold the envelope in
- * place while the transport moved underneath it. That adapter is here now,
- * typed and tested once, rather than copied into the next application that
- * needs the same staging step.
- *
- * Nothing here changes the client. `toEnvelope` wraps one call and
- * `createEnvelopeClient` wraps a whole client; both sit on top of the throwing
- * methods and neither is reachable unless a consumer imports it.
+ * Opt in `{ data, error }` envelope over the throwing client, for migrating an
+ * application whose call sites read `response.error`. Nothing here changes the
+ * client: both wrappers sit on top of the throwing methods.
  */
 
 import type { ApiClient, ApiResponse, RequestOptions } from './client.js';
@@ -24,13 +9,8 @@ import { ApiError, formatApiErrorMessage } from './errors.js';
 
 /**
  * Result of an enveloped call. Exactly one of `data` and `error` is meaningful:
- * `error` is `undefined` on success and `data` is `null` on failure.
- *
- * `data` is `T | null` rather than `T`, which is the one place this departs
- * from Portfolio's hand rolled version. That one declared `data: T` and wrote
- * `null as T` into it on the error path, so every call site read a value the
- * type said could not be null. Widening it here is what makes the check the
- * compiler's job rather than the reader's.
+ * `error` is `undefined` on success and `data` is `null` on failure, which is
+ * typed as `T | null` so the compiler enforces the check.
  */
 export interface ApiEnvelope<T> {
   /** Parsed response body on success, `null` on failure. */
@@ -53,11 +33,8 @@ export interface EnvelopeOptions {
    */
   fallbackMessage?: string;
   /**
-   * Called with every failure before it is converted.
-   *
-   * Portfolio's adapter had a bare `console.error` here. Reporting is a
-   * consumer decision, so this package logs nothing and offers the hook: pass
-   * `console.error` to keep that behaviour, or route it to a real reporter.
+   * Called with every failure before it is converted. This package logs
+   * nothing itself; pass `console.error` or a real reporter.
    */
   onError?: (error: unknown) => void;
 }
@@ -74,9 +51,6 @@ function toErrorEnvelope<T>(
   if (error instanceof ApiError) {
     return {
       data: null,
-      // The parsed body first, so FastAPI's `detail` reaches the UI rather
-      // than the generic "Request failed with status 401." line. `error.message`
-      // is already that formatted string, which makes it the right fallback.
       error: formatApiErrorMessage(error.body, error.message),
       status: error.status,
       requestId: error.requestId,
@@ -103,16 +77,9 @@ function toErrorEnvelope<T>(
 }
 
 /**
- * Runs one call and returns `{ data, error }` instead of rejecting.
- *
- * ```ts
- * const { data, error } = await toEnvelope(() => client.get<Project[]>('/projects/'));
- * ```
- *
- * The argument is a thunk rather than a promise so the call is made inside the
- * `try`. Passing `toEnvelope(client.get('/x'))` would start the request first
- * and, on a synchronous throw from the client, reject before this function ever
- * saw it.
+ * Runs one call and returns `{ data, error }` instead of rejecting. The
+ * argument is a thunk rather than a promise so the call is made inside the
+ * `try` and a synchronous throw is caught too.
  */
 export async function toEnvelope<T>(
   call: () => Promise<ApiResponse<T>>,
@@ -131,11 +98,8 @@ export async function toEnvelope<T>(
 }
 
 /**
- * An `ApiClient` shaped surface whose methods resolve to an envelope.
- *
- * The method signatures mirror `ApiClient` exactly, so a call site moves
- * between the two by changing which object it holds and how it reads the
- * result, not by rewriting its arguments.
+ * An `ApiClient` shaped surface whose methods resolve to an envelope. The
+ * signatures mirror `ApiClient`, so only the result reading changes.
  */
 export interface EnvelopeClient {
   /** The client this wraps, for a call that wants the throwing contract. */
@@ -173,15 +137,8 @@ export interface EnvelopeClient {
 }
 
 /**
- * Wraps a client so every method resolves to `{ data, error }`.
- *
- * ```ts
- * const api = createEnvelopeClient(createApiClient({ baseUrl }));
- * const { data, error } = await api.get<Project[]>('/projects/');
- * ```
- *
- * The underlying client is unchanged and reachable as `.client`, so a module
- * can hold both and move call sites over one at a time.
+ * Wraps a client so every method resolves to `{ data, error }`. The underlying
+ * client is unchanged and reachable as `.client`, so a module can hold both.
  */
 export function createEnvelopeClient(
   client: ApiClient,
@@ -201,9 +158,6 @@ export function createEnvelopeClient(
       toEnvelope(() => client.patch(path, body, requestOptions), options),
     delete: (path, requestOptions) =>
       toEnvelope(() => client.delete(path, requestOptions), options),
-    // The prefix binding happens on the underlying client, so the domain
-    // client keeps the token source and retry policy and the envelope options
-    // carry across unchanged.
     createDomainClient: (prefix) =>
       createEnvelopeClient(client.createDomainClient(prefix), options),
   };

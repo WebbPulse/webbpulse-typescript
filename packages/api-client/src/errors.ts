@@ -1,13 +1,6 @@
 /**
- * Error types raised by the client.
- *
- * The two applications disagree today about what a failed request means.
- * CarModPicker's axios instance rejects the promise; Portfolio's `request<T>`
- * swallows everything and returns `{ data: null, error }`, which is why every
- * Portfolio call site has to remember to check `.error` and none of them are
- * type forced to. Both inventories recommend converging on the rejecting
- * contract, so this client throws and the migration moves Portfolio onto it
- * deliberately rather than meeting in the middle.
+ * Error types raised by the client, which rejects on a non 2xx rather than
+ * returning a result an unforced call site can forget to check.
  */
 
 /** Shape FastAPI uses for a single request validation failure. */
@@ -25,23 +18,9 @@ export interface ApiErrorBody {
 }
 
 /**
- * The error envelope every WebbPulse backend renders on a non 2xx.
- *
- * Built by `error_body` in `webbpulse.http` (the shared Python package) and
- * installed application wide by `register_error_handlers`, so a 404 from a
- * route, a 422 from request validation and a 500 from an unhandled exception
- * all arrive in this one shape rather than three.
- *
- * Four fields are always present and always in this order: `success`, `status`,
- * `message` and `request_id`. `error_code` and `details` are omitted entirely
- * unless the service opted into them (`register_error_handlers(error_codes=True,
- * validation_details=True)`), which is why both are optional here rather than
- * nullable: an absent key and an explicit `null` are different answers and the
- * backend only ever produces the former.
- *
- * `status` is duplicated from the HTTP status line deliberately. A body that
- * has been logged, serialised into an error report or passed through a queue
- * no longer has a response beside it, and the envelope stays self describing.
+ * The error envelope every WebbPulse backend renders on a non 2xx. `success`,
+ * `status`, `message` and `request_id` are always present; the other two are
+ * absent unless the service opted into them, never explicitly null.
  */
 export interface WebbPulseErrorBody {
   /** Always `false`. It is what distinguishes the envelope from a success body. */
@@ -54,32 +33,20 @@ export interface WebbPulseErrorBody {
   request_id: string;
   /**
    * Stable machine readable code, when the service enabled `error_codes`.
-   *
-   * Derived from the status for handled statuses (`NOT_FOUND`, `CONFLICT`,
-   * `VALIDATION_ERROR`, `INTERNAL_ERROR`), and overridable per route, so an
-   * application branches on this rather than on the message text.
+   * Branch on this rather than on the message text.
    */
   error_code?: string;
   /**
-   * Structured detail, when the service enabled `validation_details`.
-   *
-   * A list for validation failures, one entry per offending field, or a mapping
-   * for anything else. The backend echoes it verbatim to the caller, so it
-   * never carries a rejected input value or an internal identifier.
+   * Structured detail, when the service enabled `validation_details`: a list
+   * with one entry per offending field, or a mapping for anything else.
    */
   details?: unknown[] | Record<string, unknown>;
 }
 
 /**
- * Narrows an unknown value to the WebbPulse error envelope.
- *
- * The check is on `success === false` plus a string `message`, not on the full
- * field set. `status` and `request_id` are always written by `error_body`, but
- * requiring them here would make the guard fail closed against a body that
- * crossed a proxy which dropped a key, and the useful part (the message) would
- * be lost for no gain. `success: false` is the discriminant that a FastAPI
- * `detail` body and a bare `{ message }` both lack, so it alone is enough to
- * tell the envelope apart from the shapes below.
+ * Narrows an unknown value to the WebbPulse error envelope. The check is
+ * `success === false` plus a string `message`: deliberately permissive, so a
+ * proxy that dropped a key does not cost the caller the message.
  */
 export function isWebbPulseErrorBody(
   value: unknown
@@ -95,10 +62,7 @@ export function isWebbPulseErrorBody(
 
 /**
  * The fields an application reads off a failed request, in one flat object.
- *
- * Returned by {@link getWebbPulseError}. `message` is always a usable string,
- * so a call site can render it without a fallback of its own; the rest are
- * `undefined` when the backend did not send them.
+ * `message` is always usable; the rest are `undefined` when unsent.
  */
 export interface WebbPulseErrorInfo {
   /** The envelope's message, or the best line the other shapes yield. */
@@ -108,11 +72,8 @@ export interface WebbPulseErrorInfo {
   /** `details` when the service enabled it. */
   details: unknown[] | Record<string, unknown> | undefined;
   /**
-   * The request id.
-   *
-   * Read from the envelope's `request_id` first and from the response header
-   * second. The two agree in practice, since the same middleware writes both,
-   * and preferring the body means a logged or forwarded body still carries it.
+   * The request id, read from the envelope's `request_id` first and the
+   * response header second, so a forwarded body still carries it.
    */
   requestId: string | undefined;
   /** HTTP status, from the response rather than the body. */
@@ -135,12 +96,8 @@ function isValidationErrorItems(
 }
 
 /**
- * Turns a parsed error body into one human readable line.
- *
- * This is `parseApiError` from CarModPicker's `hooks/UseApiRequest.tsx`, which
- * is the de facto error handling layer in that application. It is exported so
- * a caller can render a message without reimplementing the FastAPI detail
- * unpacking a fourth time.
+ * Turns a parsed error body into one human readable line, unpacking the
+ * WebbPulse envelope and the FastAPI `detail` shapes.
  */
 export function formatApiErrorMessage(
   body: unknown,
@@ -152,9 +109,6 @@ export function formatApiErrorMessage(
   if (typeof body !== 'object' || body === null) {
     return fallback;
   }
-  // The WebbPulse envelope first. Its `message` is the field the backend wrote
-  // for a caller to read, and a body carrying `success: false` never also
-  // carries a meaningful `detail`, so there is nothing to fall through to.
   if (isWebbPulseErrorBody(body) && body.message.trim()) {
     return body.message;
   }
@@ -173,39 +127,17 @@ export function formatApiErrorMessage(
 }
 
 /**
- * Statuses on which a `Retry-After` header is read.
- *
- * The same set `client.ts` retries on, and the overlap is the point: the header
- * is only useful where a caller might try again, and reading it on a 404 would
- * put a number in front of a call site that has nothing to do with it. RFC 9110
- * allows the header on a 3xx redirect as well, which this deliberately skips:
- * `fetch` follows redirects itself, so a 3xx never reaches here as an error.
+ * Statuses on which a `Retry-After` header is read: the same set `client.ts`
+ * retries on, since the hint is only useful where a caller might try again.
  */
 const RETRY_AFTER_STATUSES: ReadonlySet<number> = new Set([
   408, 425, 429, 500, 502, 503, 504,
 ]);
 
 /**
- * Parses a `Retry-After` header value into whole seconds.
- *
- * Handles both forms RFC 9110 section 10.2.3 defines:
- *
- * - **delta-seconds**, a non-negative decimal integer such as `120`. Taken as
- *   it stands. A value with a sign, a decimal point or trailing text is refused
- *   rather than coerced, because `Number('12abc')` is `NaN` but `Number(' 12 ')`
- *   is `12`, and quietly accepting the whitespace form while refusing the other
- *   is a distinction nobody meant to draw.
- * - **HTTP-date**, such as `Wed, 21 Oct 2026 07:28:00 GMT`. Converted to the
- *   seconds between `now` and that instant, rounded up so a sub-second wait
- *   does not read as no wait at all, and floored at zero so a date already past
- *   reads as `0`.
- *
- * `now` is injectable for the tests. It defaults to `Date.now()`, which is the
- * client's clock: an HTTP-date is only as good as the skew between the two
- * machines, which is why the header's own specification prefers delta-seconds.
- *
- * Returns `undefined` for an absent, empty or unparseable value, so a caller
- * that cannot read a hint is in the same position as one the server sent none.
+ * Parses a `Retry-After` header into whole seconds, accepting both RFC 9110
+ * forms: a bare non-negative integer, or an HTTP-date measured against `now`,
+ * rounded up and floored at zero. Unparseable values return `undefined`.
  */
 export function parseRetryAfter(
   value: string | null | undefined,
@@ -222,11 +154,6 @@ export function parseRetryAfter(
     const seconds = Number(trimmed);
     return Number.isFinite(seconds) ? seconds : undefined;
   }
-  // An HTTP-date in any of RFC 9110's three formats carries a weekday and a
-  // month name, so requiring a letter is what tells one apart from a number
-  // that is not delta-seconds. Without this guard `Date.parse('-5')` succeeds
-  // in Node, reading a malformed delta as the year 5 BCE and handing the caller
-  // a wait of several millennia.
   if (!/[a-zA-Z]/.test(trimmed)) {
     return undefined;
   }
@@ -239,9 +166,6 @@ export function parseRetryAfter(
 
 /**
  * Reads the retry hint off a response, on the statuses where one is meaningful.
- *
- * Split from {@link parseRetryAfter} so the status gate lives beside the set
- * that defines it rather than at the one call site in `client.ts`.
  */
 export function retryAfterFromHeaders(
   status: number,
@@ -266,33 +190,14 @@ export class ApiError extends Error {
   /** HTTP method used, upper cased. */
   readonly method: string;
   /**
-   * Value of the request id response header, when the API returned one.
-   *
-   * The backend assigns a uuid7 request id per request. Surfacing it here is
-   * what makes a browser side error report joinable to the CloudWatch logs and
-   * the OpenTelemetry trace for the same request.
+   * Value of the request id response header, which joins a browser side error
+   * report up to the logs and the trace for the same request.
    */
   readonly requestId: string | undefined;
   /**
-   * Seconds to wait before retrying, read off the `Retry-After` header.
-   *
-   * Set on the statuses this client already treats as worth a second attempt
-   * and where RFC 9110 says the header means something: 429, 503, and the two
-   * other retryable 4xx statuses, 408 and 425. It is `undefined` everywhere
-   * else, and `undefined` on those statuses too when the server sent no header
-   * or sent one this cannot read.
-   *
-   * Both RFC 9110 forms are accepted. `Retry-After: 120` is delta-seconds and
-   * is taken as it stands; `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT` is an
-   * HTTP-date and is turned into the seconds between the client's clock and
-   * that instant, floored at zero, so a date already in the past reads as 0
-   * rather than as a negative wait. A skewed client clock therefore shifts the
-   * wait, which is the trade every HTTP-date consumer makes and is why servers
-   * are advised to send delta-seconds.
-   *
-   * This is a hint and not a promise. Treat it as a floor on how long to wait,
-   * and keep whatever backoff the call site already has for the case where it
-   * is absent.
+   * Seconds to wait before retrying, read off `Retry-After` on the retryable
+   * statuses and `undefined` everywhere else. A hint and not a promise: treat
+   * it as a floor and keep whatever backoff the call site already has.
    */
   readonly retryAfterSeconds: number | undefined;
 
@@ -319,8 +224,6 @@ export class ApiError extends Error {
     this.method = init.method;
     this.requestId = init.requestId;
     this.retryAfterSeconds = init.retryAfterSeconds;
-    // Restores the prototype chain so `instanceof ApiError` holds even when a
-    // consumer compiles this package down to ES5 through its own bundler.
     Object.setPrototypeOf(this, ApiError.prototype);
   }
 
@@ -341,36 +244,9 @@ export class ApiError extends Error {
 }
 
 /**
- * Reads the WebbPulse error envelope off an `ApiError`.
- *
- * This is the accessor an application uses instead of reaching into
- * `error.body` and re-implementing the shape check. It always returns a value:
- * `message` falls back through the same chain `formatApiErrorMessage` walks, so
- * a call site renders `getWebbPulseError(error).message` without a fallback of
- * its own, and `errorCode` is `undefined` rather than absent when the backend
- * did not send one, which is what lets a `switch` on it be exhaustive.
- *
- * Returning a flat object rather than the envelope itself is deliberate. The
- * body is snake case because Python wrote it, and the two consumers should not
- * both have to remember that `request_id` is the spelling on this one object
- * when every other field they touch is camel case. It also lets `requestId`
- * fall back to the response header, which the body cannot do.
- *
- * @example
- * ```ts
- * try {
- *   await client.post('/build-lists', body);
- * } catch (error) {
- *   if (error instanceof ApiError) {
- *     const { message, errorCode } = getWebbPulseError(error);
- *     if (errorCode === 'DUPLICATE_NAME') {
- *       setFieldError('name', message);
- *     } else {
- *       toast.error(message);
- *     }
- *   }
- * }
- * ```
+ * Reads the WebbPulse error envelope off an `ApiError` as one flat camel case
+ * object. Always returns a value: `message` is never empty and `errorCode` is
+ * `undefined` rather than absent, so a `switch` on it can be exhaustive.
  */
 export function getWebbPulseError(error: ApiError): WebbPulseErrorInfo {
   const body = error.body;
@@ -384,16 +260,10 @@ export function getWebbPulseError(error: ApiError): WebbPulseErrorInfo {
           ),
       errorCode: body.error_code,
       details: body.details,
-      // The body's own id first, the header second. They are written by the
-      // same middleware from the same value, so this is a fallback rather than
-      // a choice between two sources of truth.
       requestId: body.request_id || error.requestId,
       status: error.status,
     };
   }
-  // Not an envelope. Everything the envelope carries beyond the message is
-  // absent by definition, and the message comes from the FastAPI `detail` or
-  // bare `message` handling that was already here.
   return {
     message: error.message,
     errorCode: undefined,

@@ -25,8 +25,6 @@ describe('loadAppConfig', () => {
   });
 
   it('throws listing every problem at once', () => {
-    // Startup should report the whole set, not send the reader round the loop
-    // one missing variable at a time.
     let caught: unknown;
     try {
       loadAppConfig({ VITE_ENVIRONMENT: 'qa', VITE_API_BASE_URL: 'not a url' });
@@ -39,8 +37,6 @@ describe('loadAppConfig', () => {
   });
 
   it('fails when the API base URL is absent and no default is given', () => {
-    // Deliberately no built in default: Portfolio hardcoding localhost:8000 in
-    // two places is the exact pattern this package exists to remove.
     expect(() => loadAppConfig({ MODE: 'production' })).toThrow(ConfigError);
   });
 
@@ -54,8 +50,6 @@ describe('loadAppConfig', () => {
   });
 
   it('strips a trailing slash from the API base URL', () => {
-    // The client joins paths onto this, so a trailing slash would produce a
-    // double slash on every request.
     const config = loadAppConfig({
       MODE: 'production',
       VITE_API_BASE_URL: 'https://api.webbpulse.com/api/v1/',
@@ -99,8 +93,6 @@ describe('loadAppConfig', () => {
     });
 
     it('lets VITE_ENVIRONMENT override the inferred mode', () => {
-      // A staging bundle is built with mode production but points at the
-      // staging API, so the explicit variable has to win.
       const config = loadAppConfig(
         { MODE: 'production', VITE_ENVIRONMENT: 'staging' },
         { defaultApiBaseUrl: '/api' }
@@ -178,7 +170,6 @@ describe('loadAppConfig backendTargets', () => {
   });
 
   it('falls through to the default when the switch is unset', () => {
-    // The plain `npm run dev` case: the dev server proxies /api to localhost.
     const config = loadAppConfig(
       { MODE: 'development', DEV: true },
       { defaultApiBaseUrl: '/api', backendTargets: targets }
@@ -195,8 +186,6 @@ describe('loadAppConfig backendTargets', () => {
   });
 
   it('falls through when the mapped value is undefined', () => {
-    // Lets a caller pass `env.VITE_STAGING_API_URL` straight in without
-    // guarding it, which is the whole convenience of the option.
     const config = loadAppConfig(
       { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
       {
@@ -216,8 +205,6 @@ describe('loadAppConfig backendTargets', () => {
   });
 
   it('ignores the switch outside dev', () => {
-    // The property worth having: a stray VITE_BACKEND in a deploy environment
-    // cannot repoint a shipped production bundle at another backend.
     const config = loadAppConfig(
       {
         MODE: 'production',
@@ -232,7 +219,6 @@ describe('loadAppConfig backendTargets', () => {
   });
 
   it('wins over VITE_API_BASE_URL in dev', () => {
-    // A developer who ran `npm run dev:staging` means it.
     const config = loadAppConfig(
       {
         MODE: 'development',
@@ -282,7 +268,6 @@ describe('loadAppConfig backendTargets', () => {
 
 describe('loadAppConfig apiPathPrefix', () => {
   it('appends the prefix to an absolute base URL', () => {
-    // The deploy writes the bare origin from the Terraform api_url output.
     const config = loadAppConfig(
       { MODE: 'production', VITE_API_BASE_URL: 'https://api.carmodpicker.com' },
       { apiPathPrefix: '/api' }
@@ -299,8 +284,6 @@ describe('loadAppConfig apiPathPrefix', () => {
   });
 
   it('does not double the prefix when the URL already carries it', () => {
-    // Both spellings of VITE_API_BASE_URL are in deploy configuration right
-    // now, so appending has to be idempotent or one of them breaks.
     const config = loadAppConfig(
       {
         MODE: 'production',
@@ -328,8 +311,6 @@ describe('loadAppConfig apiPathPrefix', () => {
   });
 
   it('applies to a backend target too', () => {
-    // The CarModPicker case end to end: dev switch picks the host, the prefix
-    // is appended, and the result is what gets validated.
     const config = loadAppConfig(
       { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
       {
@@ -358,7 +339,6 @@ describe('loadAppConfig apiPathPrefix', () => {
   });
 
   it('leaves the defaults untouched when neither option is given', () => {
-    // The backwards compatibility check: 0.2.0 behaviour, unchanged.
     const config = loadAppConfig(
       { MODE: 'production', VITE_API_BASE_URL: 'https://api.test/' },
       { defaultAppName: 'Portfolio' }

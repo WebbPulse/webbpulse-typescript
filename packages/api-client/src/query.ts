@@ -1,11 +1,6 @@
 /**
- * Query string serialisation.
- *
- * Array values repeat the key (`ids=1&ids=2`) rather than bracket encoding it
- * (`ids[]=1&ids[]=2`). That is load bearing: CarModPicker's `paramsSerializer`
- * does the same, and the backend's `ids` and `category_ids` parameters depend
- * on the repeated form. Both migration inventories flag it as a detail that
- * must survive any extraction, so it is the default here rather than an option.
+ * Query string serialisation. Array values repeat the key (`ids=1&ids=2`)
+ * rather than bracket encoding it, which is what the backends read.
  */
 
 /** A value that can appear in a query string. */
@@ -16,12 +11,8 @@ export type QueryValue =
 export type QueryParams = Record<string, QueryValue> | URLSearchParams;
 
 /**
- * Serialises a parameter bag. Returns an empty string when nothing survives,
- * so a caller can append it conditionally without producing a bare `?`.
- *
- * `null` and `undefined` entries are dropped entirely rather than serialised as
- * the literal strings "null" and "undefined", which is what a naive
- * `String(value)` would send.
+ * Serialises a parameter bag, dropping null and undefined entries. Returns an
+ * empty string when nothing survives, so a caller can append it conditionally.
  */
 export function serializeQuery(params: QueryParams | undefined): string {
   if (params === undefined) {
@@ -51,12 +42,8 @@ export function serializeQuery(params: QueryParams | undefined): string {
 }
 
 /**
- * Joins a base URL and a path without doubling or dropping the separator.
- *
- * Trailing slashes on the path are preserved. Portfolio's collection GETs carry
- * a trailing slash, its item routes do not, and its inventory calls the
- * distinction load bearing against the backend's TrailingSlashMiddleware, so
- * this function must not normalise it away.
+ * Joins a base URL and a path without doubling or dropping the separator. A
+ * trailing slash on the path is preserved: the backends route on it.
  */
 export function joinUrl(base: string, path: string): string {
   if (path === '') {

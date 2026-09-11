@@ -35,7 +35,6 @@ function clientWith(results: (Response | Error)[]): {
   const client = createApiClient({
     baseUrl: 'https://api.example.test',
     fetch: fetchMock,
-    // Retries off so a queued 500 is observed once, not swallowed by a retry.
     retries: 0,
   });
   return { client, fetchMock };
@@ -86,8 +85,6 @@ describe('SessionManager.refresh', () => {
   });
 
   it('treats a 401 as anonymous rather than an error', async () => {
-    // Nobody being signed in is an expected answer, not a failure, so it must
-    // not surface as an error the UI would render.
     const { client } = clientWith([
       jsonResponse({ detail: 'Not authenticated' }, 401),
     ]);
@@ -112,8 +109,6 @@ describe('SessionManager.refresh', () => {
   });
 
   it('de-duplicates concurrent refreshes into one request', async () => {
-    // A burst of mounting components must not stampede the current user
-    // endpoint.
     const { client, fetchMock } = clientWith([jsonResponse(ALICE)]);
     const manager = new SessionManager<User>({ client, mode: 'cookie' });
 
@@ -152,8 +147,6 @@ describe('SessionManager.login', () => {
   });
 
   it('encodes credentials as form data when asked', async () => {
-    // CarModPicker posts application/x-www-form-urlencoded to an OAuth2
-    // password flow endpoint, so the encoder has to be overridable.
     const { client, fetchMock } = clientWith([
       jsonResponse({ access_token: 'tok', user: ALICE }),
     ]);
@@ -186,8 +179,6 @@ describe('SessionManager.login', () => {
   });
 
   it('stays anonymous when the login is not complete', async () => {
-    // A pending second factor is the usual reason. Claiming a session here
-    // would let the UI past a gate the API has not opened.
     const { client } = clientWith([jsonResponse({ requires_2fa: true })]);
     const manager = new SessionManager<User, { username: string }>({
       client,
@@ -239,8 +230,6 @@ describe('SessionManager.logout', () => {
   });
 
   it('ends the local session even when the server call fails', async () => {
-    // Otherwise a network failure strands the user in a session the UI still
-    // believes in, with no way to sign out.
     const { client } = clientWith([jsonResponse({ detail: 'boom' }, 500)]);
     manager = new SessionManager<User, unknown>({
       client,
@@ -281,8 +270,6 @@ describe('SessionManager subscriptions', () => {
   });
 
   it('hands out a new state object per transition', async () => {
-    // useSyncExternalStore compares snapshots by reference, so a mutated
-    // object in place would leave React on a stale render.
     const { client } = clientWith([jsonResponse(ALICE)]);
     const manager = new SessionManager<User>({ client, mode: 'cookie' });
     const before = manager.getState();

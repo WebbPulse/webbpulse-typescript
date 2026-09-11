@@ -1,7 +1,6 @@
 /**
- * React bindings. Separate entry point so `@webbpulse/auth` itself stays
- * framework free and an application that only needs the core never pulls React
- * into its bundle.
+ * React bindings. A separate entry point so the core package stays framework
+ * free and an application that only needs it never pulls React into its bundle.
  */
 import {
   createContext,
@@ -22,28 +21,18 @@ const SessionManagerContext = createContext<SessionManager<
 > | null>(null);
 
 /**
- * A manager of any user and credential type.
- *
- * The context erases both generics, because one provider serves components
- * that each know their own user type, and the typed hooks below re-apply the
- * caller's parameters on the way out.
- *
- * `SessionManager` is invariant in both parameters, since each appears in both
- * an argument and a return position, so no single instantiation is assignable
- * from every other one. `SessionManager<never, never>` is the alias a caller
- * writes when the parameters genuinely do not matter, and the two casts below
- * route through `unknown` because the invariance, not a real shape mismatch, is
- * what TypeScript is objecting to.
+ * A manager of any user and credential type. The context erases both generics
+ * and the typed hooks re-apply the caller's on the way out, since
+ * `SessionManager` is invariant in each and no instantiation is assignable from
+ * every other.
  */
 export type AnySessionManager = SessionManager<never, never>;
 
+/** Props for {@link SessionProvider}. */
 export interface SessionProviderProps {
   /** The manager to expose. Construct it once, outside the component tree. */
   manager: AnySessionManager;
-  /**
-   * Fetches the current user on mount. Defaults to true, which is what both
-   * applications do today.
-   */
+  /** Fetches the current user on mount. Defaults to true. */
   refreshOnMount?: boolean;
   children: ReactNode;
 }
@@ -82,12 +71,9 @@ export function useSessionManager<
 }
 
 /**
- * Subscribes to session state.
- *
- * Uses `useSyncExternalStore`, so the manager stays the single source of truth
- * and concurrent rendering cannot tear a component onto a stale snapshot. The
- * manager returns the identical object when nothing changed, which is what
- * makes the default reference equality check correct here.
+ * Subscribes to session state through `useSyncExternalStore`, so the manager
+ * stays the single source of truth and concurrent rendering cannot tear a
+ * component onto a stale snapshot.
  */
 export function useSessionState<TUser = unknown>(): SessionState<TUser> {
   const manager = useSessionManager<TUser>();
@@ -112,11 +98,7 @@ export interface UseSessionResult<
   refresh: () => Promise<TUser | null>;
 }
 
-/**
- * The hook application code uses. Replaces CarModPicker's `useAuth` plus its
- * `AuthContext`, and the inline `useState` that Portfolio's `AdminPanel`
- * currently uses in place of an auth context.
- */
+/** The hook application code uses for session state and the session flows. */
 export function useSession<
   TUser = unknown,
   TCredentials = unknown,
@@ -148,46 +130,31 @@ export function useSession<
   );
 }
 
-// ---------------------------------------------------------------------------
-// AuthClient bindings, section 7.1
-//
-// A second context rather than a widened first one. `SessionManager` and
-// `AuthClient` model different things: one is a cookie session whose state is
-// "who is signed in", the other holds an access token and a refresh lifecycle.
-// An application adopting the identity standard uses the second and can drop
-// the first, and during the migration a page may legitimately sit under both.
-// ---------------------------------------------------------------------------
-
 const AuthClientContext = createContext<AuthClient<unknown> | null>(null);
 
 /**
- * An auth client of any user type.
- *
- * `AuthClient` is invariant in `TUser`, since the parameter appears in both an
- * argument and a return position, so no single instantiation is assignable from
- * every other one. This is the alias a provider prop writes, and the typed
- * hooks re-apply the caller's parameter on the way out.
+ * An auth client of any user type. `AuthClient` is invariant in `TUser`, so a
+ * provider prop writes this alias and the typed hooks re-apply the caller's
+ * parameter on the way out.
  */
 export type AnyAuthClient = AuthClient<never>;
 
+/** Props for {@link AuthProvider}. */
 export interface AuthProviderProps {
   /** The client to expose. Construct it once, outside the component tree. */
   client: AnyAuthClient;
   /**
-   * Runs the silent refresh on mount. Defaults to true, which is the behaviour
-   * 7.1 requires: without it an in-memory token does not survive a reload and
-   * every refresh of the page lands the user on a login screen.
+   * Runs the silent refresh on mount. Defaults to true; without it an in-memory
+   * token does not survive a reload.
    */
   initializeOnMount?: boolean;
   children: ReactNode;
 }
 
 /**
- * Puts an {@link AuthClient} in context and runs the silent refresh.
- *
- * The effect is safe under StrictMode's double mount, because `initialize` is
- * idempotent and shares one in-flight request: two mounts make one call to the
- * refresh endpoint, not two rotations of the same cookie.
+ * Puts an {@link AuthClient} in context and runs the silent refresh. Safe under
+ * StrictMode's double mount, since `initialize` shares one in-flight request
+ * rather than rotating the cookie twice.
  */
 export function AuthProvider({
   client,
@@ -215,12 +182,9 @@ export function useAuthClient<TUser = unknown>(): AuthClient<TUser> {
 }
 
 /**
- * Subscribes to auth state.
- *
- * `useSyncExternalStore` keeps the client the single source of truth and stops
- * concurrent rendering tearing a component onto a stale snapshot. The client
- * returns the identical object until something changes, which is what makes the
- * default reference equality check correct.
+ * Subscribes to auth state through `useSyncExternalStore`, which keeps the
+ * client the single source of truth and stops concurrent rendering tearing a
+ * component onto a stale snapshot.
  */
 export function useAuthState<TUser = unknown>(): AuthState<TUser> {
   const client = useAuthClient<TUser>();
@@ -240,9 +204,8 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   login: AuthClient<TUser>['login'];
   completeTotp: AuthClient<TUser>['completeTotp'];
   /**
-   * Signs in with a passkey. Replaces the 0.7.0 `loginWithPasskey` and
-   * `completePasskeyMfa` pair: the MFA case is now an outcome of this one call
-   * rather than a second method, and it is finished with `completeTotp`.
+   * Signs in with a passkey. An MFA challenge is an outcome of this call, to be
+   * finished with `completeTotp`.
    */
   signInWithPasskey: AuthClient<TUser>['signInWithPasskey'];
   registerPasskey: AuthClient<TUser>['registerPasskey'];
@@ -256,11 +219,8 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
 }
 
 /**
- * The hook application code uses.
- *
- * The methods are bound to the client and stable for its lifetime, so a
- * component can put them in a dependency array without re-running an effect on
- * every state change.
+ * The hook application code uses. The methods are bound and stable for the
+ * client's lifetime, so a component can put them in a dependency array safely.
  */
 export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
   const client = useAuthClient<TUser>();

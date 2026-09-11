@@ -153,9 +153,8 @@ async function signedIn(
 
 describe('oauthStartUrl', () => {
   /**
-   * The load-bearing assertion for the whole start leg. The route answers 302
-   * to the provider, and a cross-origin redirect cannot be followed by script,
-   * so this must be a URL the browser navigates to and never something fetched.
+   * The start route answers a cross-origin 302 that script cannot follow, so this
+   * must be a URL the browser navigates to and never something fetched.
    */
   it('builds the provider start URL against the API origin', () => {
     const auth = authWith(routedFetch({}));
@@ -182,8 +181,6 @@ describe('oauthStartUrl', () => {
   });
 
   it('sends no query parameters at all when none were given', () => {
-    // An empty `?` is not the same request: the server reads `mode` with a
-    // default, and sending `mode=` would be a mode nobody asked for.
     const auth = authWith(routedFetch({}));
     expect(auth.oauthStartUrl(GOOGLE_PROVIDER)).not.toContain('?');
   });
@@ -244,9 +241,8 @@ describe('linkOAuthProvider', () => {
   });
 
   /**
-   * The reason this route exists at all rather than reusing the start route:
-   * it is called over `fetch` with an `Authorization` header, and a redirect
-   * would be followed by `fetch` without that header.
+   * Why this route exists rather than reusing the start route: it is called over
+   * `fetch` with an `Authorization` header a followed redirect would drop.
    */
   it('carries the bearer token', async () => {
     const { auth, fetchMock } = await signedIn({
@@ -325,8 +321,6 @@ describe('linkOAuthProvider', () => {
   });
 
   it('folds an unconfigured provider into the same case', async () => {
-    // A user can do nothing about either, and a settings page renders one
-    // "not available" state for both.
     const { auth } = await signedIn({
       '/api/auth/oauth/google/link': () =>
         envelope(503, 'OAUTH_PROVIDER_UNAVAILABLE', 'Not configured.'),
@@ -342,8 +336,6 @@ describe('linkOAuthProvider', () => {
   });
 
   it('reads Retry-After off the header on a rate limit', async () => {
-    // The rate limit dependency raises a bare 429 with no error_code and puts
-    // the wait in the header, which `@webbpulse/api-client` now keeps.
     const { auth } = await signedIn({
       '/api/auth/oauth/google/link': () =>
         envelope(429, undefined, 'Too many attempts.', { retryAfter: '900' }),
@@ -389,8 +381,8 @@ describe('linkOAuthProvider', () => {
   });
 
   /**
-   * A 401 the transport could not repair is the session ending, not a settings
-   * page error state. Turning it into an outcome would hide it.
+   * A 401 the transport could not repair is the session ending rather than a
+   * settings page error state, so it must not become an outcome.
    */
   it('throws a 401 rather than modelling it', async () => {
     const { auth } = await signedIn({
@@ -498,10 +490,9 @@ describe('unlinkOAuthProvider', () => {
   });
 
   /**
-   * The refusal that matters. Removing the last sign-in method locks a user out
-   * of their own account permanently, and the remedy is a specific instruction
-   * ("set a password first") that no generic error handler would know to give,
-   * which is why this is a named outcome rather than a thrown 409.
+   * Removing the last sign-in method locks a user out permanently, and the remedy
+   * is a specific instruction, which is why it is a named outcome rather than a
+   * thrown 409.
    */
   it('returns last-sign-in-method with the server sentence', async () => {
     const { auth } = await signedIn({
@@ -567,9 +558,9 @@ describe('unlinkOAuthProvider', () => {
 
 describe('the refusal sets are per route', () => {
   /**
-   * `already-linked` is a legitimate outcome on the attach and a server bug on
-   * the detach. An explicit set per route is what stops one becoming a silent
-   * success on the other.
+   * `already-linked` is an outcome on the attach and a server bug on the detach,
+   * and the per-route set is what keeps one from becoming a silent success on
+   * the other.
    */
   it('throws an already-linked arriving from the unlink route', async () => {
     const { auth } = await signedIn({
@@ -592,8 +583,6 @@ describe('the refusal sets are per route', () => {
   });
 
   it('throws a 429 arriving from the unlink route, which models none', async () => {
-    // The start limit is on the start route. A 429 on a delete is not something
-    // the standard puts there, so it is a surprise worth throwing on.
     const { auth } = await signedIn({
       '/api/auth/oauth/google/link': () => envelope(429, undefined, 'Slow.'),
     });
@@ -613,7 +602,6 @@ describe('the client state after a refusal', () => {
 
     expect(auth.getState().status).toBe('authenticated');
     expect(auth.getState().hasAccessToken).toBe(true);
-    // A modelled refusal is handed back, not parked for a page level boundary.
     expect(auth.getState().error).toBeNull();
   });
 });
@@ -678,9 +666,8 @@ describe('readOAuthCallback', () => {
   });
 
   /**
-   * A `return_to` that already carried its own `?oauth=1` must not let a stale
-   * parameter outrank a live refusal. Reporting a failed sign-in as a
-   * successful one is the wrong way round to be wrong.
+   * A `return_to` carrying its own `?oauth=1` must not let a stale parameter
+   * outrank a live refusal.
    */
   it('puts an error ahead of every other parameter', () => {
     const result = readOAuthCallback(
@@ -706,9 +693,8 @@ describe('readOAuthCallback', () => {
 
 describe('stripOAuthParams', () => {
   /**
-   * The sharp reason: an MFA ticket is a live bearer value, and leaving it in
-   * the address bar leaves it in the browser history and in the `Referer` of
-   * the next navigation off the page.
+   * An MFA ticket is a live bearer value, so leaving it in the address bar leaves
+   * it in the history and in the next navigation's `Referer`.
    */
   it('removes every callback parameter', () => {
     expect(
@@ -725,8 +711,6 @@ describe('stripOAuthParams', () => {
   });
 
   it('keeps a relative href relative', () => {
-    // The output feeds `history.replaceState`, which must not move the page to
-    // the parsing base origin.
     expect(stripOAuthParams('/settings?oauth_linked=1&tab=security')).toBe(
       '/settings?tab=security'
     );
@@ -778,8 +762,6 @@ describe('describeOAuthCallbackError', () => {
 
 describe('parseOAuthLinks', () => {
   it('skips an entry with no provider', () => {
-    // The list crosses a repository boundary with nothing enforcing the shape
-    // at build time, so a malformed entry is dropped rather than rendered.
     expect(
       parseOAuthLinks({
         links: [{ email: 'a@b.test' }, { provider: 'google' }],

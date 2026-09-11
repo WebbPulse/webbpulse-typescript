@@ -86,10 +86,8 @@ function bodyOf(
 describe('SPA link paths', () => {
   /**
    * These two literals are a contract across two repositories with nothing
-   * enforcing them at build time: the backend concatenates its own copies onto
-   * `frontend_base_url` to build the URL it mails, and a drift here sends every
-   * verification click to a 404 in the SPA. `webbpulse-python` carries the
-   * mirror of this test against its own constants.
+   * enforcing it at build time, and a drift sends every mailed link to a 404.
+   * `webbpulse-python` carries the mirror of this test.
    */
   it('match VERIFY_LINK_PATH and RESET_LINK_PATH on the backend', () => {
     expect(VERIFY_EMAIL_PATH).toBe('/verify-email');
@@ -98,8 +96,6 @@ describe('SPA link paths', () => {
   });
 
   it('is not the API confirm route', () => {
-    // The reset page collects a password and calls /api/auth/reset/confirm. The
-    // two being different strings is the whole reason the constant exists.
     expect(RESET_PASSWORD_PATH).not.toBe('/api/auth/reset/confirm');
   });
 });
@@ -112,9 +108,6 @@ describe('readLinkToken', () => {
   });
 
   it('handles a base64url token with - and _ unchanged', () => {
-    // The backend mints 256 bits as base64url and urlencodes it. A token that
-    // came back mangled would be refused as unknown, which is indistinguishable
-    // from an expired link and so would be a genuinely hard bug to find.
     const token = 'ab-cd_ef12';
     expect(
       readLinkToken({
@@ -137,9 +130,6 @@ describe('readLinkToken', () => {
   });
 
   it('honours expectedPath, so one page cannot read the other flow token', () => {
-    // A reset token presented to the verification endpoint is refused by the
-    // backend as a wrong-purpose token. Not reading it in the first place is
-    // the cheaper half of that defence.
     expect(
       readLinkToken({
         url: 'https://app.example.test/reset-password?token=t1',
@@ -238,8 +228,6 @@ describe('requestEmailVerification', () => {
   });
 
   it('resolves identically for an unknown address', async () => {
-    // Section 5.4: the request routes answer 200 whether or not the address has
-    // an account. There must be nothing in the outcome to tell them apart.
     const fetchMock = routedFetch({
       '/api/auth/verify-email': () => jsonResponse({ sent: true }),
     });
@@ -305,8 +293,6 @@ describe('requestEmailVerification', () => {
   });
 
   it('rethrows a 500 and a network failure', async () => {
-    // The rule for what stays an exception: anything the caller could not have
-    // anticipated and has no form state to render for.
     const auth = authWith(
       routedFetch({
         '/api/auth/verify-email': () => envelope(500, undefined, 'Boom.'),
@@ -323,16 +309,12 @@ describe('requestEmailVerification', () => {
     );
     await expect(
       offline.requestEmailVerification({ email: 'a@example.test' })
-      // The transport wraps a fetch rejection in its own network error, so the
-      // assertion is on that rather than on the stub's message.
     ).rejects.toThrow(/Network request .* failed/);
   });
 });
 
 describe('requestPasswordReset', () => {
   it("returns the server's section 5.4 sentence in detail", async () => {
-    // The wording is fixed by the standard and is deliberately true whether or
-    // not the address exists. Rendering the server's copy keeps one wording.
     const detail = 'If that address has an account, a link is on its way.';
     const fetchMock = routedFetch({
       '/api/auth/reset': () => jsonResponse({ sent: true, detail }),
@@ -427,9 +409,6 @@ describe('confirmEmailVerification', () => {
   });
 
   it('gives one outcome for unknown, expired, spent and wrong purpose', async () => {
-    // The server answers all four with the same code and the same message on
-    // purpose: the difference between them is information about somebody else's
-    // token. A client that split them apart would be inventing it.
     const message = 'This link is no longer valid. Request a new one.';
     const outcomes = [];
     for (const _reason of ['unknown', 'expired', 'spent', 'wrong-purpose']) {
@@ -457,8 +436,6 @@ describe('confirmEmailVerification', () => {
   });
 
   it('throws on a password code, which this route must never emit', async () => {
-    // Each route declares the refusals it models, so a code that is valid
-    // elsewhere cannot become a silent success here.
     const auth = authWith(
       routedFetch({
         '/api/auth/verify-email/confirm': () =>
@@ -515,9 +492,6 @@ describe('confirmPasswordReset', () => {
   });
 
   it('sends an empty family_ids list rather than dropping it', async () => {
-    // The backend distinguishes null from []: null falls through to the store,
-    // which raises rather than silently revoking nothing, and [] is revoked
-    // exactly. A caller that passed [] deliberately must not have it dropped.
     const fetchMock = routedFetch({
       '/api/auth/reset/confirm': () => jsonResponse({ reset: true }),
     });
@@ -552,8 +526,6 @@ describe('confirmPasswordReset', () => {
 
     expect(auth.getAccessToken()).toBeNull();
     expect(auth.getState().status).toBe('anonymous');
-    // Not notified: the caller is on the reset page and its own success branch
-    // navigates. Firing the hook here would be a second, competing navigation.
     expect(onSessionEnded).not.toHaveBeenCalled();
   });
 
@@ -598,8 +570,6 @@ describe('confirmPasswordReset', () => {
   });
 
   it('keeps the session when the reset was refused', async () => {
-    // Only a success revokes. A rejected password must not sign the user out of
-    // a session they still legitimately hold in another tab.
     const fetchMock = routedFetch({
       '/api/auth/refresh': () =>
         jsonResponse({ access_token: 'a1', expires_in: 600 }),

@@ -214,7 +214,6 @@ describe('base64url conversion', () => {
   });
 
   it('decodes an unpadded value the server sent', () => {
-    // "chal" base64url-encodes to "Y2hhbA" with the padding stripped.
     expect(new Uint8Array(base64UrlToBuffer('Y2hhbA'))).toEqual(
       new Uint8Array([99, 104, 97, 108])
     );
@@ -236,7 +235,6 @@ describe('toCreationOptions', () => {
     expect(
       (options['excludeCredentials'] as { id: unknown }[])[0]?.id
     ).toBeInstanceOf(ArrayBuffer);
-    // Untouched, so an option this version has never heard of still arrives.
     expect(options['rp']).toEqual({ id: 'example.test', name: 'Example' });
     expect(options['pubKeyCredParams']).toEqual([
       { alg: -7, type: 'public-key' },
@@ -304,7 +302,6 @@ describe('credentialToJSON', () => {
     const response = json['response'] as Record<string, unknown>;
     expect(typeof response['attestationObject']).toBe('string');
     expect(response['transports']).toEqual(['internal']);
-    // An assertion field must not appear on a registration document.
     expect(response['signature']).toBeUndefined();
   });
 
@@ -456,10 +453,8 @@ describe('classifyPasskeyError', () => {
 
   /**
    * The `ApiError` a route would throw, obtained by making a real call.
-   *
-   * `register` is the vehicle rather than one of the passkey methods, because
-   * every passkey method classifies rather than throws and would hand back an
-   * outcome instead of the error this suite is trying to inspect.
+   * `register` is the vehicle because every passkey method classifies rather
+   * than throws and would hand back an outcome instead.
    */
   async function apiErrorFor(response: Response): Promise<unknown> {
     const auth = authWith(
@@ -609,8 +604,6 @@ describe('AuthClient.registerPasskey', () => {
     const request = webAuthn.create.mock.calls[0]?.[0] as {
       publicKey: Record<string, unknown>;
     };
-    // The challenge id is the server's handle on a row and must not leak into
-    // the ceremony the browser runs.
     expect(request.publicKey['challenge']).toBeInstanceOf(ArrayBuffer);
     expect(request.publicKey['challenge_id']).toBeUndefined();
   });
@@ -685,7 +678,6 @@ describe('AuthClient.registerPasskey', () => {
     const outcome = await auth.registerPasskey();
 
     expect(outcome).toMatchObject({ ok: false, reason: 'cancelled' });
-    // A cancelled ceremony is not an error state on the client.
     expect(auth.getState().error).toBeNull();
     expect(auth.getState().status).toBe('authenticated');
   });
@@ -854,8 +846,6 @@ describe('AuthClient.signInWithPasskey', () => {
       ticket: 'tkt',
       factors: ['totp'],
     });
-    // The ticket is finished with completeTotp, so the client stays anonymous
-    // and keeps the challenge in state for a form to read.
     expect(auth.getAccessToken()).toBeNull();
     expect(auth.getState().pendingMfa).toEqual({
       ticket: 'tkt',
