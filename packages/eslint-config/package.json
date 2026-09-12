@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/eslint-config",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Shared ESLint flat configurations for WebbPulse TypeScript and React projects.",
   "license": "UNLICENSED",
   "type": "module",
@@ -16,13 +16,15 @@
     "base.js",
     "react.js",
     "index.js",
+    "prettier.json",
     "README.md"
   ],
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
     "./base": "./base.js",
-    "./react": "./react.js"
+    "./react": "./react.js",
+    "./prettier": "./prettier.json"
   },
   "peerDependencies": {
     "eslint": "^9.0.0 || ^10.0.0"

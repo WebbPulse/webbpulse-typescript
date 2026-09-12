@@ -31,6 +31,31 @@ export default reactConfig({
 });
 ```
 
+## Prettier settings
+
+`./prettier` publishes the estate's canonical Prettier options, so every consumer
+formats identically instead of drifting in its own `.prettierrc`. Point the
+consumer's config file at the export rather than copying the values:
+
+```json
+"@webbpulse/eslint-config/prettier"
+```
+
+That is the entire contents of a consumer `.prettierrc.json`. Prettier resolves a
+string config file as a module reference, so the options arrive from this package
+and a change here reaches every consumer on its next version bump.
+
+`arrowParens` is `"always"`. It was the value this repository already used, and it
+is Prettier's own default, so it is the setting a new consumer lands on when it
+has no config at all.
+
+To override one option for a single consumer, use the object form and spread the
+shared config through `extends` instead:
+
+```json
+{ "extends": "@webbpulse/eslint-config/prettier", "printWidth": 100 }
+```
+
 ## ESLint 9 and ESLint 10
 
 The peer range is `^9.0.0 || ^10.0.0`. Both major versions are supported, so a
