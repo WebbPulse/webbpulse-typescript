@@ -54,6 +54,34 @@ jobs:
       matrix:
         package:
           - auth
+    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      node-version: '22'
+      working-directory: packages/${{ matrix.package }}
+      package-manager: 'npm'
+      cache-dependency-path: package-lock.json
+      install-command: npm ci --no-progress --prefix ../..
+      build-command: >-
+        npm run build --if-present --prefix ../..
+        --workspace "@webbpulse/${{ matrix.package }}"
+      codeartifact-domain: webbpulse
+      codeartifact-repository: npm
+      aws-region: us-west-2
+      environment: publish
+    secrets:
+      role-to-assume: ${{ secrets.CODEARTIFACT_PUBLISH_ROLE_ARN }}
+      codeartifact-domain-owner: ${{ secrets.CODEARTIFACT_DOMAIN_OWNER }}
+
+  second-order:
+    name: Publish the packages that depend on the second wave
+    needs: dependents
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
           - discovery
     uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
     permissions:
