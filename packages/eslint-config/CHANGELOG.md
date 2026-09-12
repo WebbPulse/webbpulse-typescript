@@ -1,5 +1,11 @@
 # @webbpulse/eslint-config
 
+## 0.10.0
+
+### Minor Changes
+
+- Add a React surface for the session ending to `@webbpulse/auth`. `AuthState` gains `sessionEnded`, which carries the `AuthSessionEndedError` whatever status code ended the session and is cleared by the next successful `login` or `initialize`; `error` keeps its old semantics and still stays null on an ordinary 401 expiry. `AuthProvider` takes an `onSessionEnded` prop that fires once per ending alongside the client's constructor hook, and the new `useSessionEnded` hook subscribes without prop drilling. Every other package takes the lockstep version bump with no change.
+
 ## 0.9.0
 
 ### Minor Changes

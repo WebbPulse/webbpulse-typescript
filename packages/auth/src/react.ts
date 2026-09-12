@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { AuthClient, AuthState } from './auth-client.js';
+import type { AuthSessionEndedError } from './errors.js';
 import {
   readOAuthCallback,
   stripOAuthParams,
@@ -154,17 +155,26 @@ export interface AuthProviderProps {
    * token does not survive a reload.
    */
   initializeOnMount?: boolean;
+  /**
+   * Called once each time the session ends, on top of whatever the client's own
+   * `onSessionEnded` option does. It fires on an ordinary 401 expiry as well as
+   * on a non-401 failure, and not on a startup refresh that found no cookie.
+   */
+  onSessionEnded?: (error: AuthSessionEndedError) => void;
   children: ReactNode;
 }
 
 /**
- * Puts an {@link AuthClient} in context and runs the silent refresh. Safe under
- * StrictMode's double mount, since `initialize` shares one in-flight request
- * rather than rotating the cookie twice.
+ * Puts an {@link AuthClient} in context, runs the silent refresh and fans the
+ * session ending out to `onSessionEnded`. Safe under StrictMode's double mount,
+ * since `initialize` shares one in-flight request rather than rotating the
+ * cookie twice, and the fan-out is keyed on the error identity rather than on
+ * the effect running.
  */
 export function AuthProvider({
   client,
   initializeOnMount = true,
+  onSessionEnded,
   children,
 }: AuthProviderProps): ReactNode {
   const erased = client as unknown as AuthClient<unknown>;
@@ -175,7 +185,39 @@ export function AuthProvider({
     }
   }, [erased, initializeOnMount]);
 
-  return createElement(AuthClientContext.Provider, { value: erased }, children);
+  return createElement(
+    AuthClientContext.Provider,
+    { value: erased },
+    createElement(SessionEndedFanOut, { onSessionEnded }),
+    children
+  );
+}
+
+/**
+ * Invokes `onSessionEnded` once per ending. A ref holds the last error the
+ * handler saw, so StrictMode's double mount and any later re-render replay
+ * nothing, and holds the latest handler so a caller need not memoise it. Its own
+ * component so the subscription does not re-render the provider's children.
+ */
+function SessionEndedFanOut({
+  onSessionEnded,
+}: {
+  onSessionEnded: ((error: AuthSessionEndedError) => void) | undefined;
+}): ReactNode {
+  const sessionEnded = useSessionEnded();
+  const handler = useRef(onSessionEnded);
+  handler.current = onSessionEnded;
+  const notified = useRef<AuthSessionEndedError | null>(null);
+
+  useEffect(() => {
+    if (sessionEnded === null || notified.current === sessionEnded) {
+      return;
+    }
+    notified.current = sessionEnded;
+    handler.current?.(sessionEnded);
+  }, [sessionEnded]);
+
+  return null;
 }
 
 /** Returns the auth client from context. Throws outside a provider. */
@@ -202,6 +244,16 @@ export function useAuthState<TUser = unknown>(): AuthState<TUser> {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
+/**
+ * The {@link AuthSessionEndedError} for the current ending, or null while a
+ * session is live or was never started. Cleared by the next successful `login`
+ * or `initialize`, so a component subscribes to the ending without prop
+ * drilling and without reading `error`, which an ordinary 401 expiry leaves null.
+ */
+export function useSessionEnded(): AuthSessionEndedError | null {
+  return useAuthState().sessionEnded;
+}
+
 /** What {@link useAuth} returns. */
 export interface UseAuthResult<TUser> extends AuthState<TUser> {
   isAuthenticated: boolean;
@@ -220,6 +272,16 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   deletePasskey: AuthClient<TUser>['deletePasskey'];
   startOAuth: AuthClient<TUser>['startOAuth'];
   logout: AuthClient<TUser>['logout'];
+  /**
+   * Writes a user the caller already has into the store, with no round trip and
+   * no token rotation.
+   */
+  setUser: AuthClient<TUser>['setUser'];
+  /**
+   * Re-reads the user through the client's `loadUser` hook, rotating no token. A
+   * 401 ends the session the way a failed refresh does.
+   */
+  reloadUser: AuthClient<TUser>['reloadUser'];
   /** The in-memory access token, or null. Rarely needed in a component. */
   getAccessToken: () => string | null;
 }
@@ -243,6 +305,8 @@ export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
       deletePasskey: client.deletePasskey.bind(client),
       startOAuth: client.startOAuth.bind(client),
       logout: client.logout.bind(client),
+      setUser: client.setUser.bind(client),
+      reloadUser: client.reloadUser.bind(client),
       getAccessToken: client.getAccessToken.bind(client),
     }),
     [client]

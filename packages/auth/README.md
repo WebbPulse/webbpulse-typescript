@@ -24,7 +24,12 @@ const client = createApiClient({ baseUrl: config.apiBaseUrl, auth });
 ```tsx
 import { AuthProvider, useAuth } from '@webbpulse/auth/react';
 
-<AuthProvider client={auth}>
+<AuthProvider
+  client={auth}
+  onSessionEnded={() => {
+    navigate('/login');
+  }}
+>
   <App />
 </AuthProvider>;
 
@@ -51,9 +56,10 @@ const { status, user, isAuthenticated, login, logout } = useAuth<UserRead>();
   a second concurrent rotation would revoke the whole family and sign the user
   out of a session that was perfectly healthy (2.6).
 - **The startup refresh distinguishes "signed out" from "session ended".** A
-  first time visitor with no cookie gets `status: 'anonymous'` and no
-  `onSessionEnded` call, because bouncing someone to a login screen they never
-  left is wrong. A refresh that fails mid session calls the hook.
+  first time visitor with no cookie gets `status: 'anonymous'`, a null
+  `sessionEnded` and no `onSessionEnded` call, because bouncing someone to a
+  login screen they never left is wrong. A refresh that fails mid session sets
+  the field and calls the hook.
 - **The proactive refresh fires at 80% of `expires_in`**, so a ten minute token
   is replaced at eight minutes and the reactive 401 path is the fallback rather
   than the norm. Set `proactiveRefreshRatio` to move it, or
@@ -63,6 +69,100 @@ const { status, user, isAuthenticated, login, logout } = useAuth<UserRead>();
   `anonymous`, rather than separate `isAuthenticated` and `isLoading` booleans
   that together can express states meaning nothing. The distinct `unknown` is
   what prevents a frame of signed out UI on first paint.
+
+## Reading and writing the user without spending a rotation
+
+`loadUser` runs on a login and on a successful refresh, which leaves a gap: an
+application that changes something the profile reflects has no way to get the
+fresher copy into the store. Calling `refresh` would work and is the wrong call,
+because it rotates the refresh token to learn a display name, and every rotation
+is a chance for the reuse detector to end a healthy session.
+
+Two methods close it, and neither touches the token or the cookie:
+
+```ts
+const updated = await client.patch<UserRead>('/users/me', { name });
+auth.setUser(updated.data);
+
+await auth.reloadUser();
+```
+
+`setUser(user)` writes a user the caller already has straight into the store, with
+no request at all. It leaves `status` alone rather than promoting an anonymous
+client to authenticated, since a user object is not a session.
+
+`reloadUser()` re-reads the user through the configured `loadUser` hook and
+resolves to it, or to the current user unchanged when no `loadUser` was given. A
+401 from that read means the token this client holds is no longer good, so it ends
+the session exactly as a failed refresh does, `onSessionEnded` and `sessionEnded`
+included, and resolves to null. Any other failure leaves the session alone and
+lands in `error`, because a profile route being down is not a reason to sign
+someone out.
+
+Both are on `useAuth` in the React entry, bound and stable for the client's
+lifetime like the rest.
+
+## Reacting to the session ending from React
+
+`onSessionEnded` on `AuthClientOptions` is a constructor callback, which is the
+wrong shape for a component: it is wired before React exists and a component
+cannot subscribe to it. The React entry therefore exposes the same ending twice
+over, and neither reading goes through `error`.
+
+`AuthState.sessionEnded` carries the `AuthSessionEndedError` for the current
+ending, or null. Read it with `useSessionEnded`, or off `useAuth` and
+`useAuthState`, which both carry it:
+
+```tsx
+import { useSessionEnded } from '@webbpulse/auth/react';
+
+function ExpiryBanner(): ReactNode {
+  const sessionEnded = useSessionEnded();
+  if (sessionEnded === null) {
+    return null;
+  }
+  return (
+    <p role="alert">
+      {sessionEnded.reason === 'logged-out'
+        ? 'Signed out.'
+        : 'Your session expired. Please sign in again.'}
+    </p>
+  );
+}
+```
+
+`AuthProvider` also takes an `onSessionEnded` prop, for the side effect a
+redirect wants rather than a render:
+
+```tsx
+<AuthProvider
+  client={auth}
+  onSessionEnded={(error) => {
+    navigate(error.reason === 'logged-out' ? '/' : '/login?expired=1');
+  }}
+>
+  <App />
+</AuthProvider>
+```
+
+It fires on top of whatever the client's own `onSessionEnded` option does, so a
+product that already wired the constructor hook keeps it. Three things to know:
+
+- **It fires on an ordinary 401 expiry.** This is why `error` cannot stand in:
+  `error` stays null on a 401 refusal, which is exactly the expiry case, because
+  an expired session is not a failure a form should render. `sessionEnded` is set
+  whatever the status code, and a non-401 failure sets both.
+- **Exactly once per ending.** A ref holds the last error the handler was given,
+  so StrictMode's double mount and every later re-render replay nothing, and the
+  next distinct ending fires again. The ref also holds the latest handler, so a
+  caller need not memoise it.
+- **It does not fire when the startup refresh found no cookie**, and
+  `sessionEnded` stays null there, matching the constructor hook. A first time
+  visitor gets `status: 'anonymous'` and nothing else; nothing ended.
+
+`sessionEnded` is cleared by the next successful `login` or `initialize`, so a
+redirect-on-expiry does not re-fire once the user signs back in. A failed login
+leaves it alone, since a wrong password ends nothing.
 
 ## The refresh never recurses
 
@@ -679,9 +779,10 @@ try {
 `PASSKEY_NOT_RECOGNISED` keeps the standard's British spelling, because it is a
 wire value the backend emits and not prose to normalise.
 
-`AuthSessionEndedError` is what `onSessionEnded` receives. Its `reason` is
-`'refresh-failed'`, `'logged-out'` or `'no-session'`, which is enough to decide
-between a redirect and a toast.
+`AuthSessionEndedError` is what `onSessionEnded` receives, and what
+`AuthState.sessionEnded` carries. Its `reason` is `'refresh-failed'`,
+`'logged-out'` or `'no-session'`, which is enough to decide between a redirect
+and a toast.
 
 ## `SessionManager`, kept and narrowed
 
@@ -744,8 +845,8 @@ From the passkey flows: `passkeysSupported`, `conditionalMediationAvailable`,
 `PasskeyCancelled`, `PasskeyPaths`.
 
 `@webbpulse/auth/react`: `AuthProvider`, `useAuth`, `useAuthState`,
-`useAuthClient`, `SessionProvider`, `useSession`, `useSessionState`,
-`useSessionManager`, and the types `AuthProviderProps`, `UseAuthResult`,
-`AnyAuthClient`, `SessionProviderProps`, `UseSessionResult`,
-`AnySessionManager`. React is an optional peer dependency, needed only for this
-entry point.
+`useAuthClient`, `useSessionEnded`, `useOAuthCallback`, `SessionProvider`,
+`useSession`, `useSessionState`, `useSessionManager`, and the types
+`AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`, `OAuthCallbackHandler`,
+`SessionProviderProps`, `UseSessionResult`, `AnySessionManager`. React is an
+optional peer dependency, needed only for this entry point.

@@ -1,5 +1,20 @@
 # @webbpulse/auth
 
+## 0.10.0
+
+### Minor Changes
+
+- Add a React surface for the session ending to `@webbpulse/auth`. `AuthState` gains `sessionEnded`, which carries the `AuthSessionEndedError` whatever status code ended the session and is cleared by the next successful `login` or `initialize`; `error` keeps its old semantics and still stays null on an ordinary 401 expiry. `AuthProvider` takes an `onSessionEnded` prop that fires once per ending alongside the client's constructor hook, and the new `useSessionEnded` hook subscribes without prop drilling.
+
+  `AuthClient` also gains `setUser(user)`, which writes a user the caller already has into the store with no request, and `reloadUser()`, which re-reads the user through the configured `loadUser` hook without rotating the refresh token; a 401 from that read ends the session the way a failed refresh does, and any other failure lands in `error` and leaves the session alone. Both are exposed on `useAuth`.
+
+  Every other package takes the lockstep version bump with no change.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webbpulse/api-client@0.10.0
+
 ## 0.9.0
 
 ### Minor Changes

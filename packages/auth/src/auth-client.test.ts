@@ -100,6 +100,7 @@ describe('AuthClient construction', () => {
       user: null,
       hasAccessToken: false,
       error: null,
+      sessionEnded: null,
       pendingMfa: null,
     });
   });
@@ -325,6 +326,7 @@ describe('AuthClient refresh failure', () => {
       user: null,
       hasAccessToken: false,
       error: null,
+      sessionEnded: expect.any(AuthSessionEndedError),
       pendingMfa: null,
     });
     expect(seen.at(-1)?.status).toBe('anonymous');
@@ -559,6 +561,298 @@ describe('AuthClient.logout', () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
       '/api/auth/logout-all'
     );
+  });
+});
+
+describe('AuthClient.setUser', () => {
+  it('writes the user with no request and no token change', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => Promise.resolve(ALICE),
+    });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    const callsBefore = fetchMock.mock.calls.length;
+
+    const renamed: User = { id: 'u_1', email: 'alice+new@example.test' };
+    auth.setUser(renamed);
+
+    expect(auth.getState().user).toBe(renamed);
+    expect(auth.getAccessToken()).toBe('a1');
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('notifies subscribers', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock);
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    const seen: AuthState<User>[] = [];
+    auth.subscribe((state) => seen.push(state));
+
+    auth.setUser(ALICE);
+
+    expect(seen.at(-1)?.user).toBe(ALICE);
+  });
+
+  it('does not promote an anonymous client to authenticated', () => {
+    const auth = authWith(routedFetch({}));
+
+    auth.setUser(ALICE);
+
+    expect(auth.getState().user).toBe(ALICE);
+    expect(auth.getState().status).toBe('unknown');
+    expect(auth.getState().hasAccessToken).toBe(false);
+  });
+});
+
+describe('AuthClient.reloadUser', () => {
+  it('re-reads the user without touching the refresh route', async () => {
+    const BOB: User = { id: 'u_1', email: 'bob@example.test' };
+    let loads = 0;
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => {
+        loads += 1;
+        return Promise.resolve(loads === 1 ? ALICE : BOB);
+      },
+    });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    expect(auth.getState().user).toBe(ALICE);
+
+    await expect(auth.reloadUser()).resolves.toBe(BOB);
+
+    expect(auth.getState().user).toBe(BOB);
+    expect(auth.getAccessToken()).toBe('a1');
+    expect(
+      fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/api/auth/refresh')
+      )
+    ).toHaveLength(0);
+  });
+
+  it('returns the current user when no loadUser was configured', async () => {
+    const auth = authWith(routedFetch({}));
+    auth.setUser(ALICE);
+
+    await expect(auth.reloadUser()).resolves.toBe(ALICE);
+  });
+
+  it('clears the error a previous failure left behind', async () => {
+    let loads = 0;
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => {
+        loads += 1;
+        return loads === 1
+          ? Promise.reject(new Error('profile route down'))
+          : Promise.resolve(ALICE);
+      },
+    });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    expect(auth.getState().error?.message).toBe('profile route down');
+
+    await auth.reloadUser();
+
+    expect(auth.getState().error).toBeNull();
+    expect(auth.getState().user).toBe(ALICE);
+  });
+
+  it('ends the session on a 401, the way a failed refresh does', async () => {
+    const onSessionEnded = vi.fn();
+    let loads = 0;
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/users/me': () => envelope(401, 'INVALID_TOKEN', 'Token is dead.'),
+    });
+    const auth = authWith(fetchMock, {
+      onSessionEnded,
+      loadUser: (client) => {
+        loads += 1;
+        if (loads === 1) {
+          return Promise.resolve(ALICE);
+        }
+        return client.get<User>('/users/me').then((r) => r.data);
+      },
+    });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    expect(auth.getState().status).toBe('authenticated');
+
+    await expect(auth.reloadUser()).resolves.toBeNull();
+
+    const state = auth.getState();
+    expect(state.status).toBe('anonymous');
+    expect(state.user).toBeNull();
+    expect(state.hasAccessToken).toBe(false);
+    expect(auth.getAccessToken()).toBeNull();
+    expect(state.error).toBeNull();
+    expect(state.sessionEnded).toBeInstanceOf(AuthSessionEndedError);
+    expect(state.sessionEnded?.code).toBe('INVALID_TOKEN');
+    expect(onSessionEnded).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the session on a non 401 failure and records the error', async () => {
+    const onSessionEnded = vi.fn();
+    let loads = 0;
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      onSessionEnded,
+      loadUser: () => {
+        loads += 1;
+        return loads === 1
+          ? Promise.resolve(ALICE)
+          : Promise.reject(new Error('profile route down'));
+      },
+    });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+
+    await expect(auth.reloadUser()).resolves.toBe(ALICE);
+
+    const state = auth.getState();
+    expect(state.status).toBe('authenticated');
+    expect(state.user).toBe(ALICE);
+    expect(auth.getAccessToken()).toBe('a1');
+    expect(state.error?.message).toBe('profile route down');
+    expect(state.sessionEnded).toBeNull();
+    expect(onSessionEnded).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthClient sessionEnded', () => {
+  it('records an ordinary 401 expiry while leaving error null', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/refresh': () => envelope(401, 'TOKEN_EXPIRED', 'Expired.'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    expect(auth.getState().sessionEnded).toBeNull();
+
+    await auth.refresh();
+
+    const state = auth.getState();
+    expect(state.error).toBeNull();
+    expect(state.sessionEnded).toBeInstanceOf(AuthSessionEndedError);
+    expect(state.sessionEnded?.reason).toBe('refresh-failed');
+    expect(state.sessionEnded?.code).toBe('TOKEN_EXPIRED');
+  });
+
+  it('records a non 401 failure in both error and sessionEnded', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/refresh': () => envelope(500, 'INVALID_TOKEN', 'Exploded.'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    await auth.refresh();
+
+    const state = auth.getState();
+    expect(state.error).toBeInstanceOf(AuthSessionEndedError);
+    expect(state.sessionEnded).toBe(state.error);
+  });
+
+  it('records a logout', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/logout': () => new Response(null, { status: 204 }),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.logout();
+
+    expect(auth.getState().sessionEnded?.reason).toBe('logged-out');
+  });
+
+  it('stays null when the startup refresh found no cookie', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/refresh': () => envelope(401, 'INVALID_TOKEN', 'No session.'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.initialize();
+
+    expect(auth.getState().status).toBe('anonymous');
+    expect(auth.getState().sessionEnded).toBeNull();
+  });
+
+  it('is cleared by a later successful login', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/logout': () => new Response(null, { status: 204 }),
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => Promise.resolve(ALICE),
+    });
+
+    await auth.logout();
+    expect(auth.getState().sessionEnded).not.toBeNull();
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+
+    expect(auth.getState().status).toBe('authenticated');
+    expect(auth.getState().sessionEnded).toBeNull();
+  });
+
+  it('is cleared by a later successful initialize', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/logout': () => new Response(null, { status: 204 }),
+      '/api/auth/refresh': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.logout();
+    expect(auth.getState().sessionEnded).not.toBeNull();
+
+    await auth.initialize();
+
+    expect(auth.getState().status).toBe('authenticated');
+    expect(auth.getState().sessionEnded).toBeNull();
+  });
+
+  it('survives a failed login, which ends nothing', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': (call) =>
+        call === 0
+          ? jsonResponse({ access_token: 'a1', expires_in: 600 })
+          : envelope(401, 'INVALID_CREDENTIALS', 'Wrong.'),
+      '/api/auth/refresh': () => envelope(401, 'TOKEN_EXPIRED', 'Expired.'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    await auth.refresh();
+    const ended = auth.getState().sessionEnded;
+    expect(ended).not.toBeNull();
+
+    await expect(
+      auth.login({ email: 'a@b.test', password: 'wrong' })
+    ).rejects.toThrow();
+
+    expect(auth.getState().sessionEnded).toBe(ended);
   });
 });
 
