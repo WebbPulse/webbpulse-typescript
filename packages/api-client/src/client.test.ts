@@ -287,6 +287,80 @@ describe('retry', () => {
     expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(3);
   });
 
+  it('waits the Retry-After the server asked for before retrying', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = stubFetch([
+        jsonResponse({}, { status: 429, headers: { 'retry-after': '2' } }),
+        jsonResponse({ ok: true }),
+      ]);
+      const pending = client(fetchImpl, { retries: 2 }).get<{ ok: boolean }>(
+        '/x'
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(2);
+      await expect(pending).resolves.toMatchObject({ data: { ok: true } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('throws instead of retrying when Retry-After exceeds the cap', async () => {
+    const fetchImpl = stubFetch([
+      jsonResponse({}, { status: 429, headers: { 'retry-after': '30' } }),
+    ]);
+    const error = await client(fetchImpl, { retries: 2 })
+      .get('/x')
+      .catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).retryAfterSeconds).toBe(30);
+    expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours a raised retryAfterMaxMs', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = stubFetch([
+        jsonResponse({}, { status: 429, headers: { 'retry-after': '30' } }),
+        jsonResponse({ ok: true }),
+      ]);
+      const pending = client(fetchImpl, {
+        retries: 2,
+        retryAfterMaxMs: 60_000,
+      }).get('/x');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(2);
+      await expect(pending).resolves.toMatchObject({ status: 200 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the jittered backoff for a 503 with no Retry-After', async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      const fetchImpl = stubFetch([
+        jsonResponse({}, { status: 503 }),
+        jsonResponse({ ok: true }),
+      ]);
+      const pending = client(fetchImpl, {
+        retries: 2,
+        retryBaseDelayMs: 250,
+      }).get('/x');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(2);
+      await expect(pending).resolves.toMatchObject({ status: 200 });
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not retry a 4xx the caller owns', async () => {
     const fetchImpl = stubFetch([jsonResponse({}, { status: 404 })]);
     await expect(

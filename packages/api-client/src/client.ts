@@ -89,6 +89,12 @@ export interface ApiClientOptions {
   /** Base backoff delay in milliseconds. Defaults to 250. */
   retryBaseDelayMs?: number;
   /**
+   * Ceiling in milliseconds on a wait taken from a `Retry-After` header.
+   * Defaults to 5000. A longer `Retry-After` is not waited out at all: the
+   * `ApiError` is thrown so the caller can surface it instead of stalling.
+   */
+  retryAfterMaxMs?: number;
+  /**
    * Returns an auth token to send as a bearer header. Synchronous by design:
    * a promise here would stringify into a `Bearer [object Promise]` header,
    * so resolve the token before constructing the client.
@@ -124,6 +130,21 @@ function defaultRequestId(): string {
     return globalThis.crypto.randomUUID();
   }
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * The wait a failure's `Retry-After` asks for in milliseconds, or undefined
+ * when the server sent no usable header.
+ */
+function retryAfterDelayMs(error: unknown): number | undefined {
+  if (!(error instanceof ApiError)) {
+    return undefined;
+  }
+  const seconds = error.retryAfterSeconds;
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return undefined;
+  }
+  return seconds * 1000;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -271,6 +292,7 @@ export class ApiClient {
       ? (options.retries ?? this.options.retries ?? 2)
       : 0;
     const baseDelay = this.options.retryBaseDelayMs ?? 250;
+    const retryAfterMaxMs = this.options.retryAfterMaxMs ?? 5000;
     const requestId = options.requestId ?? this.requestIdFactory()();
 
     let lastError: unknown;
@@ -289,6 +311,14 @@ export class ApiClient {
           attempt < maxRetries && this.isRetriable(error, options.signal);
         if (!retriable) {
           throw error;
+        }
+        const retryAfterMs = retryAfterDelayMs(error);
+        if (retryAfterMs !== undefined) {
+          if (retryAfterMs > retryAfterMaxMs) {
+            throw error;
+          }
+          await sleep(retryAfterMs, options.signal);
+          continue;
         }
         const ceiling = baseDelay * 2 ** attempt;
         await sleep(Math.random() * ceiling, options.signal);
