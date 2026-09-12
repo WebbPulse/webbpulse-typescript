@@ -286,41 +286,76 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   getAccessToken: () => string | null;
 }
 
+/** The `AuthClient` methods {@link useAuth} re-exposes, bound lazily. */
+const AUTH_METHOD_NAMES = [
+  'login',
+  'completeTotp',
+  'signInWithPasskey',
+  'registerPasskey',
+  'listPasskeys',
+  'renamePasskey',
+  'deletePasskey',
+  'startOAuth',
+  'logout',
+  'setUser',
+  'reloadUser',
+  'getAccessToken',
+] as const;
+
+type AuthMethodName = (typeof AUTH_METHOD_NAMES)[number];
+
+const boundMethods = new WeakMap<object, Map<AuthMethodName, unknown>>();
+
 /**
- * The hook application code uses. The methods are bound and stable for the
- * client's lifetime, so a component can put them in a dependency array safely.
+ * The bound wrapper for one client method, created on first read and cached for
+ * the client's lifetime, so every render hands a component the same function and
+ * a method the component never reads is never touched.
+ */
+function boundMethod(client: object, name: AuthMethodName): unknown {
+  let cache = boundMethods.get(client);
+  if (cache === undefined) {
+    cache = new Map();
+    boundMethods.set(client, cache);
+  }
+  const cached = cache.get(name);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const method = (client as Record<AuthMethodName, unknown>)[name];
+  if (typeof method !== 'function') {
+    throw new TypeError(
+      `useAuth: the auth client does not implement ${name}(). A test stub needs only the methods the component under test calls.`
+    );
+  }
+  const wrapper = (method as (...args: unknown[]) => unknown).bind(client);
+  cache.set(name, wrapper);
+  return wrapper;
+}
+
+/**
+ * The hook application code uses. Each method is bound on first read and cached
+ * per client, so the functions stay referentially stable for the client's
+ * lifetime and a client missing one only fails when that one is read.
  */
 export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
   const client = useAuthClient<TUser>();
   const state = useAuthState<TUser>();
 
-  const bound = useMemo(
-    () => ({
-      login: client.login.bind(client),
-      completeTotp: client.completeTotp.bind(client),
-      signInWithPasskey: client.signInWithPasskey.bind(client),
-      registerPasskey: client.registerPasskey.bind(client),
-      listPasskeys: client.listPasskeys.bind(client),
-      renamePasskey: client.renamePasskey.bind(client),
-      deletePasskey: client.deletePasskey.bind(client),
-      startOAuth: client.startOAuth.bind(client),
-      logout: client.logout.bind(client),
-      setUser: client.setUser.bind(client),
-      reloadUser: client.reloadUser.bind(client),
-      getAccessToken: client.getAccessToken.bind(client),
-    }),
-    [client]
-  );
-
-  return useMemo(
-    () => ({
+  return useMemo(() => {
+    const result = {
       ...state,
       isAuthenticated: state.status === 'authenticated',
       isLoading: state.status === 'loading' || state.status === 'unknown',
-      ...bound,
-    }),
-    [state, bound]
-  );
+    };
+    for (const name of AUTH_METHOD_NAMES) {
+      Object.defineProperty(result, name, {
+        get: () => boundMethod(client, name),
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    return result as UseAuthResult<TUser>;
+  }, [client, state]);
 }
 
 /** What {@link useOAuthCallback} is told, once, when the page was a callback landing. */

@@ -164,6 +164,53 @@ product that already wired the constructor hook keeps it. Three things to know:
 redirect-on-expiry does not re-fire once the user signs back in. A failed login
 leaves it alone, since a wrong password ends nothing.
 
+## Testing a component under the provider
+
+**A stub standing in for the client needs only the methods the test exercises.**
+`AuthProvider` calls `initialize` on mount and `useAuthState` calls `getState`
+and `subscribe`, so those three are the floor. Everything else on `useAuth` is
+bound on first read rather than up front, which means a component that signs the
+user out needs `logout` and nothing more:
+
+```tsx
+const client = {
+  initialize: () => Promise.resolve(null),
+  getState: () => ({
+    status: 'authenticated',
+    user: ALICE,
+    hasAccessToken: true,
+    error: null,
+    sessionEnded: null,
+    pendingMfa: null,
+  }),
+  subscribe: () => () => {},
+  logout: vi.fn(() => Promise.resolve()),
+} as unknown as AnyAuthClient;
+
+render(
+  <AuthProvider client={client}>
+    <SignOutButton />
+  </AuthProvider>
+);
+```
+
+Pass `initializeOnMount={false}` and the `initialize` stub goes too. Every
+`UseAuthResult` key is still present and still enumerable, so destructuring and
+`Object.keys` read the same as ever; reading a key the stub does not implement is
+what throws, with the method name in the message:
+
+```
+useAuth: the auth client does not implement renamePasskey(). A test stub needs
+only the methods the component under test calls.
+```
+
+The stability guarantee is unchanged. Each wrapper is cached against the client
+instance the first time it is read, so it is the same function on every later
+render and safe in a dependency array, and two different clients never share one.
+A real `AuthClient` implements the whole surface, so nothing about production
+behaviour changes; this only stops a partial test double failing at render time
+over a method the component never calls.
+
 ## The refresh never recurses
 
 `/api/auth/refresh` is called with retries disabled, and the 401 retry in
