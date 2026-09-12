@@ -1,5 +1,14 @@
 # @webbpulse/auth
 
+## 0.10.2
+
+### Patch Changes
+
+- Publish the canonical Prettier options as `@webbpulse/eslint-config/prettier` so
+  consumers reference one shared setting instead of keeping their own copy.
+- Updated dependencies
+  - @webbpulse/api-client@0.10.2
+
 ## 0.10.1
 
 ### Patch Changes
