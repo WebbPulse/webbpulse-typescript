@@ -527,6 +527,7 @@ describe('confirmPasswordReset', () => {
     expect(auth.getAccessToken()).toBeNull();
     expect(auth.getState().status).toBe('anonymous');
     expect(onSessionEnded).not.toHaveBeenCalled();
+    expect(auth.getState().sessionEnded?.reason).toBe('logged-out');
   });
 
   it('returns invalid-link for a spent link', async () => {

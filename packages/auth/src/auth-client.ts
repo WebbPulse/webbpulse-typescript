@@ -83,6 +83,13 @@ export interface AuthState<TUser> {
   hasAccessToken: boolean;
   /** Last error from a session operation, cleared on the next success. */
   error: Error | null;
+  /**
+   * The ending of the session, whatever the status code that ended it, cleared
+   * by the next successful `login` or `initialize`. Distinct from `error`, which
+   * stays silent on an ordinary 401 expiry, so this is the field to read as
+   * "the session ended".
+   */
+  sessionEnded: AuthSessionEndedError | null;
   /** Pending MFA challenge, when a login returned one. */
   pendingMfa: MfaChallenge | null;
 }
@@ -205,7 +212,8 @@ export interface AuthClientOptions<TUser = unknown> {
   /**
    * Called once each time the session ends, whether by a failed refresh or a
    * logout. It does not fire on a startup refresh that found no cookie; read
-   * `status === 'anonymous'` for that.
+   * `status === 'anonymous'` for that. React code reaches the same ending
+   * through `state.sessionEnded` rather than this constructor hook.
    */
   onSessionEnded?: (error: AuthSessionEndedError) => void;
   /**
@@ -425,6 +433,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     user: null,
     hasAccessToken: false,
     error: null,
+    sessionEnded: null,
     pendingMfa: null,
   };
 
@@ -634,15 +643,22 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       this.endSession(ended, {
         notify: !opts.startup,
         recordError: !(error instanceof ApiError && error.isUnauthorized),
+        recordEnding: !opts.startup,
       });
       throw ended;
     }
   }
 
-  /** Clears the session and, unless suppressed, notifies `onSessionEnded`. */
+  /**
+   * Clears the session and, unless suppressed, notifies `onSessionEnded` and
+   * records the ending in `sessionEnded`. `recordEnding` is separate from
+   * `recordError`, so an ordinary 401 expiry reaches a React subscriber while
+   * leaving `error` null as it always has, and separate from `notify`, so a
+   * password reset that ended every session elsewhere still shows up in state.
+   */
   private endSession(
     error: AuthSessionEndedError,
-    opts: { notify: boolean; recordError: boolean }
+    opts: { notify: boolean; recordError: boolean; recordEnding?: boolean }
   ): void {
     this.clearToken();
     this.setState({
@@ -650,6 +666,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       user: null,
       hasAccessToken: false,
       error: opts.recordError ? error : null,
+      sessionEnded: opts.recordEnding === false ? null : error,
       pendingMfa: null,
     });
     if (opts.notify) {
@@ -1470,6 +1487,56 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
+   * Writes a user into the store without a round trip, for a caller that already
+   * has a fresher copy: the response to a profile edit, or a user the
+   * application fetched itself. It touches neither token nor cookie, and leaves
+   * `status` alone rather than promoting an anonymous client to authenticated,
+   * since a user object is not a session.
+   */
+  setUser(user: TUser): void {
+    this.setState({ user });
+  }
+
+  /**
+   * Re-reads the user through the `loadUser` hook, for a caller that changed
+   * something the profile reflects. It rotates nothing: the access token and the
+   * refresh cookie are untouched, so this is the call to reach for instead of
+   * `refresh`, which would spend a rotation to learn a name. Resolves to the
+   * current user unchanged when no `loadUser` was configured.
+   *
+   * A 401 means the token this client holds is no longer good, so the session is
+   * ended exactly as a failed refresh ends it, `onSessionEnded` included. Any
+   * other failure leaves the session alone and lands in `error`, because a
+   * profile route being down is not a reason to sign someone out.
+   */
+  async reloadUser(): Promise<TUser | null> {
+    const loadUser = this.options.loadUser;
+    if (loadUser === undefined) {
+      return this.state.user;
+    }
+    try {
+      const user = await loadUser(this.client);
+      this.setState({ user, error: null });
+      return user;
+    } catch (error) {
+      if (error instanceof ApiError && error.isUnauthorized) {
+        const ended = new AuthSessionEndedError({
+          message: error.message,
+          code: getAuthErrorCode(error),
+          reason: 'refresh-failed',
+          cause: error,
+        });
+        this.endSession(ended, { notify: true, recordError: false });
+        return null;
+      }
+      this.setState({
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+      return this.state.user;
+    }
+  }
+
+  /**
    * Moves to the authenticated state, loading the user when a hook was given. A
    * `loadUser` that throws does not undo the session: the token is valid, and a
    * null user is a better outcome than signing someone out.
@@ -1492,6 +1559,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       user,
       hasAccessToken: this.accessToken !== null,
       error: loadError,
+      sessionEnded: null,
       pendingMfa: null,
     });
     return user;

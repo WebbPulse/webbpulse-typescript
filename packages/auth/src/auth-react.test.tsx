@@ -24,7 +24,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function clientWith(responses: (call: number) => Response): {
+function clientWith(
+  responses: (call: number) => Response,
+  loadUser: () => Promise<User | null> = () => Promise.resolve(ALICE)
+): {
   client: AuthClient<User>;
   fetchMock: ReturnType<typeof vi.fn>;
 } {
@@ -37,7 +40,7 @@ function clientWith(responses: (call: number) => Response): {
   const client = createAuthClient<User>({
     baseUrl: 'https://api.example.test',
     disableProactiveRefresh: true,
-    loadUser: () => Promise.resolve(ALICE),
+    loadUser,
     clientOptions: {
       fetch: fetchMock,
       retries: 0,
@@ -179,6 +182,95 @@ describe('useAuth', () => {
 
     expect(screen.getByTestId('status').textContent).toBe('anonymous');
     expect(screen.getByTestId('user').textContent).toBe('none');
+  });
+
+  it('exposes setUser, which re-renders with no request', async () => {
+    const BOB: User = { id: 'u_1', email: 'bob@example.test' };
+    function Renamer(): React.ReactNode {
+      const { user, setUser } = useAuth<User>();
+      return (
+        <div>
+          <span data-testid="email">{user?.email ?? 'none'}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setUser(BOB);
+            }}
+          >
+            rename
+          </button>
+        </div>
+      );
+    }
+    const { client, fetchMock } = clientWith(() =>
+      jsonResponse({ access_token: 'a1', expires_in: 600 })
+    );
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <Renamer />
+      </AuthProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('email').textContent).toBe(ALICE.email);
+    });
+    const callsBefore = fetchMock.mock.calls.length;
+
+    act(() => {
+      screen.getByRole('button', { name: 'rename' }).click();
+    });
+
+    expect(screen.getByTestId('email').textContent).toBe(BOB.email);
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('exposes reloadUser, which re-renders without rotating the token', async () => {
+    const BOB: User = { id: 'u_1', email: 'bob@example.test' };
+    let loads = 0;
+    const { client, fetchMock } = clientWith(
+      () => jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      () => {
+        loads += 1;
+        return Promise.resolve(loads === 1 ? ALICE : BOB);
+      }
+    );
+
+    function Reloader(): React.ReactNode {
+      const { user, reloadUser } = useAuth<User>();
+      return (
+        <div>
+          <span data-testid="email">{user?.email ?? 'none'}</span>
+          <button
+            type="button"
+            onClick={() => {
+              void reloadUser();
+            }}
+          >
+            reload
+          </button>
+        </div>
+      );
+    }
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <Reloader />
+      </AuthProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('email').textContent).toBe(ALICE.email);
+    });
+    const callsBefore = fetchMock.mock.calls.length;
+
+    act(() => {
+      screen.getByRole('button', { name: 'reload' }).click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('email').textContent).toBe(BOB.email);
+    });
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+    expect(client.getAccessToken()).toBe('a1');
   });
 
   it('keeps its methods stable across state changes', async () => {
