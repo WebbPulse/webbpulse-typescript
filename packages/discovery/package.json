@@ -1,13 +1,13 @@
 {
-  "name": "@webbpulse/config",
+  "name": "@webbpulse/discovery",
   "version": "0.9.0",
-  "description": "Validated runtime configuration for WebbPulse Vite applications.",
+  "description": "Uncredentialed capability discovery for the WebbPulse identity service: what a deployment does with passkeys, and which OAuth providers it has configured.",
   "license": "UNLICENSED",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/WebbPulse/webbpulse-typescript.git",
-    "directory": "packages/config"
+    "directory": "packages/discovery"
   },
   "publishConfig": {
     "access": "restricted"
@@ -33,6 +33,9 @@
   "scripts": {
     "build": "tsup",
     "type-check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@webbpulse/auth": "0.9.0"
   },
   "devDependencies": {
     "@webbpulse/tsconfig": "0.9.0"

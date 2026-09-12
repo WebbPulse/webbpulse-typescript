@@ -9,10 +9,16 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
 import type { AuthClient, AuthState } from './auth-client.js';
+import {
+  readOAuthCallback,
+  stripOAuthParams,
+  type OAuthCallbackResult,
+} from './oauth.js';
 import type { SessionManager, SessionState } from './session.js';
 
 const SessionManagerContext = createContext<SessionManager<
@@ -251,4 +257,36 @@ export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
     }),
     [state, bound]
   );
+}
+
+/** What {@link useOAuthCallback} is told, once, when the page was a callback landing. */
+export type OAuthCallbackHandler = (
+  result: OAuthCallbackResult
+) => void | Promise<void>;
+
+/**
+ * Runs `onCallback` when the page was reached from an OAuth callback, then
+ * strips the single-use parameters with `history.replaceState` so a reload or a
+ * shared link cannot replay a live MFA ticket. A ref guards the read, since
+ * StrictMode mounts effects twice, and holds the latest handler so a caller need
+ * not memoise it. A no-op on every ordinary visit.
+ */
+export function useOAuthCallback(onCallback: OAuthCallbackHandler): void {
+  const handled = useRef(false);
+  const handler = useRef(onCallback);
+  handler.current = onCallback;
+
+  useEffect(() => {
+    if (handled.current) {
+      return;
+    }
+    handled.current = true;
+    const href = globalThis.location.href;
+    const result = readOAuthCallback(href);
+    if (result === null) {
+      return;
+    }
+    globalThis.history.replaceState(null, '', stripOAuthParams(href));
+    void handler.current(result);
+  }, []);
 }
