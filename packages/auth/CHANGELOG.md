@@ -1,5 +1,23 @@
 # @webbpulse/auth
 
+## 0.10.3
+
+### Patch Changes
+
+- Honour `Retry-After` in the `@webbpulse/api-client` retry loop. A retryable
+  failure carrying the header now waits exactly that long before the next
+  attempt instead of the jittered backoff, which put all three attempts inside
+  about 500 ms and turned one rate limited request into a burst against the
+  limiter. A `Retry-After` longer than the new `retryAfterMaxMs` option
+  (default 5000) is not waited out at all: the `ApiError` is thrown on the first
+  attempt so the caller can surface the wait rather than stall. Failures with no
+  `Retry-After` keep the jittered backoff unchanged.
+
+  Every other package takes the lockstep version bump with no change.
+
+- Updated dependencies
+  - @webbpulse/api-client@0.10.3
+
 ## 0.10.2
 
 ### Patch Changes

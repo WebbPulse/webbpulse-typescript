@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/discovery",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Uncredentialed capability discovery for the WebbPulse identity service: what a deployment does with passkeys, and which OAuth providers it has configured.",
   "license": "UNLICENSED",
   "type": "module",
@@ -35,9 +35,9 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@webbpulse/auth": "0.10.2"
+    "@webbpulse/auth": "0.10.3"
   },
   "devDependencies": {
-    "@webbpulse/tsconfig": "0.10.2"
+    "@webbpulse/tsconfig": "0.10.3"
   }
 }
