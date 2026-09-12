@@ -1,0 +1,10 @@
+{
+  "extends": "@webbpulse/tsconfig/library.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -24,6 +24,7 @@ jobs:
           - eslint-config
           - api-client
           - config
+          - qrcode
     uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
     permissions:
       id-token: write
@@ -53,6 +54,7 @@ jobs:
       matrix:
         package:
           - auth
+          - discovery
     uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
     permissions:
       id-token: write

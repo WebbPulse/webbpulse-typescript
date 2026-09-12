@@ -11,6 +11,9 @@ const WORKSPACE_SOURCE_ALIAS = {
   '@webbpulse/api-client': fileURLToPath(
     new URL('./packages/api-client/src/index.ts', import.meta.url)
   ),
+  '@webbpulse/auth': fileURLToPath(
+    new URL('./packages/auth/src/index.ts', import.meta.url)
+  ),
 };
 
 export default defineConfig({

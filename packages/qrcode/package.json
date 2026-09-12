@@ -1,13 +1,13 @@
 {
-  "name": "@webbpulse/config",
+  "name": "@webbpulse/qrcode",
   "version": "0.9.0",
-  "description": "Validated runtime configuration for WebbPulse Vite applications.",
+  "description": "A dependency free QR encoder for the short URIs WebbPulse applications render inline.",
   "license": "UNLICENSED",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/WebbPulse/webbpulse-typescript.git",
-    "directory": "packages/config"
+    "directory": "packages/qrcode"
   },
   "publishConfig": {
     "access": "restricted"
