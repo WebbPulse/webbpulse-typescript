@@ -136,6 +136,11 @@ export {
   isAuthErrorCode,
   type AuthErrorCode,
 } from './errors.js';
+/**
+ * The pre-`AuthClient` session surface, kept for the applications still on it.
+ *
+ * @deprecated Use `AuthClient` instead. Removed in the next major.
+ */
 export {
   SessionManager,
   type LoginResult,
