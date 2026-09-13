@@ -2,6 +2,10 @@
 
 One line per released version. Packages version in lockstep, so a version that changed nothing here says so. Full detail is in the git history.
 
+## 0.10.7
+
+- `AuthClient.waitForToken` awaits the first refresh of the page load, and the api-client awaits it before a request, so a domain call made during boot carries the restored session instead of going out anonymous.
+
 ## 0.10.6
 
 - `loadUser` now receives a client that sends the session access token, so a `loadUser` hook pointed at a route behind the gateway JWT authorizer resolves instead of taking a 401.

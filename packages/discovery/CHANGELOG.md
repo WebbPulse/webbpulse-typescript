@@ -2,6 +2,10 @@
 
 One line per released version. Packages version in lockstep, so a version that changed nothing here says so. Full detail is in the git history.
 
+## 0.10.7
+
+- No change in this package; the version moved in lockstep.
+
 ## 0.10.6
 
 - Lockstep version bump. No change to this package.

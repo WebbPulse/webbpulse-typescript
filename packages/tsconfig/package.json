@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/tsconfig",
-  "version": "0.10.6",
+  "version": "0.10.7",
   "description": "Shared TypeScript compiler configurations for WebbPulse applications and packages.",
   "license": "UNLICENSED",
   "repository": {

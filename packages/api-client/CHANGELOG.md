@@ -2,6 +2,10 @@
 
 One line per released version. Packages version in lockstep, so a version that changed nothing here says so. Full detail is in the git history.
 
+## 0.10.7
+
+- `AuthTokenProvider.waitForToken` is an optional method; when present the client awaits it for the token before each attempt, so requests made during boot wait for the first refresh.
+
 ## 0.10.6
 
 - Lockstep version bump. No change to this package.
