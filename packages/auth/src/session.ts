@@ -4,11 +4,17 @@ import { ApiError, type ApiClient } from '@webbpulse/api-client';
  * Session state. `status` is one field rather than separate booleans, so an
  * impossible pair cannot be expressed and `'unknown'` prevents a flash of
  * signed out UI before the first check resolves.
+ *
+ * @deprecated Use `AuthState['status']` instead. Removed in the next major.
  */
 export type SessionStatus =
   'unknown' | 'loading' | 'authenticated' | 'anonymous';
 
-/** Immutable snapshot of the session. */
+/**
+ * Immutable snapshot of the session.
+ *
+ * @deprecated Use `AuthState` instead. Removed in the next major.
+ */
 export interface SessionState<TUser> {
   status: SessionStatus;
   user: TUser | null;
@@ -33,10 +39,16 @@ export interface SessionState<TUser> {
  * How a session is carried. Cookie only: a bearer token in `localStorage` is
  * readable by any script on the page, so `AuthClient` holds one in memory
  * instead. Kept as a one-member union so a removed mode names itself.
+ *
+ * @deprecated Removed in the next major with {@link SessionManager}.
  */
 export type SessionMode = 'cookie';
 
-/** Construction options for a {@link SessionManager}. */
+/**
+ * Construction options for a {@link SessionManager}.
+ *
+ * @deprecated Use `AuthClientOptions` instead. Removed in the next major.
+ */
 export interface SessionManagerOptions<TUser, TCredentials> {
   /** Client used for every session call. */
   client: ApiClient;
@@ -67,11 +79,32 @@ export interface SessionManagerOptions<TUser, TCredentials> {
   extractUser?: (response: unknown) => TUser | null;
 }
 
-/** Result of a login attempt. */
+/**
+ * Result of a login attempt.
+ *
+ * @deprecated Use `AuthClient`'s sign-in outcomes instead. Removed in the next
+ * major.
+ */
 export interface LoginResult<TUser> {
   user: TUser | null;
   /** The raw login response, for flows this package does not model, such as 2FA. */
   raw: unknown;
+}
+
+let warned = false;
+
+/**
+ * Warns once per page that this class is going away. Once rather than per
+ * instance, so a page constructing several does not flood the console.
+ */
+function warnDeprecated(): void {
+  if (warned) {
+    return;
+  }
+  warned = true;
+  globalThis.console?.warn(
+    '[@webbpulse/auth] SessionManager is deprecated and will be removed in the next major. Use AuthClient instead.'
+  );
 }
 
 function defaultExtractUser<TUser>(response: unknown): TUser | null {
@@ -86,6 +119,10 @@ function defaultExtractUser<TUser>(response: unknown): TUser | null {
  * Framework free session manager. Holds the state, exposes the flows as async
  * methods, and notifies subscribers on every change; the React entry point is a
  * thin binding over it.
+ *
+ * @deprecated Use `AuthClient`, which models the same session plus passkeys,
+ * OAuth, TOTP and the email flows, and reports refusals as outcomes rather than
+ * throwing. Removed in the next major.
  */
 export class SessionManager<TUser = unknown, TCredentials = unknown> {
   private readonly options: SessionManagerOptions<TUser, TCredentials>;
@@ -102,6 +139,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
 
   constructor(options: SessionManagerOptions<TUser, TCredentials>) {
     this.options = options;
+    warnDeprecated();
   }
 
   /** Current snapshot. */
