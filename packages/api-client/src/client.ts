@@ -29,6 +29,14 @@ export interface AuthTokenProvider {
    * concurrent callers, or the server reads the burst as token reuse.
    */
   refresh(): Promise<string | null>;
+  /**
+   * Resolves the token to send once the first refresh of the page load has
+   * settled, so a request made during boot carries the restored session instead
+   * of going out anonymous. Resolves to null as soon as that refresh finds no
+   * session, and never starts one of its own. Optional: a provider without it
+   * falls back to the synchronous read.
+   */
+  waitForToken?(): Promise<string | null>;
 }
 
 /** Per request options. */
@@ -395,10 +403,13 @@ export class ApiClient {
     if (attempt > 0) {
       headers.set('x-retry-attempt', String(attempt));
     }
+    const auth = this.options.auth;
     const token =
-      this.options.auth === undefined
+      auth === undefined
         ? this.options.getAuthToken?.()
-        : this.options.auth.getAccessToken();
+        : auth.waitForToken === undefined
+          ? auth.getAccessToken()
+          : await auth.waitForToken();
     if (typeof token === 'string' && token !== '') {
       headers.set('authorization', `Bearer ${token}`);
     } else if (token !== null && token !== undefined) {

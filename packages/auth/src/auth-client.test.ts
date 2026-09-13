@@ -1,4 +1,4 @@
-import { ApiError } from '@webbpulse/api-client';
+import { ApiError, createApiClient } from '@webbpulse/api-client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { AuthClient, createAuthClient, type AuthState } from './auth-client.js';
@@ -1180,5 +1180,161 @@ describe('AuthClient subscriptions', () => {
     await auth.initialize();
 
     expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A fetch stub whose refresh route is held open by a deferred, so a domain
+ * request can be issued while the startup refresh is still in flight. That
+ * window is the race: the token field is null throughout it.
+ */
+function bootRace(options: { refreshCalls?: () => Response | Error } = {}): {
+  fetchMock: ReturnType<typeof vi.fn>;
+  releaseRefresh: (response: Response | Error) => void;
+  refreshCallCount: () => number;
+} {
+  const gate = deferred<Response | Error>();
+  let refreshCalls = 0;
+  const fetchMock = vi.fn((url: string | URL, init: RequestInit = {}) => {
+    const href = String(url);
+    if (href.includes('/api/auth/refresh')) {
+      refreshCalls += 1;
+      const immediate = options.refreshCalls?.();
+      if (immediate !== undefined) {
+        return immediate instanceof Error
+          ? Promise.reject(immediate)
+          : Promise.resolve(immediate);
+      }
+      return gate.promise.then((result) =>
+        result instanceof Error ? Promise.reject(result) : result
+      );
+    }
+    void init;
+    return Promise.resolve(jsonResponse({ ok: true }));
+  });
+  return {
+    fetchMock,
+    releaseRefresh: (response) => {
+      gate.resolve(response);
+    },
+    refreshCallCount: () => refreshCalls,
+  };
+}
+
+/** A domain client sharing one auth client, the way a consumer wires it. */
+function domainClientFor(
+  auth: AuthClient<User>,
+  fetchMock: ReturnType<typeof vi.fn>
+): ReturnType<typeof createApiClient> {
+  return createApiClient({
+    baseUrl: 'https://api.example.test',
+    fetch: fetchMock,
+    retries: 0,
+    auth,
+  });
+}
+
+describe('AuthClient boot race', () => {
+  it('makes a domain request during boot wait and carry the token', async () => {
+    const { fetchMock, releaseRefresh } = bootRace();
+    const auth = authWith(fetchMock);
+    const domain = domainClientFor(auth, fetchMock);
+
+    const booting = auth.initialize();
+    const domainCall = domain.get('/api/cars');
+    await Promise.resolve();
+
+    expect(callsTo(fetchMock, '/api/cars')).toHaveLength(0);
+
+    releaseRefresh(jsonResponse({ access_token: 'a1', expires_in: 600 }));
+    await booting;
+    await domainCall;
+
+    expect(bearerFor(fetchMock, '/api/cars')).toBe('Bearer a1');
+    expect(callsTo(fetchMock, '/api/cars')).toHaveLength(1);
+  });
+
+  it('resolves to anonymous without waiting when no refresh is running', async () => {
+    const { fetchMock, refreshCallCount } = bootRace();
+    const auth = authWith(fetchMock);
+    const domain = domainClientFor(auth, fetchMock);
+
+    await domain.get('/api/public/posts');
+
+    expect(bearerFor(fetchMock, '/api/public/posts')).toBeNull();
+    expect(refreshCallCount()).toBe(0);
+  });
+
+  it('resolves to anonymous once a cookieless boot refresh settles', async () => {
+    const { fetchMock, releaseRefresh, refreshCallCount } = bootRace();
+    const auth = authWith(fetchMock);
+    const domain = domainClientFor(auth, fetchMock);
+
+    const booting = auth.initialize();
+    const domainCall = domain.get('/api/cars', { skipAuthRetry: true });
+    await Promise.resolve();
+
+    releaseRefresh(envelope(401, 'unauthorized'));
+    await booting;
+    await domainCall;
+
+    expect(bearerFor(fetchMock, '/api/cars')).toBeNull();
+    expect(auth.getState().status).toBe('anonymous');
+    expect(refreshCallCount()).toBe(1);
+  });
+
+  it('shares one refresh across concurrent boot requests', async () => {
+    const { fetchMock, releaseRefresh, refreshCallCount } = bootRace();
+    const auth = authWith(fetchMock);
+    const domain = domainClientFor(auth, fetchMock);
+
+    const booting = auth.initialize();
+    const calls = [
+      domain.get('/api/cars'),
+      domain.get('/api/parts'),
+      domain.get('/api/builds'),
+    ];
+    await Promise.resolve();
+
+    releaseRefresh(jsonResponse({ access_token: 'a1', expires_in: 600 }));
+    await booting;
+    await Promise.all(calls);
+
+    expect(refreshCallCount()).toBe(1);
+    expect(bearerFor(fetchMock, '/api/cars')).toBe('Bearer a1');
+    expect(bearerFor(fetchMock, '/api/parts')).toBe('Bearer a1');
+    expect(bearerFor(fetchMock, '/api/builds')).toBe('Bearer a1');
+  });
+
+  it('does not hang a caller when the boot refresh fails outright', async () => {
+    const { fetchMock, releaseRefresh } = bootRace();
+    const auth = authWith(fetchMock);
+    const domain = domainClientFor(auth, fetchMock);
+
+    const booting = auth.initialize();
+    const domainCall = domain.get('/api/cars', { skipAuthRetry: true });
+    await Promise.resolve();
+
+    releaseRefresh(new Error('the network dropped'));
+    await booting;
+    await expect(domainCall).resolves.toMatchObject({ status: 200 });
+
+    expect(bearerFor(fetchMock, '/api/cars')).toBeNull();
+  });
+
+  it('waits on a mid session refresh the same way', async () => {
+    const { fetchMock, releaseRefresh } = bootRace();
+    const auth = authWith(fetchMock);
+    const domain = domainClientFor(auth, fetchMock);
+
+    const refreshing = auth.refresh();
+    const domainCall = domain.get('/api/cars');
+    await Promise.resolve();
+
+    releaseRefresh(jsonResponse({ access_token: 'a2', expires_in: 600 }));
+    await refreshing;
+    await domainCall;
+
+    expect(bearerFor(fetchMock, '/api/cars')).toBe('Bearer a2');
   });
 });
