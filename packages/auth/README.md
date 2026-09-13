@@ -21,6 +21,12 @@ const auth = createAuthClient<UserRead>({
 const client = createApiClient({ baseUrl: config.apiBaseUrl, auth });
 ```
 
+The client `loadUser` receives is the one the auth client built from `baseUrl`,
+and it sends the current access token, so `/users/me` and any other route behind
+the API gateway authorizer resolves. Passing your own `client` option instead
+opts out of that: the auth client uses it exactly as supplied, so give it a
+`getAuthToken` of your own if `loadUser` reaches an authenticated route.
+
 ```tsx
 import { AuthProvider, useAuth } from '@webbpulse/auth/react';
 

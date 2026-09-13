@@ -75,6 +75,28 @@ function authWith(
   });
 }
 
+/** The fetch mock's calls whose URL contains `pathSuffix`. */
+function callsTo(
+  fetchMock: ReturnType<typeof vi.fn>,
+  pathSuffix: string
+): [string | URL, RequestInit][] {
+  return (fetchMock.mock.calls as [string | URL, RequestInit][]).filter(
+    ([url]) => String(url).includes(pathSuffix)
+  );
+}
+
+/** The Authorization header the first request to `pathSuffix` carried. */
+function bearerFor(
+  fetchMock: ReturnType<typeof vi.fn>,
+  pathSuffix: string
+): string | null {
+  const call = callsTo(fetchMock, pathSuffix)[0];
+  if (call === undefined) {
+    throw new Error(`No request was made to ${pathSuffix}.`);
+  }
+  return new Headers(call[1].headers).get('authorization');
+}
+
 /** A deferred, for holding a stubbed response open across assertions. */
 function deferred<T>(): {
   promise: Promise<T>;
@@ -395,6 +417,50 @@ describe('AuthClient.login', () => {
       expiresIn: 600,
     });
     expect(auth.getAccessToken()).toBe('a1');
+  });
+
+  it('gives loadUser a client that sends the session token', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/users/me': () => jsonResponse(ALICE),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: (client) =>
+        client.get<User>('/api/users/me').then((r) => r.data),
+    });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+
+    expect(bearerFor(fetchMock, '/api/users/me')).toBe('Bearer a1');
+  });
+
+  it('gives loadUser the token the latest refresh minted', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/refresh': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 }),
+      '/api/users/me': () => jsonResponse(ALICE),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: (client) =>
+        client.get<User>('/api/users/me').then((r) => r.data),
+    });
+
+    await auth.initialize();
+
+    expect(bearerFor(fetchMock, '/api/users/me')).toBe('Bearer a2');
+  });
+
+  it('does not replay its own refresh through a refresh on 401', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/refresh': () => envelope(401, 'token_expired'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.initialize();
+
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+    expect(auth.getState().status).toBe('anonymous');
   });
 
   it('uses a user embedded in the response without a second call', async () => {
