@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/qrcode",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "A dependency free QR encoder for the short URIs WebbPulse applications render inline.",
   "license": "UNLICENSED",
   "type": "module",
@@ -35,6 +35,6 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@webbpulse/tsconfig": "0.10.3"
+    "@webbpulse/tsconfig": "0.10.4"
   }
 }

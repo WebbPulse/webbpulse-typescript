@@ -51,13 +51,16 @@ function clientWith(
 
 /** Renders the auth state as text, so assertions read off the DOM. */
 function AuthProbe(): React.ReactNode {
-  const { status, user, isAuthenticated, isLoading } = useAuth<User>();
+  const { status, user, isAuthenticated, isLoading, isBusy, pendingMfa } =
+    useAuth<User>();
   return (
     <div>
       <span data-testid="status">{status}</span>
       <span data-testid="user">{user?.email ?? 'none'}</span>
       <span data-testid="authenticated">{String(isAuthenticated)}</span>
       <span data-testid="loading">{String(isLoading)}</span>
+      <span data-testid="busy">{String(isBusy)}</span>
+      <span data-testid="pending-mfa">{pendingMfa?.ticket ?? 'none'}</span>
     </div>
   );
 }
@@ -294,5 +297,183 @@ describe('useAuth', () => {
     });
 
     expect(new Set(seen).size).toBe(1);
+  });
+});
+
+describe('useAuth isLoading and isBusy', () => {
+  /**
+   * A client whose next response is handed over by the test, so a call can be
+   * observed while it is still in flight.
+   */
+  function deferrableClient(): {
+    client: AuthClient<User>;
+    resolveNext: (response: Response) => void;
+  } {
+    let release: ((response: Response) => void) | null = null;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        })
+    );
+    const client = createAuthClient<User>({
+      baseUrl: 'https://api.example.test',
+      disableProactiveRefresh: true,
+      loadUser: () => Promise.resolve(ALICE),
+      clientOptions: { fetch: fetchMock, retries: 0 },
+    });
+    return {
+      client,
+      resolveNext: (response) => {
+        if (release === null) {
+          throw new Error('No request is waiting for a response.');
+        }
+        release(response);
+        release = null;
+      },
+    };
+  }
+
+  it('is loading before the session has ever settled', () => {
+    const { client } = clientWith(() =>
+      jsonResponse({ access_token: 'a1', expires_in: 600 })
+    );
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <AuthProbe />
+      </AuthProvider>
+    );
+
+    expect(screen.getByTestId('loading').textContent).toBe('true');
+    expect(screen.getByTestId('authenticated').textContent).toBe('false');
+  });
+
+  it('is loading before the mount refresh has been started', () => {
+    const { client } = clientWith(() =>
+      jsonResponse({ access_token: 'a1', expires_in: 600 })
+    );
+
+    render(
+      <AuthProvider
+        client={client as unknown as AnyAuthClient}
+        initializeOnMount={false}
+      >
+        <AuthProbe />
+      </AuthProvider>
+    );
+
+    expect(screen.getByTestId('status').textContent).toBe('unknown');
+    expect(screen.getByTestId('loading').textContent).toBe('true');
+    expect(screen.getByTestId('busy').textContent).toBe('false');
+  });
+
+  it('keeps a login that answers mfa_required mounted, with the challenge', async () => {
+    const { client, resolveNext } = deferrableClient();
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <AuthProbe />
+      </AuthProvider>
+    );
+
+    await act(async () => {
+      resolveNext(
+        jsonResponse(
+          {
+            success: false,
+            status: 401,
+            message: 'No session.',
+            request_id: 'r',
+          },
+          401
+        )
+      );
+      await client.initialize();
+    });
+    expect(screen.getByTestId('status').textContent).toBe('anonymous');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+
+    let login: Promise<unknown>;
+    act(() => {
+      login = client.login({ email: 'a@b.test', password: 'pw' });
+    });
+
+    expect(screen.getByTestId('status').textContent).toBe('loading');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+
+    await act(async () => {
+      resolveNext(
+        jsonResponse({
+          mfa_required: true,
+          mfa_ticket: 'tkt_1',
+          factors: ['totp'],
+        })
+      );
+      await login;
+    });
+
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('false');
+    expect(screen.getByTestId('pending-mfa').textContent).toBe('tkt_1');
+  });
+
+  it('reports authenticated after the login succeeds', async () => {
+    const { client } = clientWith((call) =>
+      call === 0
+        ? jsonResponse(
+            {
+              success: false,
+              status: 401,
+              message: 'No session.',
+              request_id: 'r',
+            },
+            401
+          )
+        : jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE })
+    );
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <AuthProbe />
+      </AuthProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('status').textContent).toBe('anonymous');
+    });
+
+    await act(async () => {
+      await client.login({ email: 'a@b.test', password: 'pw' });
+    });
+
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('false');
+  });
+
+  it('stays settled through a logout', async () => {
+    const { client } = clientWith((call) =>
+      call === 0
+        ? jsonResponse({ access_token: 'a1', expires_in: 600 })
+        : new Response(null, { status: 204 })
+    );
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <AuthProbe />
+      </AuthProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('status').textContent).toBe('authenticated');
+    });
+
+    await act(async () => {
+      await client.logout();
+    });
+
+    expect(screen.getByTestId('status').textContent).toBe('anonymous');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('false');
   });
 });

@@ -92,6 +92,14 @@ export interface AuthState<TUser> {
   sessionEnded: AuthSessionEndedError | null;
   /** Pending MFA challenge, when a login returned one. */
   pendingMfa: MfaChallenge | null;
+  /**
+   * Whether the session has ever been known. False only from construction until
+   * the first settled answer, `'authenticated'` or `'anonymous'`, from
+   * `initialize` or from any session call. It never returns to false, so a later
+   * `'loading'` is in-flight work rather than an unknown session, and a route
+   * guard can gate on this instead of on `status`.
+   */
+  settled: boolean;
 }
 
 /** What the server returns when a login needs a second factor. */
@@ -435,6 +443,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     error: null,
     sessionEnded: null,
     pendingMfa: null,
+    settled: false,
   };
 
   constructor(options: AuthClientOptions<TUser>) {
@@ -478,8 +487,21 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     };
   }
 
+  /**
+   * Applies a patch and latches `settled` the first time the status reaches a
+   * settled answer. Latching here rather than at each call site means every path
+   * that can answer the session question, including the error paths, sets it
+   * exactly once and no path can forget.
+   */
   private setState(patch: Partial<AuthState<TUser>>): void {
-    this.state = { ...this.state, ...patch };
+    const next = { ...this.state, ...patch };
+    if (
+      !next.settled &&
+      (next.status === 'authenticated' || next.status === 'anonymous')
+    ) {
+      next.settled = true;
+    }
+    this.state = next;
     for (const listener of [...this.listeners]) {
       listener(this.state);
     }
