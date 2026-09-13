@@ -74,6 +74,8 @@ export interface PanelOutcome {
   /**
    * Whether the refusal means the row is already gone, which reloads the
    * collection so the panel stops showing something the server does not have.
+   * The reload keeps the refusal's message on screen, so the row vanishing is
+   * explained rather than silent.
    */
   stale?: boolean;
 }
@@ -158,7 +160,13 @@ export function useListPanel<T, TDraft>(
     };
   }, []);
 
-  const reload = useCallback(async (): Promise<void> => {
+  /**
+   * Re-reads the collection. `keepError` leaves an error already on screen
+   * alone, for the reload a stale refusal triggers: that reload is caused by
+   * the refusal, so clearing the message would drop the only explanation the
+   * user gets for the row disappearing.
+   */
+  const read = useCallback(async (keepError: boolean): Promise<void> => {
     setBusy(true);
     try {
       const { items: rows, outcome } = await latest.current.list();
@@ -167,7 +175,9 @@ export function useListPanel<T, TDraft>(
       }
       if (outcome.ok) {
         setItems(rows ?? []);
-        setError(null);
+        if (!keepError) {
+          setError(null);
+        }
         setUnavailable(false);
       } else {
         setError(outcome.message);
@@ -183,6 +193,8 @@ export function useListPanel<T, TDraft>(
       }
     }
   }, []);
+
+  const reload = useCallback(() => read(false), [read]);
 
   const run = useCallback(
     async (
@@ -209,7 +221,7 @@ export function useListPanel<T, TDraft>(
       if (outcome.ok) {
         setDirty(true);
         setNotice(outcome.message ?? success ?? null);
-        await reload();
+        await read(false);
         return;
       }
       if (outcome.message !== null) {
@@ -219,10 +231,10 @@ export function useListPanel<T, TDraft>(
         setUnavailable(true);
       }
       if (outcome.stale === true) {
-        await reload();
+        await read(true);
       }
     },
-    [reload]
+    [read]
   );
 
   const create = useCallback(
