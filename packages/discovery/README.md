@@ -79,6 +79,23 @@ falls back to `providerLabel` when the server sent no name.
 label table and the provider constants cannot drift apart. That is the whole
 reason this package depends on `@webbpulse/auth`.
 
+## React
+
+`@webbpulse/discovery/react` is a separate entry point, so a caller that only
+needs the functions never pulls React into its bundle. It holds
+`useOAuthProviders`, the provider list every sign-in page was keeping its own
+copy of.
+
+```tsx
+import { useOAuthProviders } from '@webbpulse/discovery/react';
+
+const providers = useOAuthProviders({ identityOrigin });
+return providers.map((p) => <ProviderButton key={p.id} provider={p} />);
+```
+
+The list starts empty and fills in after one round trip shared with every other
+caller on the page, so a button is never drawn for a provider that cannot work.
+
 ## Exports
 
 Availability and URLs: `Availability`, `cachedAvailability`,
@@ -93,3 +110,6 @@ one read.
 
 OAuth: `OAUTH_PROVIDERS_PATH`, `OAuthProviderInfo`, `providerLabel`,
 `parseProviders`, `oauthProviders`.
+
+`@webbpulse/discovery/react`: `useOAuthProviders`, with
+`OAuthProvidersOptions`.

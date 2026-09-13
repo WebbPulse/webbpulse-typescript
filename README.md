@@ -10,7 +10,7 @@ problem rather than two.
 | Package                                              | What it is                                                   |
 | ---------------------------------------------------- | ------------------------------------------------------------ |
 | [`@webbpulse/api-client`](packages/api-client)       | Typed fetch client. Framework free.                          |
-| [`@webbpulse/auth`](packages/auth)                   | Identity client, with React bindings in a separate entry.    |
+| [`@webbpulse/auth`](packages/auth)                   | Identity client, with React and panel hooks in own entries.  |
 | [`@webbpulse/config`](packages/config)               | Validated accessors over `import.meta.env`.                  |
 | [`@webbpulse/discovery`](packages/discovery)         | What a deployment of the identity service can do.            |
 | [`@webbpulse/qrcode`](packages/qrcode)               | Dependency free byte mode QR encoder.                        |
@@ -38,7 +38,14 @@ the applications import them rather than keeping local copies:
 - **The React session binding** is `@webbpulse/auth/react`. `AuthProvider` and
   `useAuth` own token lifetime, the silent refresh, StrictMode double-mount
   safety and the session-ended fan-out, so an application does not hand-roll a
-  provider. `useOAuthCallback` handles the callback landing page.
+  provider. `useOAuthCallback` handles the callback landing page,
+  `usePasskeySignInSupport` decides whether to draw a passkey button, and
+  `useEmailVerificationLink` spends a mailed token exactly once.
+- **The identity settings panels** are `@webbpulse/auth/panels`: the load,
+  mutate, report and reload loop behind the passkey, connected accounts and TOTP
+  pages, headless, so each application keeps its own markup and copy.
+- **The OAuth provider list** is `useOAuthProviders` in
+  `@webbpulse/discovery/react`.
 
 Deliberately not shared: theme, tokens and the UI kits; the toast host; each
 application's domain API surface; and the route guards, while the two

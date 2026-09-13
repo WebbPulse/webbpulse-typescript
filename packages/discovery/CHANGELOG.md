@@ -2,6 +2,10 @@
 
 One line per released version. Packages version in lockstep, so a version that changed nothing here says so. Full detail is in the git history.
 
+## 0.11.0
+
+- New `./react` entry point with `useOAuthProviders`, the provider list read every sign-in page was holding its own copy of.
+
 ## 0.10.7
 
 - Lockstep version bump. No change to this package.

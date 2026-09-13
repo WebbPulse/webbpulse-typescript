@@ -2,6 +2,10 @@
 
 One line per released version. Packages version in lockstep, so a version that changed nothing here says so. Full detail is in the git history.
 
+## 0.11.0
+
+- New `./panels` entry point: `usePasskeyPanel`, `useConnectedAccountsPanel`, `useTotpPanel` and the `useListPanel` core, headless state machines for the identity settings panels. `./react` gains `usePasskeySignInSupport` and `useEmailVerificationLink`. `SessionManager` and its React bindings are deprecated and will be removed in the next major.
+
 ## 0.10.7
 
 - `AuthClient.waitForToken` awaits the first refresh of the page load, and the api-client awaits it before a request, so a domain call made during boot carries the restored session instead of going out anonymous.

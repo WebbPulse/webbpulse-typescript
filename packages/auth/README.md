@@ -405,21 +405,70 @@ The refresh cannot recurse: `/api/auth/refresh` is called with retries disabled,
 and the 401 retry in `@webbpulse/api-client` calls `requestOnce` at most twice,
 with `skipAuthRetry` on the replay.
 
+## Settings panels
+
+`@webbpulse/auth/panels` holds the state machines the identity settings pages
+run, with no rendering: a product keeps its own markup, copy and layout and
+destructures the state and the handlers.
+
+```tsx
+import { usePasskeyPanel } from '@webbpulse/auth/panels';
+
+const panel = usePasskeyPanel({
+  client: auth,
+  messages: { removed: 'Passkey removed.' },
+});
+
+if (panel.unavailable) return null;
+return panel.items?.map((key) => (
+  <Row
+    key={key.credentialId}
+    passkey={key}
+    onDelete={() => void panel.remove(key.credentialId)}
+  />
+));
+```
+
+Each hook loads on mount, sets `busy` for the duration of a call, records the
+server's own sentence in `error` and reloads the collection after a success.
+Success copy is the product's, passed as `messages`; refusal copy is always the
+server's and is rendered verbatim.
+
+`useConnectedAccountsPanel` takes the deployment's provider list, offers
+`connectable` for the ones not yet attached, and leaves `busy` true through a
+successful `link`, which navigates to the provider. `useTotpPanel` has no load
+leg, because no route reports whether a factor is on: pass `factor` when the
+user record says.
+
+`useListPanel` is the core the three are built from, exported so a product can
+apply the same shape to a collection this package does not model.
+
+## Sign-in helpers
+
+`usePasskeySignInSupport` answers whether to draw a passkey button and whether
+to arm conditional mediation, asking the browser only after the deployment says
+passwordless is on. Pass `@webbpulse/discovery`'s `passkeyLoginAvailability` as
+the probe.
+
+`useEmailVerificationLink` spends a mailed verification token exactly once on
+mount and reports `confirming`, `confirmed`, `missing-token`, `refused` or
+`failed`, leaving every sentence to the caller. A ref guards the single-use
+token against the double mount StrictMode performs in development.
+
 ## `SessionManager`
 
-Not the identity standard's mechanism. It survives for the plain session cookie
-Portfolio's admin panel uses today, and it is cookie only: `mode: 'token'`,
-`tokenStorageKey`, `tokenStorage`, `extractToken`, `getToken`, `setToken`,
-`TokenStore`, `MemoryTokenStorage`, `defaultTokenStorage` and `TokenStorage` are
-gone. `isLoginComplete` replaces `extractToken` as the hook that says whether a
-login response finished the sign in or is waiting on a second factor. New code
-should use `AuthClient`.
+Deprecated, and removed in the next major. Not the identity standard's
+mechanism: it survives for the plain session cookie Portfolio's admin panel uses
+today, and it is cookie only. Constructing one warns. New code should use
+`AuthClient`, which models the same session plus passkeys, OAuth, TOTP and the
+email flows, and reports refusals as outcomes rather than throwing.
 
 ## Exports
 
 `@webbpulse/auth`
 
-- Client: `AuthClient`, `createAuthClient`, `SessionManager`.
+- Client: `AuthClient`, `createAuthClient`, and the deprecated
+  `SessionManager`.
 - Errors: `AUTH_ERROR_CODES`, `AuthSessionEndedError`, `getAuthErrorCode`,
   `isAuthErrorCode`, `describeAuthError`.
 - Link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`, `LINK_TOKEN_PARAM`,
@@ -440,7 +489,18 @@ Types accompany each group, including `AuthClientOptions`, `AuthState`,
 `@webbpulse/auth/react`
 
 `AuthProvider`, `useAuth`, `useAuthClient`, `useAuthState`, `useSessionEnded`,
-`useOAuthCallback`, `SessionProvider`, `useSession`, `useSessionState`,
+`useOAuthCallback`, `usePasskeySignInSupport`, `useEmailVerificationLink`, and
+the deprecated `SessionProvider`, `useSession`, `useSessionState`,
 `useSessionManager`, with `AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`,
+`PasskeySignInSupport`, `PasskeySignInSupportOptions`,
+`EmailVerificationLinkState`, `EmailVerificationLinkOptions`,
 `SessionProviderProps`, `UseSessionResult`, `AnySessionManager` and
 `OAuthCallbackHandler`.
+
+`@webbpulse/auth/panels`
+
+`usePasskeyPanel`, `useConnectedAccountsPanel`, `useTotpPanel`, `useListPanel`,
+`PANEL_OK` and `PANEL_CANCELLED`, with `ListPanel`, `PanelState`,
+`PanelOutcome`, `PanelMessages`, `ListPanelConfig`, `PasskeyPanel`,
+`ConnectedAccountsPanel`, `ProviderOption`, `TotpPanel`, `TotpStep`,
+`TotpPrompt`, `FactorState` and the options and messages types for each.
