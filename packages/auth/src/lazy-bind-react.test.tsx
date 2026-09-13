@@ -28,6 +28,7 @@ function minimalStub(overrides: Record<string, unknown> = {}): {
     error: null,
     sessionEnded: null,
     pendingMfa: null,
+    settled: true,
   };
   const listeners = new Set<() => void>();
   const logout = vi.fn(() => {

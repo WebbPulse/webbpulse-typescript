@@ -14,6 +14,13 @@ export interface SessionState<TUser> {
   user: TUser | null;
   /** Last error from a session operation, cleared on the next success. */
   error: Error | null;
+  /**
+   * Whether the session has ever been known. False only from construction until
+   * the first settled answer, `'authenticated'` or `'anonymous'`. It never
+   * returns to false, so a later `'loading'` is in-flight work rather than an
+   * unknown session, and a route guard can gate on this instead of on `status`.
+   */
+  settled: boolean;
 }
 
 /**
@@ -81,6 +88,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
     status: 'unknown',
     user: null,
     error: null,
+    settled: false,
   };
   /** De-duplicates concurrent refreshes, so a burst of mounts makes one call. */
   private inFlight: Promise<TUser | null> | null = null;
@@ -102,10 +110,22 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
     };
   }
 
-  private setState(next: SessionState<TUser>): void {
+  /**
+   * Applies a patch and latches `settled` the first time the status reaches a
+   * settled answer. Latching here rather than at each call site means every path
+   * that can answer the session question sets it exactly once.
+   */
+  private setState(patch: Partial<SessionState<TUser>>): void {
+    const next = { ...this.state, ...patch };
+    if (
+      !next.settled &&
+      (next.status === 'authenticated' || next.status === 'anonymous')
+    ) {
+      next.settled = true;
+    }
     this.state = next;
     for (const listener of this.listeners) {
-      listener(next);
+      listener(this.state);
     }
   }
 
@@ -117,7 +137,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
     if (this.inFlight !== null) {
       return this.inFlight;
     }
-    this.setState({ ...this.state, status: 'loading', error: null });
+    this.setState({ status: 'loading', error: null });
 
     const run = async (): Promise<TUser | null> => {
       try {
@@ -156,7 +176,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
    * triggered the login can show them.
    */
   async login(credentials: TCredentials): Promise<LoginResult<TUser>> {
-    this.setState({ ...this.state, status: 'loading', error: null });
+    this.setState({ status: 'loading', error: null });
     try {
       const encode =
         this.options.encodeCredentials ?? ((value: TCredentials) => value);
@@ -192,7 +212,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
    * a network failure cannot strand the user in a session the UI believes in.
    */
   async logout(): Promise<void> {
-    this.setState({ ...this.state, status: 'loading', error: null });
+    this.setState({ status: 'loading', error: null });
     try {
       await this.options.client.post(this.options.logoutPath ?? '/auth/logout');
       // eslint-disable-next-line no-empty

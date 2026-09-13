@@ -102,6 +102,7 @@ describe('AuthClient construction', () => {
       error: null,
       sessionEnded: null,
       pendingMfa: null,
+      settled: false,
     });
   });
 
@@ -328,6 +329,7 @@ describe('AuthClient refresh failure', () => {
       error: null,
       sessionEnded: expect.any(AuthSessionEndedError),
       pendingMfa: null,
+      settled: true,
     });
     expect(seen.at(-1)?.status).toBe('anonymous');
 

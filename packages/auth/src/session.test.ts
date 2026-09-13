@@ -50,6 +50,7 @@ describe('SessionManager construction', () => {
       status: 'unknown',
       user: null,
       error: null,
+      settled: false,
     });
   });
 });
@@ -64,6 +65,7 @@ describe('SessionManager.refresh', () => {
       status: 'authenticated',
       user: ALICE,
       error: null,
+      settled: true,
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'https://api.example.test/users/me'
@@ -95,6 +97,7 @@ describe('SessionManager.refresh', () => {
       status: 'anonymous',
       user: null,
       error: null,
+      settled: true,
     });
   });
 
@@ -226,6 +229,7 @@ describe('SessionManager.logout', () => {
       status: 'anonymous',
       user: null,
       error: null,
+      settled: true,
     });
   });
 

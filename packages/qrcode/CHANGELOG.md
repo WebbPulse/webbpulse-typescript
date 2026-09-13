@@ -1,5 +1,32 @@
 # @webbpulse/qrcode
 
+## 0.10.4
+
+### Patch Changes
+
+- `isLoading` from `useAuth` and `useSession` now means the session is not yet
+  known, rather than "a session call is in flight". Both hooks set it from a new
+  latched `settled` flag on the state, true from the first transition to
+  `authenticated` or `anonymous` and never false again, whichever call produced
+  that first settled answer.
+
+  Every token call set `status: 'loading'` at its start, so `isLoading` went true
+  again on every login, TOTP completion, step-up and logout. Consumers read
+  `isLoading` as "the session is not known yet" and gate whole route trees on it,
+  so a login that answered with an MFA challenge unmounted the form mid-request
+  and the pending challenge was lost with it. That broke sign-in for every TOTP
+  user in production.
+
+  A new `isBusy`, `status === 'loading'`, carries the in-flight meaning, so a
+  button spinner or a disabled form has the flag it needs. `status` is unchanged
+  and still moves to `'loading'` for the duration of a call.
+
+  `AuthState` and `SessionState` each gain the `settled` boolean. A consumer that
+  asserts on the whole state object needs the new field; nothing else changes
+  shape.
+
+  Every other package takes the lockstep version bump with no change.
+
 ## 0.10.3
 
 ### Patch Changes

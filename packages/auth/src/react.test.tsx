@@ -51,13 +51,15 @@ function managerWith(
 
 /** Renders the session as text, so assertions read off the DOM. */
 function SessionProbe(): React.ReactNode {
-  const { status, user, isAuthenticated, isLoading } = useSession<User>();
+  const { status, user, isAuthenticated, isLoading, isBusy } =
+    useSession<User>();
   return (
     <div>
       <span data-testid="status">{status}</span>
       <span data-testid="user">{user?.username ?? 'none'}</span>
       <span data-testid="authenticated">{String(isAuthenticated)}</span>
       <span data-testid="loading">{String(isLoading)}</span>
+      <span data-testid="busy">{String(isBusy)}</span>
     </div>
   );
 }
@@ -279,5 +281,84 @@ describe('useSession actions', () => {
     });
 
     expect(screen.getByTestId('status').textContent).toBe('anonymous');
+  });
+});
+
+describe('useSession isLoading and isBusy', () => {
+  it('leaves isLoading false once the session has settled, even mid-call', async () => {
+    let release: ((response: Response) => void) | null = null;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        })
+    );
+    const manager = new SessionManager<User, { username: string }>({
+      client: createApiClient({
+        baseUrl: 'https://api.example.test',
+        fetch: fetchMock,
+        retries: 0,
+      }),
+      mode: 'cookie',
+    });
+
+    render(
+      <SessionProvider manager={manager as unknown as AnySessionManager}>
+        <SessionProbe />
+      </SessionProvider>
+    );
+
+    expect(screen.getByTestId('loading').textContent).toBe('true');
+
+    await act(async () => {
+      release?.(jsonResponse({ detail: 'nope' }, 401));
+      await manager.refresh();
+    });
+    expect(screen.getByTestId('status').textContent).toBe('anonymous');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+
+    let login: Promise<unknown>;
+    act(() => {
+      login = manager.login({ username: 'alice' });
+    });
+
+    expect(screen.getByTestId('status').textContent).toBe('loading');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+
+    await act(async () => {
+      release?.(jsonResponse({ user: ALICE }));
+      await login;
+    });
+
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('false');
+  });
+
+  it('stays settled through a logout', async () => {
+    const manager = managerWith([new Response(null, { status: 204 })]);
+
+    render(
+      <SessionProvider
+        manager={manager as unknown as AnySessionManager}
+        refreshOnMount={false}
+      >
+        <SessionProbe />
+      </SessionProvider>
+    );
+
+    act(() => {
+      manager.setUser(ALICE);
+    });
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+
+    await act(async () => {
+      await manager.logout();
+    });
+
+    expect(screen.getByTestId('status').textContent).toBe('anonymous');
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('busy').textContent).toBe('false');
   });
 });

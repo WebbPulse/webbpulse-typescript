@@ -98,8 +98,19 @@ export interface UseSessionResult<
   TCredentials,
 > extends SessionState<TUser> {
   isAuthenticated: boolean;
-  /** True until the first current user fetch settles. */
+  /**
+   * True only until the session has settled once. It answers "is the session
+   * still unknown", so a route guard can hold a tree back on it and will not
+   * unmount that tree again when a later call is in flight. Gate a button
+   * spinner on {@link UseSessionResult.isBusy} instead.
+   */
   isLoading: boolean;
+  /**
+   * True while a session call is in flight, whether or not the session has
+   * settled. The flag for a button spinner or a disabled form, never for
+   * mounting or unmounting a route.
+   */
+  isBusy: boolean;
   login: (credentials: TCredentials) => Promise<TUser | null>;
   logout: () => Promise<void>;
   refresh: () => Promise<TUser | null>;
@@ -128,7 +139,8 @@ export function useSession<
     () => ({
       ...state,
       isAuthenticated: state.status === 'authenticated',
-      isLoading: state.status === 'loading' || state.status === 'unknown',
+      isLoading: !state.settled,
+      isBusy: state.status === 'loading',
       login,
       logout,
       refresh,
@@ -257,8 +269,21 @@ export function useSessionEnded(): AuthSessionEndedError | null {
 /** What {@link useAuth} returns. */
 export interface UseAuthResult<TUser> extends AuthState<TUser> {
   isAuthenticated: boolean;
-  /** True until the first silent refresh settles, and during a session call. */
+  /**
+   * True only until the session has settled once, whether that first settled
+   * answer came from the silent refresh on mount or from a login. It answers
+   * "is the session still unknown", so a route guard can hold a tree back on it
+   * and will not unmount that tree again when a later call is in flight, which
+   * would throw away a login form mid-request and lose an MFA challenge with it.
+   * Gate a button spinner on {@link UseAuthResult.isBusy} instead.
+   */
   isLoading: boolean;
+  /**
+   * True while a session call is in flight, whether or not the session has
+   * settled. The flag for a button spinner or a disabled form, never for
+   * mounting or unmounting a route.
+   */
+  isBusy: boolean;
   login: AuthClient<TUser>['login'];
   completeTotp: AuthClient<TUser>['completeTotp'];
   /**
@@ -345,7 +370,8 @@ export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
     const result = {
       ...state,
       isAuthenticated: state.status === 'authenticated',
-      isLoading: state.status === 'loading' || state.status === 'unknown',
+      isLoading: !state.settled,
+      isBusy: state.status === 'loading',
     };
     for (const name of AUTH_METHOD_NAMES) {
       Object.defineProperty(result, name, {
