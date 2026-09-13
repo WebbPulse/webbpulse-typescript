@@ -4,7 +4,7 @@ One line per released version. Packages version in lockstep, so a version that c
 
 ## 0.10.7
 
-- No change in this package; the version moved in lockstep.
+- Lockstep version bump. No change to this package.
 
 ## 0.10.6
 
