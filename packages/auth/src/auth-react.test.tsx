@@ -452,6 +452,79 @@ describe('useAuth isLoading and isBusy', () => {
     expect(screen.getByTestId('busy').textContent).toBe('false');
   });
 
+  it('stays authenticated while a call is in flight on a live session', async () => {
+    const { client, resolveNext } = deferrableClient();
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <AuthProbe />
+      </AuthProvider>
+    );
+
+    await act(async () => {
+      resolveNext(jsonResponse({ access_token: 'a1', expires_in: 600 }));
+      await client.initialize();
+    });
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+
+    let stepUp: Promise<unknown>;
+    act(() => {
+      stepUp = client.stepUp({ code: '123456' });
+    });
+
+    expect(screen.getByTestId('status').textContent).toBe('loading');
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+
+    await act(async () => {
+      resolveNext(jsonResponse({ access_token: 'a2', expires_in: 600 }));
+      await stepUp;
+    });
+
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+  });
+
+  it('does not claim authenticated while a login from anonymous is in flight', async () => {
+    const { client, resolveNext } = deferrableClient();
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <AuthProbe />
+      </AuthProvider>
+    );
+
+    await act(async () => {
+      resolveNext(
+        jsonResponse(
+          {
+            success: false,
+            status: 401,
+            message: 'No session.',
+            request_id: 'r',
+          },
+          401
+        )
+      );
+      await client.initialize();
+    });
+    expect(screen.getByTestId('authenticated').textContent).toBe('false');
+
+    let login: Promise<unknown>;
+    act(() => {
+      login = client.login({ email: 'a@b.test', password: 'pw' });
+    });
+
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+    expect(screen.getByTestId('authenticated').textContent).toBe('false');
+
+    await act(async () => {
+      resolveNext(jsonResponse({ access_token: 'a1', expires_in: 600 }));
+      await login;
+    });
+
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+  });
+
   it('stays settled through a logout', async () => {
     const { client } = clientWith((call) =>
       call === 0
