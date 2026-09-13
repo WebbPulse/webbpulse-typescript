@@ -1,5 +1,34 @@
 # @webbpulse/tsconfig
 
+## 0.10.6
+
+### Patch Changes
+
+- The client `loadUser` receives now sends the session access token, so a
+  `loadUser` hook pointed at a route behind the API gateway JWT authorizer
+  resolves instead of taking a 401.
+
+  When no `client` option is given, the auth client builds its own from
+  `baseUrl`. That client was constructed with neither `auth` nor `getAuthToken`,
+  so every request it made went out with no Authorization header. Since
+  `settleAuthenticated` and `reloadUser` both hand that client to `loadUser`, the
+  user load after a login or a refresh was unauthenticated. On
+  www.carmodpicker.com the gateway log showed `POST /api/auth/refresh` 200
+  followed immediately by `GET /api/users/me` 401 with no integration, which
+  broke sign in.
+
+  The constructed client now reads the token lazily through
+  `getAuthToken: () => this.accessToken`, so it always carries the current one.
+  It deliberately does not take `auth`: that option turns on refresh and replay
+  on a 401, and the auth client's own login, refresh and logout calls must never
+  recurse into a refresh. A `getAuthToken` supplied in `clientOptions` still
+  wins.
+
+  A caller-supplied `client` is untouched and stays the caller's responsibility,
+  which the option's documentation and the README now say.
+
+  Every other package takes the lockstep version bump with no change.
+
 ## 0.10.5
 
 ### Patch Changes

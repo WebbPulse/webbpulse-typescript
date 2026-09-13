@@ -207,7 +207,11 @@ export interface AuthClientOptions<TUser = unknown> {
   /**
    * An existing client to make identity calls through, to share one retry
    * policy and fetch implementation with the rest of the application. Never give
-   * it a `getAuthToken` pointing back at this client.
+   * it an `auth` pointing back at this client, which would recurse a refresh
+   * through the very calls that perform one. Attaching the session token to it
+   * is the caller's responsibility: unlike the client constructed from
+   * `baseUrl`, this one is left exactly as supplied, so a `loadUser` hook
+   * reaching an authenticated route needs a `getAuthToken` on it.
    */
   client?: ApiClient;
   /** Route overrides, when a product mounts identity somewhere else. */
@@ -237,7 +241,11 @@ export interface AuthClientOptions<TUser = unknown> {
   disableProactiveRefresh?: boolean;
   /** WebAuthn adapter. Defaults to `navigator.credentials` when present. */
   webAuthn?: WebAuthnAdapter;
-  /** Options merged into the client this constructs from `baseUrl`. */
+  /**
+   * Options merged into the client this constructs from `baseUrl`. That client
+   * reads the access token lazily, so a `loadUser` hook given it sends the
+   * current bearer token.
+   */
   clientOptions?: Omit<ApiClientOptions, 'baseUrl' | 'getAuthToken'>;
   /** Injected for tests. Defaults to `globalThis.setTimeout`. */
   setTimeoutImpl?: (handler: () => void, ms: number) => unknown;
@@ -462,6 +470,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
         ...options.clientOptions,
         baseUrl: options.baseUrl,
         credentials: options.clientOptions?.credentials ?? 'include',
+        getAuthToken: () => this.accessToken,
       });
     }
   }
