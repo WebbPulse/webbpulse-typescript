@@ -10,11 +10,21 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
 import type { AuthClient, AuthState } from './auth-client.js';
+import {
+  readLinkToken,
+  VERIFY_EMAIL_PATH,
+  type LinkRefused,
+} from './email-flows.js';
 import type { AuthSessionEndedError } from './errors.js';
+import {
+  conditionalMediationAvailable,
+  passkeysSupported,
+} from './passkeys.js';
 import {
   readOAuthCallback,
   stripOAuthParams,
@@ -32,10 +42,16 @@ const SessionManagerContext = createContext<SessionManager<
  * and the typed hooks re-apply the caller's on the way out, since
  * `SessionManager` is invariant in each and no instantiation is assignable from
  * every other.
+ *
+ * @deprecated Use {@link AnyAuthClient} instead. Removed in the next major.
  */
 export type AnySessionManager = SessionManager<never, never>;
 
-/** Props for {@link SessionProvider}. */
+/**
+ * Props for {@link SessionProvider}.
+ *
+ * @deprecated Use {@link AuthProviderProps} instead. Removed in the next major.
+ */
 export interface SessionProviderProps {
   /** The manager to expose. Construct it once, outside the component tree. */
   manager: AnySessionManager;
@@ -44,7 +60,11 @@ export interface SessionProviderProps {
   children: ReactNode;
 }
 
-/** Puts a `SessionManager` in context. */
+/**
+ * Puts a `SessionManager` in context.
+ *
+ * @deprecated Use {@link AuthProvider} instead. Removed in the next major.
+ */
 export function SessionProvider({
   manager,
   refreshOnMount = true,
@@ -65,7 +85,11 @@ export function SessionProvider({
   );
 }
 
-/** Returns the manager from context. Throws outside a provider. */
+/**
+ * Returns the manager from context. Throws outside a provider.
+ *
+ * @deprecated Use {@link useAuthClient} instead. Removed in the next major.
+ */
 export function useSessionManager<
   TUser = unknown,
   TCredentials = unknown,
@@ -81,6 +105,8 @@ export function useSessionManager<
  * Subscribes to session state through `useSyncExternalStore`, so the manager
  * stays the single source of truth and concurrent rendering cannot tear a
  * component onto a stale snapshot.
+ *
+ * @deprecated Use {@link useAuthState} instead. Removed in the next major.
  */
 export function useSessionState<TUser = unknown>(): SessionState<TUser> {
   const manager = useSessionManager<TUser>();
@@ -92,7 +118,11 @@ export function useSessionState<TUser = unknown>(): SessionState<TUser> {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** What {@link useSession} returns. */
+/**
+ * What {@link useSession} returns.
+ *
+ * @deprecated Use {@link UseAuthResult} instead. Removed in the next major.
+ */
 export interface UseSessionResult<
   TUser,
   TCredentials,
@@ -121,7 +151,12 @@ export interface UseSessionResult<
   refresh: () => Promise<TUser | null>;
 }
 
-/** The hook application code uses for session state and the session flows. */
+/**
+ * The hook application code uses for session state and the session flows.
+ *
+ * @deprecated Use {@link useAuth} instead, which adds the passkey, OAuth, TOTP
+ * and email flows. Removed in the next major.
+ */
 export function useSession<
   TUser = unknown,
   TCredentials = unknown,
@@ -429,4 +464,179 @@ export function useOAuthCallback(onCallback: OAuthCallbackHandler): void {
     globalThis.history.replaceState(null, '', stripOAuthParams(href));
     void handler.current(result);
   }, []);
+}
+
+/** What a browser and a deployment together allow on a sign-in page. */
+export interface PasskeySignInSupport {
+  /**
+   * Whether to render the button at all. True only when the browser does
+   * WebAuthn and the deployment answered that passwordless sign-in is on.
+   */
+  offered: boolean;
+  /**
+   * Whether to arm a conditional ceremony against the username field, which
+   * puts a passkey in the browser's autofill dropdown.
+   */
+  conditional: boolean;
+}
+
+/** Options for {@link usePasskeySignInSupport}. */
+export interface PasskeySignInSupportOptions {
+  /**
+   * Answers whether this deployment offers passwordless sign-in. Pass
+   * `@webbpulse/discovery`'s `passkeyLoginAvailability`, bound to the identity
+   * URL, so this package needs no knowledge of the discovery routes.
+   */
+  probe: () => Promise<'available' | 'unavailable' | 'unknown'>;
+  /** Whether to ask at all. False answers no without a request. */
+  enabled?: boolean;
+}
+
+/**
+ * Whether to offer a passkey sign-in button, and whether the browser can put a
+ * passkey in its autofill dropdown.
+ *
+ * The two questions are asked in order and conditional mediation only after the
+ * deployment says yes, so a deployment with passwordless off costs one read and
+ * no capability probe. Only an `available` answer offers the button: a route
+ * that could not be read is not a deployment with the capability switched off.
+ *
+ * @example
+ * ```ts
+ * const { offered, conditional } = usePasskeySignInSupport({
+ *   probe: () => passkeyLoginAvailability(identityUrl(origin, PASSKEY_AVAILABILITY_PATH)),
+ * });
+ * ```
+ */
+export function usePasskeySignInSupport(
+  options: PasskeySignInSupportOptions
+): PasskeySignInSupport {
+  const [support, setSupport] = useState<PasskeySignInSupport>({
+    offered: false,
+    conditional: false,
+  });
+  const probe = useRef(options.probe);
+  probe.current = options.probe;
+  const enabled = options.enabled !== false;
+
+  useEffect(() => {
+    if (!enabled || !passkeysSupported()) {
+      setSupport({ offered: false, conditional: false });
+      return;
+    }
+    let live = true;
+
+    void (async () => {
+      const availability = await probe.current();
+      if (!live) {
+        return;
+      }
+      if (availability !== 'available') {
+        setSupport({ offered: false, conditional: false });
+        return;
+      }
+      const conditional = await conditionalMediationAvailable();
+      if (!live) {
+        return;
+      }
+      setSupport({ offered: true, conditional });
+    })();
+
+    return () => {
+      live = false;
+    };
+  }, [enabled]);
+
+  return support;
+}
+
+/** What {@link useEmailVerificationLink} is showing. */
+export type EmailVerificationLinkState =
+  | { kind: 'confirming' }
+  | { kind: 'confirmed' }
+  | { kind: 'missing-token' }
+  | { kind: 'refused'; reason: LinkRefused['reason']; message: string }
+  | { kind: 'failed' };
+
+/** Options for {@link useEmailVerificationLink}. */
+export interface EmailVerificationLinkOptions {
+  /** The client to confirm with. Null reports `failed` without a request. */
+  client: AuthClient<unknown> | null;
+  /**
+   * The path the link lands on, so a token meant for another flow is not spent
+   * here. Defaults to {@link VERIFY_EMAIL_PATH}.
+   */
+  expectedPath?: string;
+  /** The URL to read the token from. Defaults to the current location. */
+  url?: string;
+  /** Called once after a confirmed address, to re-read the user record. */
+  onConfirmed?: () => void | Promise<void>;
+}
+
+/**
+ * Spends a mailed verification token exactly once on mount and reports the
+ * outcome, leaving every sentence to the caller.
+ *
+ * The token is single use, so a ref guards the effect against the double
+ * invocation StrictMode performs in development: without it a valid link is
+ * spent by the first call and the second reports it as already used. A thrown
+ * request reports `failed` rather than rejecting, since a landing page has
+ * nowhere to catch.
+ *
+ * @example
+ * ```tsx
+ * const state = useEmailVerificationLink({ client, onConfirmed: checkAuthStatus });
+ * if (state.kind === 'refused') return <Alert message={state.message} />;
+ * ```
+ */
+export function useEmailVerificationLink(
+  options: EmailVerificationLinkOptions
+): EmailVerificationLinkState {
+  const [state, setState] = useState<EmailVerificationLinkState>({
+    kind: 'confirming',
+  });
+  const spent = useRef(false);
+  const latest = useRef(options);
+  latest.current = options;
+
+  useEffect(() => {
+    if (spent.current) {
+      return;
+    }
+    spent.current = true;
+
+    const { client, expectedPath, url, onConfirmed } = latest.current;
+    if (client === null) {
+      setState({ kind: 'failed' });
+      return;
+    }
+    const token = readLinkToken({
+      expectedPath: expectedPath ?? VERIFY_EMAIL_PATH,
+      ...(url === undefined ? {} : { url }),
+    });
+    if (token === null) {
+      setState({ kind: 'missing-token' });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const outcome = await client.confirmEmailVerification({ token });
+        if (outcome.ok) {
+          setState({ kind: 'confirmed' });
+          await onConfirmed?.();
+          return;
+        }
+        setState({
+          kind: 'refused',
+          reason: outcome.reason,
+          message: outcome.message,
+        });
+      } catch {
+        setState({ kind: 'failed' });
+      }
+    })();
+  }, []);
+
+  return state;
 }
