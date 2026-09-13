@@ -21,6 +21,12 @@ export interface SessionState<TUser> {
    * unknown session, and a route guard can gate on this instead of on `status`.
    */
   settled: boolean;
+  /**
+   * Whether a user was held when the current call started. It survives the
+   * `'loading'` status a call passes through, so a guard is not told the session
+   * is gone for the duration of a refresh that is about to succeed.
+   */
+  hadUser: boolean;
 }
 
 /**
@@ -89,6 +95,7 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
     user: null,
     error: null,
     settled: false,
+    hadUser: false,
   };
   /** De-duplicates concurrent refreshes, so a burst of mounts makes one call. */
   private inFlight: Promise<TUser | null> | null = null;
@@ -122,6 +129,9 @@ export class SessionManager<TUser = unknown, TCredentials = unknown> {
       (next.status === 'authenticated' || next.status === 'anonymous')
     ) {
       next.settled = true;
+    }
+    if (next.status !== 'loading') {
+      next.hadUser = next.user !== null;
     }
     this.state = next;
     for (const listener of this.listeners) {

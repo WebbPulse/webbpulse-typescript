@@ -336,6 +336,54 @@ describe('useSession isLoading and isBusy', () => {
     expect(screen.getByTestId('busy').textContent).toBe('false');
   });
 
+  it('stays authenticated while a refresh is in flight on a live session', async () => {
+    let release: ((response: Response) => void) | null = null;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        })
+    );
+    const manager = new SessionManager<User>({
+      client: createApiClient({
+        baseUrl: 'https://api.example.test',
+        fetch: fetchMock,
+        retries: 0,
+      }),
+      mode: 'cookie',
+    });
+
+    render(
+      <SessionProvider
+        manager={manager as unknown as AnySessionManager}
+        refreshOnMount={false}
+      >
+        <SessionProbe />
+      </SessionProvider>
+    );
+
+    act(() => {
+      manager.setUser(ALICE);
+    });
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+
+    let refresh: Promise<unknown>;
+    act(() => {
+      refresh = manager.refresh();
+    });
+
+    expect(screen.getByTestId('status').textContent).toBe('loading');
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+
+    await act(async () => {
+      release?.(jsonResponse(ALICE));
+      await refresh;
+    });
+
+    expect(screen.getByTestId('authenticated').textContent).toBe('true');
+  });
+
   it('stays settled through a logout', async () => {
     const manager = managerWith([new Response(null, { status: 204 })]);
 

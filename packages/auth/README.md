@@ -70,6 +70,38 @@ const { status, user, isAuthenticated, login, logout } = useAuth<UserRead>();
   that together can express states meaning nothing. The distinct `unknown` is
   what prevents a frame of signed out UI on first paint.
 
+## What a route guard gates on
+
+`status` moves to `'loading'` for the duration of every session call, a login, a
+TOTP completion, a step-up, a logout and a refresh alike. A guard that treats
+that as "the session is not known yet" unmounts whatever is driving the call, and
+a login form unmounted mid-request loses the MFA challenge that was about to
+arrive. The hooks therefore hand a guard flags that already account for this, and
+a guard should read those rather than `status`:
+
+| Flag              | Means                                                                                                               | Gate this on it                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `isLoading`       | The session has never settled. Latches false on the first `authenticated` or `anonymous` and never returns to true. | The first-paint spinner, and nothing else. |
+| `isBusy`          | A session call is in flight, settled or not.                                                                        | A button spinner, a disabled form.         |
+| `isAuthenticated` | A session is held. Stays true through a call made on an already authenticated session.                              | A redirect.                                |
+
+The third row is the subtle one. `isAuthenticated` is not a bare
+`status === 'authenticated'`: an in-flight call on a live session would read as
+signed out for its duration, and a guard redirecting on `!isAuthenticated` would
+eject a signed in user on every later token call. `useAuth` keeps it true while a
+call is in flight and the access token is still held; `useSession` does the same
+while the manager already had a user.
+
+So a guard is two lines, with no local latch of its own:
+
+```tsx
+const { isAuthenticated, isLoading } = useAuth<UserRead>();
+
+if (isLoading) return <Spinner />;
+if (!isAuthenticated) return <Navigate to="/login" replace />;
+return <Outlet />;
+```
+
 ## Reading and writing the user without spending a rotation
 
 `loadUser` runs on a login and on a successful refresh, which leaves a gap: an

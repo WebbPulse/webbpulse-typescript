@@ -1,5 +1,34 @@
 # @webbpulse/api-client
 
+## 0.10.5
+
+### Patch Changes
+
+- `isAuthenticated` now stays true while a session call is in flight on a session
+  that is already authenticated, so a route guard can redirect on
+  `!isAuthenticated` without ejecting a signed in user.
+
+  0.10.4 made `isLoading` mean "the session is not yet known", which is what a
+  guard should gate its spinner on. That exposed the other half of the same
+  problem: `isAuthenticated` was a bare `status === 'authenticated'`, and every
+  token call moves `status` to `'loading'` for its duration, so an authenticated
+  user read as signed out mid-call. Under 0.10.3 the old `isLoading` masked that by
+  accident; with the mask gone, a guard redirecting on `!isAuthenticated` would
+  send a signed in user to the login page on every later step-up or refresh.
+
+  `useAuth` keeps `isAuthenticated` true while `status` is `'loading'` and the
+  access token is still held, which is exactly the case of a call made on a live
+  session, and false while a login from anonymous is in flight. `useSession` does
+  the same from a new `hadUser` field on `SessionState`, since a `SessionManager`
+  holds no token.
+
+  `SessionState` gains `hadUser`. A consumer that asserts on the whole state
+  object needs the new field; nothing else changes shape. The auth README gains a
+  section stating which flag a guard gates on, so a consumer does not have to
+  rediscover this.
+
+  Every other package takes the lockstep version bump with no change.
+
 ## 0.10.4
 
 ### Patch Changes

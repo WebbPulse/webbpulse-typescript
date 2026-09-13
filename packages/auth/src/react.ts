@@ -97,6 +97,11 @@ export interface UseSessionResult<
   TUser,
   TCredentials,
 > extends SessionState<TUser> {
+  /**
+   * Whether a session is held. True while a call is in flight on a session that
+   * already had a user, since a guard redirecting on `!isAuthenticated` would
+   * otherwise eject a signed in user for the duration of every later call.
+   */
   isAuthenticated: boolean;
   /**
    * True only until the session has settled once. It answers "is the session
@@ -138,7 +143,9 @@ export function useSession<
   return useMemo(
     () => ({
       ...state,
-      isAuthenticated: state.status === 'authenticated',
+      isAuthenticated:
+        state.status === 'authenticated' ||
+        (state.status === 'loading' && state.hadUser),
       isLoading: !state.settled,
       isBusy: state.status === 'loading',
       login,
@@ -268,6 +275,12 @@ export function useSessionEnded(): AuthSessionEndedError | null {
 
 /** What {@link useAuth} returns. */
 export interface UseAuthResult<TUser> extends AuthState<TUser> {
+  /**
+   * Whether a session is held. True while a token call is in flight on an
+   * already authenticated session, since the token outlives the `'loading'`
+   * status the call passes through. Without that a guard redirecting on
+   * `!isAuthenticated` would eject a signed in user on every later token call.
+   */
   isAuthenticated: boolean;
   /**
    * True only until the session has settled once, whether that first settled
@@ -369,7 +382,9 @@ export function useAuth<TUser = unknown>(): UseAuthResult<TUser> {
   return useMemo(() => {
     const result = {
       ...state,
-      isAuthenticated: state.status === 'authenticated',
+      isAuthenticated:
+        state.status === 'authenticated' ||
+        (state.status === 'loading' && state.hasAccessToken),
       isLoading: !state.settled,
       isBusy: state.status === 'loading',
     };

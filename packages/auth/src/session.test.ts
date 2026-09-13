@@ -51,6 +51,7 @@ describe('SessionManager construction', () => {
       user: null,
       error: null,
       settled: false,
+      hadUser: false,
     });
   });
 });
@@ -66,6 +67,7 @@ describe('SessionManager.refresh', () => {
       user: ALICE,
       error: null,
       settled: true,
+      hadUser: true,
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'https://api.example.test/users/me'
@@ -98,6 +100,7 @@ describe('SessionManager.refresh', () => {
       user: null,
       error: null,
       settled: true,
+      hadUser: false,
     });
   });
 
@@ -230,6 +233,7 @@ describe('SessionManager.logout', () => {
       user: null,
       error: null,
       settled: true,
+      hadUser: false,
     });
   });
 
