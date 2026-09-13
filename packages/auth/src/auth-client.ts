@@ -151,6 +151,12 @@ export interface AuthTokenProvider {
    * gone. Concurrent callers must share one in-flight request.
    */
   refresh(): Promise<string | null>;
+  /**
+   * The token to send once the first refresh of the page load has settled, so a
+   * request made during boot waits for the restored session rather than going
+   * out anonymous. Starts no refresh of its own.
+   */
+  waitForToken(): Promise<string | null>;
 }
 
 export type { WebAuthnAdapter } from './passkeys.js';
@@ -485,6 +491,30 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * `@webbpulse/api-client` can read it on the hot path without awaiting.
    */
   getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  /**
+   * The token to send on a request, awaiting the first refresh of the page load
+   * when one is still in flight. A hard reload leaves the token field null until
+   * that refresh lands, so a domain request racing it would otherwise go out
+   * with no `Authorization` header and take a 401.
+   *
+   * It starts no refresh of its own: with no session being restored it resolves
+   * to the current token immediately, so a page that never signs in never waits.
+   * A failed refresh resolves to null rather than rejecting, so a caller is
+   * never left hanging on an ending session.
+   */
+  async waitForToken(): Promise<string | null> {
+    const pending = this.initializePromise ?? this.refreshInFlight;
+    if (pending === null) {
+      return this.accessToken;
+    }
+    try {
+      await pending;
+    } catch {
+      return this.accessToken;
+    }
     return this.accessToken;
   }
 

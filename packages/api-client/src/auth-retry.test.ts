@@ -294,3 +294,52 @@ describe('token source precedence', () => {
     expect(urlOn(fetchMock, 0)).toBe('https://api.example.test/build-lists/');
   });
 });
+
+describe('ApiClient waitForToken', () => {
+  it('awaits the provider rather than reading the token synchronously', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
+    let settle!: () => void;
+    const arrived = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const auth: AuthTokenProvider = {
+      getAccessToken: () => null,
+      refresh: () => Promise.resolve(null),
+      waitForToken: async () => {
+        await arrived;
+        return 'late-token';
+      },
+    };
+    const client = clientWith(fetchMock, { auth });
+
+    const call = client.get('/widgets');
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    settle();
+    await call;
+
+    expect(bearerOn(fetchMock, 0)).toBe('Bearer late-token');
+  });
+
+  it('falls back to the synchronous read for a provider without it', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
+    const auth = stubAuth({ tokens: ['t1'] });
+    expect('waitForToken' in auth).toBe(false);
+
+    await clientWith(fetchMock, { auth }).get('/widgets');
+    expect(bearerOn(fetchMock, 0)).toBe('Bearer t1');
+  });
+
+  it('sends no bearer header when the wait resolves to no token', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ ok: true })));
+    const auth: AuthTokenProvider = {
+      getAccessToken: () => null,
+      refresh: () => Promise.resolve(null),
+      waitForToken: () => Promise.resolve(null),
+    };
+
+    await clientWith(fetchMock, { auth }).get('/public');
+    expect(bearerOn(fetchMock, 0)).toBeNull();
+  });
+});

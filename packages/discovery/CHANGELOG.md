@@ -1,5 +1,34 @@
 # @webbpulse/discovery
 
+## 0.10.7
+
+### Patch Changes
+
+- Wait for the first token refresh before sending a domain request. After a hard
+  reload the access token lives only in memory, so it is null until the silent
+  refresh on the httpOnly cookie lands. `AuthProvider` fires that refresh from an
+  effect without blocking its children, so a query firing from a child effect
+  raced it and went out with no `Authorization` header. An endpoint that 401s was
+  rescued by the refresh and replay already in `@webbpulse/api-client`, but one
+  that degrades quietly for an anonymous caller just returned the signed out
+  answer and never retried.
+
+  `AuthClient` now implements `waitForToken()`, which resolves the token once the
+  refresh already in flight settles, and `@webbpulse/api-client` awaits it when
+  the provider offers it. It starts no refresh of its own: with nothing in flight
+  it resolves to the current token immediately, so a page that never signs in
+  never waits, and a failed refresh resolves to no token rather than rejecting, so
+  a caller is never left hanging on an ending session. Concurrent callers share
+  the one refresh that was already running.
+
+  `AuthTokenProvider.waitForToken` is optional in `@webbpulse/api-client`, so a
+  provider without it keeps the synchronous read. `isLoading` and `isBusy` are
+  unchanged, and a consumer passing `auth` to `createApiClient` picks the fix up
+  with no code change.
+
+- Updated dependencies
+  - @webbpulse/auth@0.10.7
+
 ## 0.10.6
 
 ### Patch Changes
