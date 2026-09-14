@@ -1,8 +1,8 @@
 /**
  * Reads the identity service's passkey availability route to learn what a
- * deployment does with passkeys. One uncredentialed GET, so a sign-in page can
- * ask about the server without spending a rate limit slot or writing a
- * challenge row.
+ * deployment does with passkeys. One GET, so a sign-in page can ask about the
+ * server without spending a rate limit slot or writing a challenge row. Sent
+ * with credentials so an environment behind an access gate answers it.
  */
 
 import {
@@ -62,7 +62,7 @@ async function readCapabilities(
   try {
     response = await fetchImpl(url, {
       method: 'GET',
-      credentials: 'omit',
+      credentials: 'include',
       headers: { accept: 'application/json' },
     });
   } catch {

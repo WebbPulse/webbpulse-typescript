@@ -1,7 +1,8 @@
 /**
  * Reads the identity service's OAuth provider discovery route to learn which
  * providers a deployment has configured, so a sign-in page renders the real set
- * rather than a guess. One uncredentialed GET rather than a probe per provider.
+ * rather than a guess. One GET rather than a probe per provider, sent with
+ * credentials so an environment behind an access gate answers it.
  */
 
 import { GITHUB_PROVIDER, GOOGLE_PROVIDER } from '@webbpulse/auth';
@@ -84,7 +85,7 @@ async function readProviders(
   try {
     response = await fetchImpl(url, {
       method: 'GET',
-      credentials: 'omit',
+      credentials: 'include',
       headers: { accept: 'application/json' },
     });
   } catch {

@@ -30,11 +30,11 @@ the applications import them rather than keeping local copies:
 - **QR and TOTP provisioning encoding** is `@webbpulse/qrcode`. Both
   applications had a near-identical byte mode encoder next to their MFA
   enrolment panel.
-- **Capability discovery**, the uncredentialed pre-auth probes that decide
-  whether a sign-in page offers passkeys or a given OAuth provider, is
-  `@webbpulse/discovery`, along with the `identityOriginFrom` and `identityUrl`
-  pair every consumer of those gates needs. `Availability` is tri-state, since a
-  read that could not be made is not the same as a deployment saying no.
+- **Capability discovery**, the pre-auth probes that decide whether a sign-in
+  page offers passkeys or a given OAuth provider, is `@webbpulse/discovery`,
+  along with the `identityOriginFrom` and `identityUrl` pair every consumer of
+  those gates needs. `Availability` is tri-state, since a read that could not be
+  made is not the same as a deployment saying no.
 - **The React session binding** is `@webbpulse/auth/react`. `AuthProvider` and
   `useAuth` own token lifetime, the silent refresh, StrictMode double-mount
   safety and the session-ended fan-out, so an application does not hand-roll a

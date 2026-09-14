@@ -1,5 +1,9 @@
 # @webbpulse/discovery
 
+## 0.12.1
+
+- The OAuth provider list and the passkey availability document are read with `credentials: 'include'`, so an environment that gates its APIs on a cookie answers them instead of refusing with a 403. `fetchImpl` is still the override seam.
+
 ## 0.12.0
 
 ### Minor Changes
