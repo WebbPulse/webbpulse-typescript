@@ -3,7 +3,7 @@ import { defineConfig } from 'tsup';
 export default defineConfig({
   entry: ['src/index.ts', 'src/react.ts', 'src/panels/index.ts'],
   format: ['esm'],
-  dts: true,
+  dts: false,
   sourcemap: true,
   clean: true,
   treeshake: true,

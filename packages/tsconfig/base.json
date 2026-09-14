@@ -12,6 +12,7 @@
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
+    "isolatedModules": true,
     "useDefineForClassFields": true,
     "forceConsistentCasingInFileNames": true,
 
