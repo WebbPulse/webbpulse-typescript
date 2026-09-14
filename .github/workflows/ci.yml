@@ -16,7 +16,7 @@ concurrency:
 jobs:
   typescript:
     name: typescript
-    uses: WebbPulse/.github/.github/workflows/typescript-ci.yml@v2
+    uses: WebbPulse/.github/.github/workflows/typescript-ci.yml@v3
     permissions:
       contents: read
       id-token: write
