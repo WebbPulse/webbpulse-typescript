@@ -128,7 +128,7 @@ describe('oauthProviders', () => {
     ).resolves.toEqual([GOOGLE, GITHUB]);
   });
 
-  it('sends no credentials', async () => {
+  it('sends credentials, for a deployment behind an access gate', async () => {
     const fetchImpl = answering({ providers: [] });
 
     await oauthProviders(PROVIDERS_URL, fetchImpl);
@@ -136,7 +136,7 @@ describe('oauthProviders', () => {
     expect(callsOf(fetchImpl)[0]?.[0]).toBe(PROVIDERS_URL);
     expect(callsOf(fetchImpl)[0]?.[1]).toEqual({
       method: 'GET',
-      credentials: 'omit',
+      credentials: 'include',
       headers: { accept: 'application/json' },
     });
   });

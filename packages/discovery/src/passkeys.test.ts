@@ -95,7 +95,7 @@ describe('passkeyCapabilities', () => {
     ).resolves.toEqual({ enabled: 'available', passwordless: 'unavailable' });
   });
 
-  it('reads it anonymously, with a plain GET and no body', async () => {
+  it('reads it with a plain GET, no body, and credentials', async () => {
     const fetchImpl = answering({ enabled: true, passwordless: true });
 
     await passkeyCapabilities(AVAILABILITY_URL, fetchImpl);
@@ -103,7 +103,7 @@ describe('passkeyCapabilities', () => {
     expect(callsOf(fetchImpl)[0]?.[0]).toBe(AVAILABILITY_URL);
     expect(callsOf(fetchImpl)[0]?.[1]).toEqual({
       method: 'GET',
-      credentials: 'omit',
+      credentials: 'include',
       headers: { accept: 'application/json' },
     });
   });
