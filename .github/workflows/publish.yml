@@ -25,7 +25,7 @@ jobs:
           - api-client
           - config
           - qrcode
-    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
+    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v3
     permissions:
       id-token: write
       contents: read
@@ -54,7 +54,7 @@ jobs:
       matrix:
         package:
           - auth
-    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
+    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v3
     permissions:
       id-token: write
       contents: read
@@ -83,7 +83,7 @@ jobs:
       matrix:
         package:
           - discovery
-    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v1
+    uses: WebbPulse/.github/.github/workflows/codeartifact-publish-npm.yml@v3
     permissions:
       id-token: write
       contents: read
