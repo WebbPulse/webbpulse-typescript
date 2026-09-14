@@ -1,5 +1,19 @@
 # @webbpulse/auth
 
+## 0.12.0
+
+### Minor Changes
+
+- Step the toolchain to TypeScript 6.0, the bridge release before 7. `base.json`
+  now states `isolatedModules` explicitly, declarations are emitted by `tsc`
+  rather than tsup, and the `typescript-eslint` floor moves to 8.70.0. Emitted
+  JavaScript is unchanged.
+
+### Patch Changes
+
+- Updated dependencies
+  - @webbpulse/api-client@0.12.0
+
 One line per released version. Packages version in lockstep, so a version that changed nothing here says so. Full detail is in the git history.
 
 ## 0.11.0

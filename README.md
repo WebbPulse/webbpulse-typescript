@@ -86,8 +86,9 @@ In CI the token comes from OIDC. There are no personal tokens anywhere. Domain
 
 ## Toolchain
 
-Node 22, npm workspaces, TypeScript 5.8 strict, tsup emitting ESM plus type
-declarations, Vitest, ESLint 9 flat config, Prettier, changesets.
+Node 22, npm workspaces, TypeScript 6.0 strict, tsup emitting ESM with `tsc`
+emitting the type declarations, Vitest, ESLint 9 flat config, Prettier,
+changesets.
 
 ESM only: both applications are Vite bundled and neither needs CommonJS. The
 core packages depend on nothing beyond the standard library, and React is a peer
