@@ -9,7 +9,7 @@ problem rather than two.
 
 | Package                                              | What it is                                                   |
 | ---------------------------------------------------- | ------------------------------------------------------------ |
-| [`@webbpulse/api-client`](packages/api-client)       | Typed fetch client. Framework free.                          |
+| [`@webbpulse/api-client`](packages/api-client)       | Typed fetch client, with polling hooks in its own entry.     |
 | [`@webbpulse/auth`](packages/auth)                   | Identity client, with React and panel hooks in own entries.  |
 | [`@webbpulse/config`](packages/config)               | Validated accessors over `import.meta.env`.                  |
 | [`@webbpulse/discovery`](packages/discovery)         | What a deployment of the identity service can do.            |

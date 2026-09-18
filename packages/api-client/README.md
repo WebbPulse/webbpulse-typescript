@@ -254,6 +254,71 @@ try {
 exported for a call site holding a raw header or a `Response` rather than a
 thrown `ApiError`.
 
+## Polling, from `@webbpulse/api-client/react`
+
+A separate entry point, so the core package stays framework free and an
+application that only needs the client never pulls React into its bundle. React
+is an optional peer dependency.
+
+`usePolledQuery` keeps a panel current without a query layer. No react-query, no
+cache and no shared store beyond the refetch keys, because the applications need
+a handful of live panels rather than a framework.
+
+```ts
+import {
+  usePolledQuery,
+  useMutationWithRefetch,
+} from '@webbpulse/api-client/react';
+
+const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
+  ({ signal }) => jobs.get<Job[]>('/', { signal }).then((r) => r.data),
+  { intervalMs: 10_000, queryKey: 'jobs', auth }
+);
+```
+
+- **The timer is a chained `setTimeout`**, measured from the end of one fetch to
+  the start of the next rather than on a fixed `setInterval`, so a fetch slower
+  than the interval cannot stack requests behind itself. `intervalMs` defaults
+  to 30000.
+- **A failure backs off** exponentially from the interval with jitter, capped at
+  `maxBackoffMs` (default five minutes), and a success resets it. `data` is left
+  alone by a failure, so a panel keeps the last good value with the error beside
+  it rather than blinking empty.
+- **Focus and visibility.** `refetchOnFocus` refetches when the window regains
+  focus and `refetchOnVisible` pauses the timer while the document is hidden and
+  refetches on the way back. Both default to true: a background tab that polls is
+  a bill and a battery drain for data nobody is reading.
+- **Requests are de-duplicated.** A focus event landing on top of an interval
+  tick is handed the running promise rather than starting a second request, and
+  `refetch()` while one is in flight returns that one.
+- **The in-flight request is aborted on unmount**, and the signal the fetcher
+  receives should be passed straight to the client as `{ signal }`.
+- **`auth` honours the token readiness the client already exposes.** Given a
+  provider with `waitForToken`, the first fetch waits on it, so a query mounted
+  during boot reads with the restored session instead of going out anonymous and
+  rendering a 401.
+- **`enabled: false`** stops the timer, drops any pending backoff and aborts an
+  in-flight request, while keeping the last data on screen.
+- **`isStale` and `lastUpdatedAt`** carry the age of the data. `staleTimeMs`
+  defaults to `intervalMs`, so data reads stale once its replacement is due.
+
+`useMutationWithRefetch` wraps a write so the related queries refetch the moment
+it lands, rather than waiting out the rest of their interval:
+
+```ts
+const { mutate, isMutating } = useMutationWithRefetch(
+  (name: string) => jobs.post('/', { name }),
+  'jobs'
+);
+```
+
+The invalidation is a notification rather than a cache write: each listening
+query goes and reads again, so the server stays the only source of truth and a
+write never has to know the shape of what the queries hold. Nothing is
+invalidated when the write rejects. `invalidateQueries(keys)` and
+`subscribeToRefetch(key, listener)` are exported from the root entry for a call
+site outside React.
+
 ## Exports
 
 `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the auth contract type
@@ -263,6 +328,13 @@ thrown `ApiError`.
 `getWebbPulseError` with its guard `isWebbPulseErrorBody` and the types
 `WebbPulseErrorBody` and `WebbPulseErrorInfo`, the rate limit helpers
 `parseRetryAfter` and `retryAfterFromHeaders`, the URL helpers `joinUrl` and
-`serializeQuery`, and the opt in envelope layer `toEnvelope`,
+`serializeQuery`, the opt in envelope layer `toEnvelope`,
 `createEnvelopeClient` with the types `ApiEnvelope`, `EnvelopeClient` and
-`EnvelopeOptions`.
+`EnvelopeOptions`, and the refetch bus `invalidateQueries` and
+`subscribeToRefetch` with the types `QueryKey` and `Unsubscribe`.
+
+`@webbpulse/api-client/react` adds `usePolledQuery` and
+`useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS` and
+`DEFAULT_MAX_BACKOFF_MS`, and the types `PolledQueryOptions`,
+`PolledQueryResult`, `PolledQueryFetcher`, `PolledQueryContext` and
+`MutationWithRefetch`.

@@ -29,6 +29,12 @@ export {
   type WebbPulseErrorInfo,
 } from './errors.js';
 export {
+  invalidateQueries,
+  subscribeToRefetch,
+  type QueryKey,
+  type Unsubscribe,
+} from './refetch-registry.js';
+export {
   joinUrl,
   serializeQuery,
   type QueryParams,

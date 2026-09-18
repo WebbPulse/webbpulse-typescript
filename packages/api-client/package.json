@@ -28,6 +28,11 @@
       "@webbpulse/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./react": {
+      "@webbpulse/source": "./src/react.ts",
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
     }
   },
   "scripts": {
@@ -35,6 +40,18 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@webbpulse/tsconfig": "0.12.1"
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.2.2",
+    "@webbpulse/tsconfig": "0.12.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   }
 }
