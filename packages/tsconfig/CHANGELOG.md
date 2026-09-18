@@ -1,5 +1,9 @@
 # @webbpulse/tsconfig
 
+## 0.13.0
+
+- Lockstep version bump. No change to this package.
+
 ## 0.12.1
 
 - Lockstep version bump. No change to this package.
