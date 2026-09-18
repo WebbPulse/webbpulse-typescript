@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AuthTokenProvider } from './client.js';
 import {
   invalidateQueries,
+  serializeQueryKey,
   subscribeToRefetch,
   type QueryKey,
 } from './refetch-registry.js';
@@ -57,8 +58,14 @@ export interface PolledQueryOptions {
    */
   staleTimeMs?: number;
   /**
-   * The key other call sites invalidate to force this query to refetch. Also
-   * what {@link useMutationWithRefetch} names.
+   * The key naming the data this query reads. Other call sites invalidate it to
+   * force a refetch, and it is what {@link useMutationWithRefetch} names.
+   *
+   * It also identifies the query: changing it starts a fresh one. Put the
+   * filters, the page cursor and anything else the fetcher closes over in the
+   * key, as `['jobs', page, status]`, and the hook re-reads when they change.
+   * The key is compared by a stable serialisation rather than by identity, so
+   * an array built inline on every render does not restart anything.
    */
   queryKey?: QueryKey;
   /**
@@ -72,11 +79,19 @@ export interface PolledQueryOptions {
 
 /** What {@link usePolledQuery} returns. */
 export interface PolledQueryResult<T> {
-  /** The last successful value, or null before the first one lands. */
+  /**
+   * The last successful value, or null before the first one lands. Resets to
+   * null when `queryKey` changes, so a stale page is never shown under a new
+   * key.
+   */
   data: T | null;
   /** The last failure, or null. Cleared by the next success. */
   error: unknown;
-  /** True until the first fetch settles. Gate a skeleton on this. */
+  /**
+   * True until the first fetch settles, and true again from a `queryKey`
+   * change until the first fetch for the new key settles. Gate a skeleton on
+   * this.
+   */
   isLoading: boolean;
   /** True while any fetch is in flight, the first one included. */
   isFetching: boolean;
@@ -118,11 +133,29 @@ function documentVisible(): boolean {
  * `maxBackoffMs`, and a success resets it. `data` is left alone by a failure,
  * so a panel keeps showing the last good value with the error beside it.
  *
+ * `queryKey` identifies the query, not just the invalidation channel. Changing
+ * it starts a fresh query: the timer and any backoff reset, a fetch goes out
+ * immediately, and the refetch subscription moves to the new key. A result
+ * still in flight for the previous key is dropped rather than landing under the
+ * new one. Keys are compared by a stable serialisation, so an array assembled
+ * inline on every render, `['jobs', page, status]`, restarts nothing while its
+ * segments hold. A caller whose key never changes sees the behaviour it always
+ * had.
+ *
+ * On a key change `data` resets to null and `isLoading` reads true again,
+ * unlike a failed poll, which keeps the last value. The old key's rows are a
+ * different question's answer, so showing page one's list under a page two
+ * heading would be wrong rather than merely stale; a caller that prefers to
+ * hold the previous page keeps its own copy of `data` across the change.
+ *
  * @example
  * ```ts
  * const { data, isStale, refetch } = usePolledQuery(
- *   ({ signal }) => client.get<Job[]>('/jobs/', { signal }).then((r) => r.data),
- *   { intervalMs: 10_000, queryKey: 'jobs', auth }
+ *   ({ signal }) =>
+ *     client
+ *       .get<Job[]>('/jobs/', { query: { page }, signal })
+ *       .then((r) => r.data),
+ *   { intervalMs: 10_000, queryKey: ['jobs', page], auth }
  * );
  * ```
  */
@@ -141,6 +174,11 @@ export function usePolledQuery<T>(
     auth,
   } = options;
 
+  const serializedKey = useMemo(
+    () => (queryKey === undefined ? undefined : serializeQueryKey(queryKey)),
+    [queryKey]
+  );
+
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [isLoading, setIsLoading] = useState(enabled);
@@ -149,6 +187,7 @@ export function usePolledQuery<T>(
   const [staleAt, setStaleAt] = useState<number | null>(null);
 
   const live = useRef(true);
+  const generation = useRef(0);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
   const authRef = useRef(auth);
@@ -201,20 +240,25 @@ export function usePolledQuery<T>(
     }
     const abort = new AbortController();
     controller.current = abort;
+    const generationAtStart = generation.current;
     setIsFetching(true);
 
     const attempt = (async (): Promise<void> => {
+      const superseded = (): boolean =>
+        !live.current ||
+        abort.signal.aborted ||
+        generation.current !== generationAtStart;
       try {
         const waitForToken = authRef.current?.waitForToken;
         if (waitForToken !== undefined && !waited.current) {
           waited.current = true;
           await waitForToken.call(authRef.current);
         }
-        if (abort.signal.aborted) {
+        if (superseded()) {
           return;
         }
         const value = await fetcherRef.current({ signal: abort.signal });
-        if (!live.current || abort.signal.aborted) {
+        if (superseded()) {
           return;
         }
         failures.current = 0;
@@ -224,20 +268,25 @@ export function usePolledQuery<T>(
         setLastUpdatedAt(now);
         setStaleAt(now + settings.current.staleTimeMs);
       } catch (thrown) {
-        if (!live.current || abort.signal.aborted) {
+        if (superseded()) {
           return;
         }
         failures.current += 1;
         setError(thrown);
       } finally {
-        inFlight.current = undefined;
+        if (
+          controller.current === abort ||
+          generation.current === generationAtStart
+        ) {
+          inFlight.current = undefined;
+        }
         if (live.current && controller.current === abort) {
           controller.current = undefined;
           setIsFetching(false);
           setIsLoading(false);
         }
       }
-      if (live.current && settings.current.enabled) {
+      if (live.current && settings.current.enabled && !superseded()) {
         schedule.current();
       }
     })();
@@ -279,6 +328,30 @@ export function usePolledQuery<T>(
     };
   }, [clearTimer]);
 
+  const activeKey = useRef(serializedKey);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
+  useEffect(() => {
+    if (activeKey.current === serializedKey) {
+      return;
+    }
+    activeKey.current = serializedKey;
+    generation.current += 1;
+    clearTimer();
+    controller.current?.abort();
+    controller.current = undefined;
+    inFlight.current = undefined;
+    failures.current = 0;
+    waited.current = false;
+    setData(null);
+    setError(null);
+    setLastUpdatedAt(null);
+    setStaleAt(null);
+    setIsFetching(false);
+    setIsLoading(enabledRef.current);
+  }, [serializedKey, clearTimer]);
+
   useEffect(() => {
     if (!enabled) {
       clearTimer();
@@ -291,16 +364,16 @@ export function usePolledQuery<T>(
     }
     void run();
     return clearTimer;
-  }, [enabled, intervalMs, clearTimer, run]);
+  }, [enabled, intervalMs, serializedKey, clearTimer, run]);
 
   useEffect(() => {
-    if (!enabled || queryKey === undefined) {
+    if (!enabled || serializedKey === undefined) {
       return;
     }
-    return subscribeToRefetch(queryKey, () => {
+    return subscribeToRefetch(serializedKey, () => {
       void refetch();
     });
-  }, [enabled, queryKey, refetch]);
+  }, [enabled, serializedKey, refetch]);
 
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') {
@@ -391,11 +464,16 @@ export interface MutationWithRefetch<TArgs extends unknown[], TResult> {
  * goes and reads again, so the server stays the only source of truth and a
  * write does not have to know the shape of what the queries hold.
  *
+ * `keys` is read when `mutate` runs rather than when the hook renders, so a key
+ * built from current props or state invalidates what the component is showing
+ * now. An array of primitives is one array key; pass several keys as an array
+ * holding at least one array key, `[['jobs', page], 'counts']`.
+ *
  * @example
  * ```ts
  * const { mutate, isMutating } = useMutationWithRefetch(
  *   (name: string) => client.post('/jobs/', { name }),
- *   'jobs'
+ *   ['jobs', page]
  * );
  * ```
  */
@@ -446,7 +524,9 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
 
 export {
   invalidateQueries,
+  serializeQueryKey,
   subscribeToRefetch,
   type QueryKey,
+  type QueryKeyPart,
   type Unsubscribe,
 } from './refetch-registry.js';

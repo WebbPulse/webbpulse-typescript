@@ -30,8 +30,10 @@ export {
 } from './errors.js';
 export {
   invalidateQueries,
+  serializeQueryKey,
   subscribeToRefetch,
   type QueryKey,
+  type QueryKeyPart,
   type Unsubscribe,
 } from './refetch-registry.js';
 export {

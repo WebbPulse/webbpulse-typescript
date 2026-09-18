@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   invalidateQueries,
+  serializeQueryKey,
   useMutationWithRefetch,
   usePolledQuery,
   type PolledQueryOptions,
@@ -24,6 +25,17 @@ function render<T>(
   options: PolledQueryOptions = {}
 ) {
   return renderHook(() => usePolledQuery(fetcher, options));
+}
+
+/** Renders the hook with options derived per render from a changeable prop. */
+function renderWithProps<T, P>(
+  fetcher: (context: { signal: AbortSignal }) => Promise<T>,
+  toOptions: (props: P) => PolledQueryOptions,
+  initialProps: P
+) {
+  return renderHook((props: P) => usePolledQuery(fetcher, toOptions(props)), {
+    initialProps,
+  });
 }
 
 /** Advances fake timers and flushes the microtasks each tick releases. */
@@ -340,6 +352,177 @@ describe('usePolledQuery', () => {
     expect(result.current.data).toBe('b');
   });
 
+  it('refetches once immediately when the query key changes', async () => {
+    const fetcher = sequence(['page-one', 'page-two']);
+    const { result, rerender } = renderWithProps<string, number>(
+      fetcher,
+      (page: number) => ({ intervalMs: 60_000, queryKey: ['jobs', page] }),
+      1
+    );
+
+    await settle();
+    expect(result.current.data).toBe('page-one');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    rerender(2);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.current.data).toBe('page-two');
+  });
+
+  it('resets data and isLoading while the new key is being read', async () => {
+    let release: (value: string) => void = () => undefined;
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce('page-one')
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            release = resolve;
+          })
+      );
+
+    const { result, rerender } = renderWithProps<string, number>(
+      fetcher,
+      (page: number) => ({ intervalMs: 60_000, queryKey: ['jobs', page] }),
+      1
+    );
+
+    await settle();
+    expect(result.current.data).toBe('page-one');
+    expect(result.current.isLoading).toBe(false);
+
+    rerender(2);
+    await settle();
+    expect(result.current.data).toBeNull();
+    expect(result.current.isLoading).toBe(true);
+    expect(result.current.lastUpdatedAt).toBeNull();
+
+    await act(async () => {
+      release('page-two');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('page-two');
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it('does not restart when an inline array key keeps its segments', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const { result, rerender } = renderWithProps(
+      fetcher,
+      () => ({ intervalMs: 60_000, queryKey: ['jobs', 1] }),
+      'first'
+    );
+
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    rerender('second');
+    rerender('third');
+    await settle();
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(result.current.data).toBe('a');
+  });
+
+  it('drops an in-flight result belonging to the previous key', async () => {
+    let releaseOld: (value: string) => void = () => undefined;
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            releaseOld = resolve;
+          })
+      )
+      .mockResolvedValue('new-key-data');
+
+    const { result, rerender } = renderWithProps<string, number>(
+      fetcher,
+      (page: number) => ({ intervalMs: 60_000, queryKey: ['jobs', page] }),
+      1
+    );
+
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    rerender(2);
+    await settle();
+    expect(result.current.data).toBe('new-key-data');
+
+    await act(async () => {
+      releaseOld('old-key-data');
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(result.current.data).toBe('new-key-data');
+  });
+
+  it('resets the timer so the new key polls from its own fetch', async () => {
+    const fetcher = sequence(['a', 'b', 'c']);
+    const { rerender } = renderWithProps<string, number>(
+      fetcher,
+      (page: number) => ({ intervalMs: 1000, queryKey: ['jobs', page] }),
+      1
+    );
+
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await advance(600);
+    rerender(2);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await advance(600);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await advance(500);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('moves the refetch subscription to the new key', async () => {
+    const fetcher = sequence(['a', 'b', 'c']);
+    const { rerender } = renderWithProps<string, number>(
+      fetcher,
+      (page: number) => ({ intervalMs: 60_000, queryKey: ['jobs', page] }),
+      1
+    );
+
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    rerender(2);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      invalidateQueries(['jobs', 1]);
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      invalidateQueries(['jobs', 2]);
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('serialises an array key by value rather than by identity', () => {
+    expect(serializeQueryKey(['jobs', 1])).toBe(serializeQueryKey(['jobs', 1]));
+    expect(serializeQueryKey(['jobs', 1])).not.toBe(
+      serializeQueryKey(['jobs', 2])
+    );
+    expect(serializeQueryKey('jobs')).toBe('jobs');
+  });
+
   it('unsubscribes its query key on unmount', async () => {
     const fetcher = sequence(['a']);
     const { result, unmount } = render(fetcher, {
@@ -389,6 +572,83 @@ describe('useMutationWithRefetch', () => {
     await settle();
     expect(query.result.current.data).toBe('b');
     expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates an array key the query is reading', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const query = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 60_000, queryKey: ['items', 3] })
+    );
+
+    await settle();
+    expect(query.result.current.data).toBe('a');
+
+    const write = vi.fn(() => Promise.resolve('written'));
+    const mutation = renderHook(() =>
+      useMutationWithRefetch(write, ['items', 3])
+    );
+
+    await act(async () => {
+      await mutation.result.current.mutate();
+    });
+
+    await settle();
+    expect(query.result.current.data).toBe('b');
+  });
+
+  it('reads its keys when the write runs, not when it renders', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const query = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 60_000, queryKey: ['items', 9] })
+    );
+
+    await settle();
+    expect(query.result.current.data).toBe('a');
+
+    const write = vi.fn(() => Promise.resolve('written'));
+    const mutation = renderHook<
+      ReturnType<typeof useMutationWithRefetch<[], string>>,
+      number
+    >((page) => useMutationWithRefetch(write, ['items', page]), {
+      initialProps: 1,
+    });
+
+    mutation.rerender(9);
+
+    await act(async () => {
+      await mutation.result.current.mutate();
+    });
+
+    await settle();
+    expect(query.result.current.data).toBe('b');
+  });
+
+  it('invalidates several keys given a list holding an array key', async () => {
+    const first = sequence(['a1', 'a2']);
+    const second = sequence(['b1', 'b2']);
+    const one = renderHook(() =>
+      usePolledQuery(first, { intervalMs: 60_000, queryKey: ['rows', 1] })
+    );
+    const two = renderHook(() =>
+      usePolledQuery(second, { intervalMs: 60_000, queryKey: 'counts' })
+    );
+
+    await settle();
+    expect(one.result.current.data).toBe('a1');
+    expect(two.result.current.data).toBe('b1');
+
+    const write = vi.fn(() => Promise.resolve('written'));
+    const mutation = renderHook(() =>
+      useMutationWithRefetch(write, [['rows', 1], 'counts'])
+    );
+
+    await act(async () => {
+      await mutation.result.current.mutate();
+    });
+
+    await settle();
+    expect(one.result.current.data).toBe('a2');
+    expect(two.result.current.data).toBe('b2');
   });
 
   it('does not invalidate when the write rejects', async () => {
