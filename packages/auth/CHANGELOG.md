@@ -1,5 +1,9 @@
 # @webbpulse/auth
 
+## 0.13.0
+
+- Lockstep version bump. No change to this package beyond the `@webbpulse/api-client` dependency moving to 0.13.0.
+
 ## 0.12.1
 
 - Lockstep version bump. No change to this package.
