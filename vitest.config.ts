@@ -8,6 +8,9 @@ import { defineConfig } from 'vitest/config';
  * not depend on build output that does not exist on a clean tree.
  */
 const WORKSPACE_SOURCE_ALIAS = {
+  '@webbpulse/api-client/react': fileURLToPath(
+    new URL('./packages/api-client/src/react.ts', import.meta.url)
+  ),
   '@webbpulse/api-client': fileURLToPath(
     new URL('./packages/api-client/src/index.ts', import.meta.url)
   ),

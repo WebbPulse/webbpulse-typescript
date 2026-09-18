@@ -640,3 +640,38 @@ export function useEmailVerificationLink(
 
   return state;
 }
+
+/**
+ * The token waiter a polled query takes. Structural rather than an import of
+ * `AuthTokenProvider`, so the shape stays the contract and neither package has
+ * to widen its dependencies for it.
+ */
+export interface QueryAuth {
+  /** Resolves once the first refresh of the page load has settled. */
+  waitForToken(): Promise<string | null>;
+}
+
+/**
+ * The `auth` option for `usePolledQuery`, bound to the client from context.
+ *
+ * Without it every adopter writes the same adapter, and the one that forgets
+ * ships a query that mounts during boot, goes out anonymous and renders a 401.
+ * The result is referentially stable for the client's lifetime, so passing it
+ * straight into a query's options does not restart the poll on every render.
+ *
+ * @example
+ * ```ts
+ * const auth = useQueryAuth();
+ * const { data } = usePolledQuery(
+ *   ({ signal }) => listJobs(signal),
+ *   { queryKey: 'jobs', auth }
+ * );
+ * ```
+ */
+export function useQueryAuth(): QueryAuth {
+  const client = useAuthClient();
+  return useMemo(
+    () => ({ waitForToken: () => client.waitForToken() }),
+    [client]
+  );
+}

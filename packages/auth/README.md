@@ -455,6 +455,31 @@ mount and reports `confirming`, `confirmed`, `missing-token`, `refused` or
 `failed`, leaving every sentence to the caller. A ref guards the single-use
 token against the double mount StrictMode performs in development.
 
+## Polled queries
+
+`useQueryAuth` is the `auth` option `usePolledQuery` takes, bound to the client
+already in context:
+
+```ts
+import { useQueryAuth } from '@webbpulse/auth/react';
+import { usePolledQuery } from '@webbpulse/api-client/react';
+
+const auth = useQueryAuth();
+const { data } = usePolledQuery(({ signal }) => listJobs(signal), {
+  queryKey: 'jobs',
+  auth,
+});
+```
+
+Without it each application writes the same adapter by hand, and the one that
+forgets ships a query that mounts during boot, goes out anonymous and renders a 401. The result is referentially stable for the client's lifetime, so passing it
+straight into the options does not restart the poll on every render.
+
+The hook lives here rather than in `@webbpulse/api-client` because the bridge
+needs the auth client, and the client package stays free of a dependency on this
+one. `usePolledQuery` keeps taking a plain `{ waitForToken }`, so a caller
+outside the provider is unaffected.
+
 ## `SessionManager`
 
 Deprecated, and removed in the next major. Not the identity standard's
@@ -489,13 +514,13 @@ Types accompany each group, including `AuthClientOptions`, `AuthState`,
 `@webbpulse/auth/react`
 
 `AuthProvider`, `useAuth`, `useAuthClient`, `useAuthState`, `useSessionEnded`,
-`useOAuthCallback`, `usePasskeySignInSupport`, `useEmailVerificationLink`, and
-the deprecated `SessionProvider`, `useSession`, `useSessionState`,
-`useSessionManager`, with `AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`,
-`PasskeySignInSupport`, `PasskeySignInSupportOptions`,
-`EmailVerificationLinkState`, `EmailVerificationLinkOptions`,
-`SessionProviderProps`, `UseSessionResult`, `AnySessionManager` and
-`OAuthCallbackHandler`.
+`useOAuthCallback`, `usePasskeySignInSupport`, `useEmailVerificationLink`,
+`useQueryAuth`, and the deprecated `SessionProvider`, `useSession`,
+`useSessionState`, `useSessionManager`, with `AuthProviderProps`,
+`UseAuthResult`, `AnyAuthClient`, `PasskeySignInSupport`,
+`PasskeySignInSupportOptions`, `EmailVerificationLinkState`,
+`EmailVerificationLinkOptions`, `QueryAuth`, `SessionProviderProps`,
+`UseSessionResult`, `AnySessionManager` and `OAuthCallbackHandler`.
 
 `@webbpulse/auth/panels`
 
