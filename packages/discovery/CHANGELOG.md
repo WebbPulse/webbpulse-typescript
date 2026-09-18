@@ -1,5 +1,12 @@
 # @webbpulse/discovery
 
+## 0.13.1
+
+### Patch Changes
+
+- Updated dependencies [4ba9525]
+  - @webbpulse/auth@0.14.0
+
 ## 0.13.0
 
 - Lockstep version bump. No change to this package beyond the `@webbpulse/auth` dependency moving to 0.13.0.

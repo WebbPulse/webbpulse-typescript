@@ -1,5 +1,13 @@
 # @webbpulse/auth
 
+## 0.14.0
+
+### Minor Changes
+
+- 4ba9525: Add `useQueryAuth` to `@webbpulse/auth/react`, the `auth` option for
+  `usePolledQuery` bound to the client already in context, so an application does
+  not hand-roll the adapter and cannot ship a query that boots anonymous.
+
 ## 0.13.0
 
 - Lockstep version bump. No change to this package beyond the `@webbpulse/api-client` dependency moving to 0.13.0.
