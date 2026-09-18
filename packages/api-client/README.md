@@ -296,7 +296,10 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
 - **`auth` honours the token readiness the client already exposes.** Given a
   provider with `waitForToken`, the first fetch waits on it, so a query mounted
   during boot reads with the restored session instead of going out anonymous and
-  rendering a 401.
+  rendering a 401. An application on `@webbpulse/auth` passes `useQueryAuth()`
+  from `@webbpulse/auth/react` rather than writing the adapter itself; the
+  option stays a plain `{ waitForToken }`, so this package needs no dependency
+  on that one.
 - **`enabled: false`** stops the timer, drops any pending backoff and aborts an
   in-flight request, while keeping the last data on screen.
 - **`isStale` and `lastUpdatedAt`** carry the age of the data. `staleTimeMs`
