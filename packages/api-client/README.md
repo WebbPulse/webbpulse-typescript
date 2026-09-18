@@ -271,8 +271,9 @@ import {
 } from '@webbpulse/api-client/react';
 
 const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
-  ({ signal }) => jobs.get<Job[]>('/', { signal }).then((r) => r.data),
-  { intervalMs: 10_000, queryKey: 'jobs', auth }
+  ({ signal }) =>
+    jobs.get<Job[]>('/', { query: { page }, signal }).then((r) => r.data),
+  { intervalMs: 10_000, queryKey: ['jobs', page], auth }
 );
 ```
 
@@ -304,6 +305,21 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
   in-flight request, while keeping the last data on screen.
 - **`isStale` and `lastUpdatedAt`** carry the age of the data. `staleTimeMs`
   defaults to `intervalMs`, so data reads stale once its replacement is due.
+- **`queryKey` identifies the query**, not just its invalidation channel. Put
+  the filters and the page cursor the fetcher closes over into the key, as
+  `['jobs', page, status]`, and changing them starts a fresh query: the timer
+  and any backoff reset, a fetch goes out immediately, the refetch subscription
+  moves to the new key, and a response still in flight for the previous key is
+  dropped rather than landing under the new one. Keys compare by a stable
+  serialisation rather than by identity, so an array built inline on every
+  render restarts nothing while its segments hold, and a caller whose key never
+  changes sees the behaviour it always had. Remounting a list on a React `key`
+  to force a re-read is no longer needed.
+- **A key change clears `data` and raises `isLoading`**, unlike a failed poll,
+  which keeps the last value. The previous key's rows answer a different
+  question, so page one's list under a page two heading would be wrong rather
+  than merely stale. A caller that would rather hold the old page while the new
+  one loads keeps its own copy across the change.
 
 `useMutationWithRefetch` wraps a write so the related queries refetch the moment
 it lands, rather than waiting out the rest of their interval:
@@ -311,16 +327,21 @@ it lands, rather than waiting out the rest of their interval:
 ```ts
 const { mutate, isMutating } = useMutationWithRefetch(
   (name: string) => jobs.post('/', { name }),
-  'jobs'
+  ['jobs', page]
 );
 ```
 
 The invalidation is a notification rather than a cache write: each listening
 query goes and reads again, so the server stays the only source of truth and a
 write never has to know the shape of what the queries hold. Nothing is
-invalidated when the write rejects. `invalidateQueries(keys)` and
+invalidated when the write rejects, and the keys are read when `mutate` runs
+rather than when the hook renders, so a key built from current props names what
+the component is showing now. `invalidateQueries(keys)` and
 `subscribeToRefetch(key, listener)` are exported from the root entry for a call
-site outside React.
+site outside React, alongside `serializeQueryKey(key)` for one that needs the
+comparison itself. An array of primitives is one array key, so `['jobs', 1]`
+invalidates that key rather than the two keys `jobs` and `1`; pass a list of
+keys as an array holding at least one array key, `[['jobs', 1], 'counts']`.
 
 ## Exports
 
@@ -333,8 +354,9 @@ site outside React.
 `parseRetryAfter` and `retryAfterFromHeaders`, the URL helpers `joinUrl` and
 `serializeQuery`, the opt in envelope layer `toEnvelope`,
 `createEnvelopeClient` with the types `ApiEnvelope`, `EnvelopeClient` and
-`EnvelopeOptions`, and the refetch bus `invalidateQueries` and
-`subscribeToRefetch` with the types `QueryKey` and `Unsubscribe`.
+`EnvelopeOptions`, and the refetch bus `invalidateQueries`,
+`subscribeToRefetch` and `serializeQueryKey` with the types `QueryKey`,
+`QueryKeyPart` and `Unsubscribe`.
 
 `@webbpulse/api-client/react` adds `usePolledQuery` and
 `useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS` and
