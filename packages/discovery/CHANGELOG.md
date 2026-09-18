@@ -1,5 +1,11 @@
 # @webbpulse/discovery
 
+## 0.13.2
+
+### Patch Changes
+
+- @webbpulse/auth@0.14.1
+
 ## 0.13.1
 
 ### Patch Changes
