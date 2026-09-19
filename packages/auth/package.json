@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/auth",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Framework free session helpers for WebbPulse applications, with an optional React entry point.",
   "license": "UNLICENSED",
   "type": "module",
