@@ -527,9 +527,10 @@ return (
   the same way.
 - **A cancellation is silent** on both paths: a dismissed prompt is not a
   failure to render. Every other outcome, refusals included, reaches `onResult`.
-- **`signIn` never rejects.** A thrown ceremony clears `busy` and reports
-  nothing, so a click handler that does not await it leaks no unhandled
-  rejection.
+- **A thrown ceremony goes to `onError`**, which the client reserves for a
+  network failure or a server error it could not turn into an outcome. Without
+  `onError`, `signIn` rejects with that error, so pass one from a click handler
+  that does not await the promise, or it surfaces as an unhandled rejection.
 - **`offered` is false without a client**, so a deployment that could not build
   one draws nothing rather than a button that cannot work.
 

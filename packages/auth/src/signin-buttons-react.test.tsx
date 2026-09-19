@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react';
+import { render, renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -266,17 +266,20 @@ describe('usePasskeySignInButton', () => {
     expect(onResult).toHaveBeenCalledWith(rejected);
   });
 
-  it('clears busy after a ceremony that threw', async () => {
+  it('hands a ceremony that threw to onError and clears busy', async () => {
     browserWithPasskeys();
+    const failure = new Error('boom');
     const client = {
-      signInWithPasskey: vi.fn(() => Promise.reject(new Error('boom'))),
+      signInWithPasskey: vi.fn(() => Promise.reject(failure)),
     };
+    const onError = vi.fn();
 
     const { getByTestId, getByRole } = render(
       <PasskeyProbe
         client={client as never}
         probe={probeAnswering('available')}
         onResult={vi.fn()}
+        onError={onError}
       />
     );
     await waitFor(() => {
@@ -290,6 +293,31 @@ describe('usePasskeySignInButton', () => {
 
     await waitFor(() => {
       expect(getByTestId('busy').textContent).toBe('false');
+    });
+    expect(onError).toHaveBeenCalledWith(failure);
+  });
+
+  it('rejects signIn with the thrown error when no onError is given', async () => {
+    browserWithPasskeys();
+    const failure = new Error('boom');
+    const client = {
+      signInWithPasskey: vi.fn(() => Promise.reject(failure)),
+    };
+    const { result } = renderHook(() =>
+      usePasskeySignInButton({
+        client,
+        probe: probeAnswering('available'),
+        onResult: vi.fn(),
+        conditional: false,
+      })
+    );
+    await waitFor(() => {
+      expect(result.current.offered).toBe(true);
+    });
+
+    await expect(result.current.signIn()).rejects.toBe(failure);
+    await waitFor(() => {
+      expect(result.current.busy).toBe(false);
     });
   });
 

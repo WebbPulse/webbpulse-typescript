@@ -717,6 +717,12 @@ export interface PasskeySignInButtonOptions {
    */
   onResult: (result: PasskeySignInOutcome) => void | Promise<void>;
   /**
+   * Called when the ceremony itself throws, which the client reserves for a
+   * network failure or a server error it could not turn into an outcome.
+   * Omitted, `signIn` rejects with that error, so nothing is swallowed.
+   */
+  onError?: (error: unknown) => void;
+  /**
    * Whether to arm conditional mediation on mount. Defaults to true; pass false
    * in a test, where an autofill ceremony has nothing to talk to.
    */
@@ -753,6 +759,8 @@ export function usePasskeySignInButton(
 
   const handler = useRef(options.onResult);
   handler.current = options.onResult;
+  const errorHandler = useRef(options.onError);
+  errorHandler.current = options.onError;
 
   const probe = useRef(options.probe);
   probe.current = options.probe;
@@ -798,8 +806,9 @@ export function usePasskeySignInButton(
       );
       if (!result.ok && result.reason === 'cancelled') return;
       await handler.current(result);
-    } catch {
-      return;
+    } catch (error) {
+      if (errorHandler.current === undefined) throw error;
+      errorHandler.current(error);
     } finally {
       setBusy(false);
     }
