@@ -29,6 +29,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./browser": {
+      "@webbpulse/source": "./src/browser.ts",
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
     "./react": {
       "@webbpulse/source": "./src/react.ts",
       "types": "./dist/react.d.ts",

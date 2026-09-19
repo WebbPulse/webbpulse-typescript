@@ -24,6 +24,7 @@ import type { AuthSessionEndedError } from './errors.js';
 import {
   conditionalMediationAvailable,
   passkeysSupported,
+  type PasskeySignInOutcome,
 } from './passkeys.js';
 import {
   readOAuthCallback,
@@ -674,4 +675,198 @@ export function useQueryAuth(): QueryAuth {
     () => ({ waitForToken: () => client.waitForToken() }),
     [client]
   );
+}
+
+/** What {@link usePasskeySignInButton} is showing and offers to run. */
+export interface PasskeySignInButton {
+  /**
+   * Whether to render the control at all. False when there is no client, the
+   * browser does no WebAuthn, or the deployment has passwordless sign-in off.
+   */
+  offered: boolean;
+  /** True while a click-driven ceremony is outstanding. Gate the label on it. */
+  busy: boolean;
+  /** Whether the browser can put a passkey in its autofill dropdown. */
+  conditional: boolean;
+  /**
+   * Runs an `optional` ceremony, reporting every outcome but a cancellation.
+   * Never rejects: a thrown ceremony clears `busy` and reports nothing, so a
+   * click handler that does not await it leaks no unhandled rejection.
+   */
+  signIn: () => Promise<void>;
+}
+
+/** Options for {@link usePasskeySignInButton}. */
+export interface PasskeySignInButtonOptions {
+  /** The client to run the ceremony on. Null answers `offered: false`. */
+  client: Pick<AuthClient<never>, 'signInWithPasskey'> | null;
+  /**
+   * Answers whether this deployment offers passwordless sign-in. Pass
+   * `@webbpulse/discovery`'s `passkeyLoginAvailability`, bound to the identity
+   * URL. Read through a ref, so it need not be memoised.
+   */
+  probe: () => Promise<'available' | 'unavailable' | 'unknown'>;
+  /**
+   * The address already in the form, so a known user skips the chooser. Blank
+   * or omitted runs the discoverable flow.
+   */
+  email?: string;
+  /**
+   * Called for every outcome except a cancellation, which is silent because a
+   * dismissed prompt is not a failure to report.
+   */
+  onResult: (result: PasskeySignInOutcome) => void | Promise<void>;
+  /**
+   * Whether to arm conditional mediation on mount. Defaults to true; pass false
+   * in a test, where an autofill ceremony has nothing to talk to.
+   */
+  conditional?: boolean;
+}
+
+/**
+ * The passkey sign-in button, headless: whether to draw it, whether a ceremony
+ * is running, and the click handler. No markup, so a product keeps its own.
+ *
+ * Conditional mediation is armed in an effect once the deployment and the
+ * browser both say yes, and torn down through an `AbortController` on cleanup,
+ * so a ceremony does not outlive the page that started it. Its result is
+ * dropped when the signal aborted, since a torn-down ceremony reports a
+ * cancellation the caller never asked for. `onResult` is read through a ref, so
+ * a handler redefined on every render does not restart the ceremony.
+ *
+ * @example
+ * ```tsx
+ * const button = usePasskeySignInButton({ client, probe, email, onResult });
+ * if (!button.offered) return null;
+ * return (
+ *   <Button onClick={() => void button.signIn()} disabled={button.busy}>
+ *     {button.busy ? 'Waiting for your passkey' : 'Sign in with a passkey'}
+ *   </Button>
+ * );
+ * ```
+ */
+export function usePasskeySignInButton(
+  options: PasskeySignInButtonOptions
+): PasskeySignInButton {
+  const { client, email, conditional = true } = options;
+  const [busy, setBusy] = useState(false);
+
+  const handler = useRef(options.onResult);
+  handler.current = options.onResult;
+
+  const probe = useRef(options.probe);
+  probe.current = options.probe;
+
+  const stableProbe = useCallback(() => probe.current(), []);
+  const support = usePasskeySignInSupport({
+    probe: stableProbe,
+    enabled: client !== null,
+  });
+
+  const armed = conditional && support.conditional && client !== null;
+
+  useEffect(() => {
+    if (!armed || client === null) return;
+    const controller = new AbortController();
+
+    void client
+      .signInWithPasskey({
+        mediation: 'conditional',
+        signal: controller.signal,
+      })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        if (!result.ok) return;
+        void handler.current(result);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      controller.abort();
+    };
+  }, [armed, client]);
+
+  const signIn = useCallback(async (): Promise<void> => {
+    if (client === null) return;
+    setBusy(true);
+    try {
+      const trimmed = email?.trim() ?? '';
+      const result = await client.signInWithPasskey(
+        trimmed === ''
+          ? { mediation: 'optional' }
+          : { email: trimmed, mediation: 'optional' }
+      );
+      if (!result.ok && result.reason === 'cancelled') return;
+      await handler.current(result);
+    } catch {
+      return;
+    } finally {
+      setBusy(false);
+    }
+  }, [client, email]);
+
+  return {
+    offered: client !== null && support.offered,
+    busy,
+    conditional: support.conditional,
+    signIn,
+  };
+}
+
+/** One provider's button, as {@link useOAuthProviderLinks} reports it. */
+export interface OAuthProviderLink {
+  /** The provider id, `google` or `github` in the baseline. Use as the key. */
+  id: string;
+  /** The name to show a user, as the deployment reported it. */
+  displayName: string;
+  /**
+   * Where the anchor points. A real navigation, because the start route
+   * redirects to a host that sends no CORS headers.
+   */
+  href: string;
+}
+
+/** Options for {@link useOAuthProviderLinks}. */
+export interface OAuthProviderLinksOptions {
+  /** The client that builds the start URLs. Null answers an empty list. */
+  client: Pick<AuthClient<never>, 'oauthStartUrl'> | null;
+  /** The providers the deployment reported, from `useOAuthProviders`. */
+  providers: readonly { id: string; displayName: string }[];
+  /** Where to land after the callback, as a path on this frontend. */
+  returnTo?: string;
+}
+
+/**
+ * The "Continue with X" links, one per provider the deployment offers, with the
+ * start URL already built. State only, so a product keeps its own anchors,
+ * icons and copy.
+ *
+ * An empty array is the one signal a caller needs to render nothing: no client
+ * and no providers both reduce to it.
+ *
+ * @example
+ * ```tsx
+ * const providers = useOAuthProviders({ identityOrigin });
+ * const links = useOAuthProviderLinks({ client, providers, returnTo });
+ * return links.map((link) => (
+ *   <a key={link.id} href={link.href}>Continue with {link.displayName}</a>
+ * ));
+ * ```
+ */
+export function useOAuthProviderLinks(
+  options: OAuthProviderLinksOptions
+): OAuthProviderLink[] {
+  const { client, providers, returnTo } = options;
+
+  return useMemo(() => {
+    if (client === null) return [];
+    return providers.map((provider) => ({
+      id: provider.id,
+      displayName: provider.displayName,
+      href: client.oauthStartUrl(
+        provider.id,
+        returnTo === undefined ? {} : { returnTo }
+      ),
+    }));
+  }, [client, providers, returnTo]);
 }

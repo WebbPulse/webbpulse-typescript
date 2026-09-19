@@ -41,6 +41,14 @@ the applications import them rather than keeping local copies:
   provider. `useOAuthCallback` handles the callback landing page,
   `usePasskeySignInSupport` decides whether to draw a passkey button, and
   `useEmailVerificationLink` spends a mailed token exactly once.
+- **The identity client singleton** is `createIdentityClientSingleton` in
+  `@webbpulse/auth/browser`. The lazy build, the origin derivation, the
+  current-user load and the two test seams each application had copied, so an
+  `identityClient` module is a configuration call plus its own re-exports.
+- **The sign-in controls' behaviour** is `usePasskeySignInButton` and
+  `useOAuthProviderLinks` in `@webbpulse/auth/react`: the conditional-mediation
+  ceremony and its teardown, and the provider list turned into built start URLs.
+  State and handlers only, so each application keeps its own markup.
 - **The identity settings panels** are `@webbpulse/auth/panels`: the load,
   mutate, report and reload loop behind the passkey, connected accounts and TOTP
   pages, headless, so each application keeps its own markup and copy.
