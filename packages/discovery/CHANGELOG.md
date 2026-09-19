@@ -1,5 +1,12 @@
 # @webbpulse/discovery
 
+## 0.13.3
+
+### Patch Changes
+
+- Updated dependencies [6375ebe]
+  - @webbpulse/auth@0.15.0
+
 ## 0.13.2
 
 ### Patch Changes
