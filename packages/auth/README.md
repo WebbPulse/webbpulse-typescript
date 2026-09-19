@@ -405,6 +405,52 @@ The refresh cannot recurse: `/api/auth/refresh` is called with retries disabled,
 and the 401 retry in `@webbpulse/api-client` calls `requestOnce` at most twice,
 with `skipAuthRetry` on the replay.
 
+## The identity client singleton
+
+`@webbpulse/auth/browser` builds the lazy singleton every product wraps around
+`createAuthClient`, so an application's `identityClient` module is a
+configuration call plus its own re-exports rather than eighty copied lines.
+
+```ts
+import { createIdentityClientSingleton } from '@webbpulse/auth/browser';
+
+const identity = createIdentityClientSingleton<UserRead>({
+  apiBaseUrl: () => appConfig.apiBaseUrl,
+});
+
+export const getIdentityClient = identity.getClient;
+export const identityOrigin = identity.identityOrigin;
+export const identityUrl = identity.identityUrl;
+export const CURRENT_USER_PATH = identity.currentUserPath;
+export const setWebAuthnAdapterForTests = identity.setWebAuthnAdapterForTests;
+export const resetIdentityClientForTests = identity.resetForTests;
+```
+
+- **The client is built on the first `getClient()`**, not at import time, so a
+  module importing it does not construct a network capable object to be
+  imported. The result is cached, a null included.
+- **Pass `apiBaseUrl` as a thunk** when a test restubs the environment between
+  cases: it is read at each build rather than once at module load, so
+  `resetForTests()` then `getClient()` picks up the new value. A constant is
+  fine when nothing restubs.
+- **An origin that reduces to the empty string falls back to
+  `location.origin`**, which is what a root relative base behind a dev proxy
+  wants. `relativeAs: 'passthrough'` keeps the base instead, for a deployment
+  whose identity routes are not at the root.
+- **`credentials: 'include'` and a 30 second timeout** are the defaults, since
+  the refresh cookie needs the first and every product chose the second.
+- **`currentUserPath` defaults to `/api/users/me`** and carries the `/api`
+  prefix, because the origin is stripped back to a bare one. The default
+  `loadUser` reads it and unwraps `response.data ?? null`.
+- **`setWebAuthnAdapterForTests` must run before the first `getClient()`**,
+  since `AuthClient` fixes the adapter at construction. `resetForTests` disposes
+  the cached client and clears the seam.
+
+`identityOriginFrom` and `identityUrl` are exported from this entry too, the
+same functions `@webbpulse/discovery` exports. They are carried here rather than
+imported, because discovery already depends on this package and the reverse edge
+would be a cycle.
+
 ## Settings panels
 
 `@webbpulse/auth/panels` holds the state machines the identity settings pages
@@ -449,6 +495,64 @@ apply the same shape to a collection this package does not model.
 to arm conditional mediation, asking the browser only after the deployment says
 passwordless is on. Pass `@webbpulse/discovery`'s `passkeyLoginAvailability` as
 the probe.
+
+`usePasskeySignInButton` is the whole button above it, headless: the support
+gate, the conditional ceremony and the click handler in one, returning state and
+handlers only so a product keeps its own markup and copy.
+
+```tsx
+const button = usePasskeySignInButton({
+  client: getIdentityClient(),
+  probe: () => passkeyLoginAvailability(identityUrl(PASSKEY_AVAILABILITY_PATH)),
+  email,
+  onResult: (result) => {
+    if (result.ok && result.kind === 'mfa-required') setTicket(result.ticket);
+  },
+});
+
+if (!button.offered) return null;
+return (
+  <Button onClick={() => void button.signIn()} disabled={button.busy}>
+    {button.busy ? 'Waiting for your passkey' : 'Sign in with a passkey'}
+  </Button>
+);
+```
+
+- **Conditional mediation is armed in an effect and torn down on cleanup**
+  through an `AbortController`, so a ceremony does not outlive the page. A
+  result arriving after the abort is dropped, since a torn-down ceremony reports
+  a cancellation nobody asked for.
+- **`onResult` is read through a ref**, so a handler redefined on every render
+  does not restart the ceremony, and it need not be memoised. `probe` is read
+  the same way.
+- **A cancellation is silent** on both paths: a dismissed prompt is not a
+  failure to render. Every other outcome, refusals included, reaches `onResult`.
+- **A thrown ceremony goes to `onError`**, which the client reserves for a
+  network failure or a server error it could not turn into an outcome. Without
+  `onError`, `signIn` rejects with that error, so pass one from a click handler
+  that does not await the promise, or it surfaces as an unhandled rejection.
+- **`offered` is false without a client**, so a deployment that could not build
+  one draws nothing rather than a button that cannot work.
+
+`useOAuthProviderLinks` turns the deployment's provider list into one link each,
+with the start URL already built. Anchors, because the start route redirects to
+a host that sends no CORS headers, so it must be a real navigation.
+
+```tsx
+const providers = useOAuthProviders({ identityOrigin: identityOrigin() });
+const links = useOAuthProviderLinks({ client, providers, returnTo });
+
+return links.map((link) => (
+  <a key={link.id} href={link.href}>
+    <ProviderIcon provider={link.id} />
+    <span>Continue with {link.displayName}</span>
+  </a>
+));
+```
+
+An empty array is the one signal to render nothing: no client and no providers
+both reduce to it. The result is memoised on the client, the list and
+`returnTo`, so it is stable across an unrelated re-render.
 
 `useEmailVerificationLink` spends a mailed verification token exactly once on
 mount and reports `confirming`, `confirmed`, `missing-token`, `refused` or
@@ -514,13 +618,21 @@ Types accompany each group, including `AuthClientOptions`, `AuthState`,
 `@webbpulse/auth/react`
 
 `AuthProvider`, `useAuth`, `useAuthClient`, `useAuthState`, `useSessionEnded`,
-`useOAuthCallback`, `usePasskeySignInSupport`, `useEmailVerificationLink`,
-`useQueryAuth`, and the deprecated `SessionProvider`, `useSession`,
-`useSessionState`, `useSessionManager`, with `AuthProviderProps`,
-`UseAuthResult`, `AnyAuthClient`, `PasskeySignInSupport`,
-`PasskeySignInSupportOptions`, `EmailVerificationLinkState`,
-`EmailVerificationLinkOptions`, `QueryAuth`, `SessionProviderProps`,
-`UseSessionResult`, `AnySessionManager` and `OAuthCallbackHandler`.
+`useOAuthCallback`, `usePasskeySignInSupport`, `usePasskeySignInButton`,
+`useOAuthProviderLinks`, `useEmailVerificationLink`, `useQueryAuth`, and the
+deprecated `SessionProvider`, `useSession`, `useSessionState`,
+`useSessionManager`, with `AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`,
+`PasskeySignInSupport`, `PasskeySignInSupportOptions`, `PasskeySignInButton`,
+`PasskeySignInButtonOptions`, `OAuthProviderLink`, `OAuthProviderLinksOptions`,
+`EmailVerificationLinkState`, `EmailVerificationLinkOptions`, `QueryAuth`,
+`SessionProviderProps`, `UseSessionResult`, `AnySessionManager` and
+`OAuthCallbackHandler`.
+
+`@webbpulse/auth/browser`
+
+`createIdentityClientSingleton`, `identityOriginFrom`, `identityUrl` and
+`DEFAULT_CURRENT_USER_PATH`, with `IdentityClientSingleton`,
+`IdentityClientSingletonOptions`, `RelativeOriginMode` and `ConfigValue`.
 
 `@webbpulse/auth/panels`
 

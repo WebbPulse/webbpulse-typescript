@@ -1,7 +1,12 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/react.ts', 'src/panels/index.ts'],
+  entry: [
+    'src/index.ts',
+    'src/browser.ts',
+    'src/react.ts',
+    'src/panels/index.ts',
+  ],
   format: ['esm'],
   dts: false,
   sourcemap: true,
