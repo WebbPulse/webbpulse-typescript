@@ -9,6 +9,7 @@ import {
   conditionalMediationAvailable,
   credentialToJSON,
   isPasskeyCancellation,
+  isPasskeyUnsupported,
   parsePasskey,
   parsePasskeyChallenge,
   parsePasskeys,
@@ -200,6 +201,21 @@ describe('isPasskeyCancellation', () => {
     expect(isPasskeyCancellation(new Error('boom'))).toBe(false);
     expect(isPasskeyCancellation(null)).toBe(false);
     expect(isPasskeyCancellation('NotAllowedError')).toBe(false);
+  });
+});
+
+describe('isPasskeyUnsupported', () => {
+  it('recognises a browser refusing the ceremony', () => {
+    expect(isPasskeyUnsupported({ name: 'NotSupportedError' })).toBe(true);
+  });
+
+  it('does not claim a dismissed prompt', () => {
+    expect(isPasskeyUnsupported({ name: 'NotAllowedError' })).toBe(false);
+  });
+
+  it('does not claim a non-object', () => {
+    expect(isPasskeyUnsupported('NotSupportedError')).toBe(false);
+    expect(isPasskeyUnsupported(null)).toBe(false);
   });
 });
 
@@ -449,6 +465,8 @@ describe('classifyPasskeyError', () => {
     'unavailable',
     'rate-limited',
     'cancelled',
+    'unsupported',
+    'no-passkeys',
   ] as const);
 
   /**
@@ -477,6 +495,41 @@ describe('classifyPasskeyError', () => {
       reason: 'cancelled',
       code: undefined,
     });
+  });
+
+  it('classifies a browser that will not run the ceremony', () => {
+    const refusal = classifyPasskeyError(
+      Object.assign(new Error('not supported'), { name: 'NotSupportedError' }),
+      ALL
+    );
+    expect(refusal).toEqual({
+      ok: false,
+      reason: 'unsupported',
+      code: undefined,
+      message: 'Passkeys are not available in this browser.',
+    });
+  });
+
+  it('classifies any conditional rejection as unsupported', () => {
+    expect(
+      classifyPasskeyError(new Error('no autofill here'), ALL, {
+        conditionalMediation: true,
+      })
+    ).toMatchObject({ reason: 'unsupported' });
+  });
+
+  it('leaves a conditional cancellation as cancelled', () => {
+    expect(
+      classifyPasskeyError({ name: 'AbortError' }, ALL, {
+        conditionalMediation: true,
+      })
+    ).toMatchObject({ reason: 'cancelled' });
+  });
+
+  it('does not classify an unsupported the caller does not model', () => {
+    expect(
+      classifyPasskeyError({ name: 'NotSupportedError' }, new Set(['rejected']))
+    ).toBeNull();
   });
 
   it('does not classify a cancellation the caller does not model', () => {
@@ -513,11 +566,19 @@ describe('classifyPasskeyError', () => {
       ['LAST_CREDENTIAL', 'last-credential'],
       ['PASSKEY_NOT_FOUND', 'not-found'],
       ['PASSKEY_NAME_REQUIRED', 'name-required'],
+      ['PASSKEY_NONE_REGISTERED', 'no-passkeys'],
     ];
     for (const [code, reason] of cases) {
       const error = await apiErrorFor(envelope(409, code));
       expect(classifyPasskeyError(error, ALL)).toMatchObject({ reason });
     }
+  });
+
+  it('still reads the envelope on a conditional server refusal', async () => {
+    const error = await apiErrorFor(envelope(401, 'PASSKEY_REJECTED'));
+    expect(
+      classifyPasskeyError(error, ALL, { conditionalMediation: true })
+    ).toMatchObject({ reason: 'rejected', code: 'PASSKEY_REJECTED' });
   });
 
   it('reads Retry-After off a bare 429', async () => {
@@ -680,6 +741,30 @@ describe('AuthClient.registerPasskey', () => {
     expect(outcome).toMatchObject({ ok: false, reason: 'cancelled' });
     expect(auth.getState().error).toBeNull();
     expect(auth.getState().status).toBe('authenticated');
+  });
+
+  it('reports a browser that will not enrol as unsupported', async () => {
+    const webAuthn = stubWebAuthn({
+      create: () =>
+        Promise.reject(
+          new DOMException('not supported here', 'NotSupportedError')
+        ),
+    });
+    const auth = await signedIn(
+      passkeyRoutes({
+        '/api/auth/passkeys/register/options': () =>
+          jsonResponse({ challenge_id: 'ch_1', publicKey: {} }),
+      }),
+      { webAuthn }
+    );
+
+    expect(await auth.registerPasskey()).toEqual({
+      ok: false,
+      reason: 'unsupported',
+      code: undefined,
+      message: 'Passkeys are not available in this browser.',
+    });
+    expect(auth.getState().error).toBeNull();
   });
 
   it('reports a deployment with passkeys switched off', async () => {
@@ -915,6 +1000,88 @@ describe('AuthClient.signInWithPasskey', () => {
     expect(auth.getState().error).toBeNull();
   });
 
+  it('reports a NotSupportedError as unsupported rather than throwing', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () =>
+        Promise.reject(
+          new DOMException(
+            "Resident credentials or empty 'allowCredentials' lists are not supported at this time.",
+            'NotSupportedError'
+          )
+        ),
+    });
+    const auth = authWith(
+      routedFetch({
+        '/api/auth/login/passkey/options': () =>
+          jsonResponse({ challenge_id: 'ch_1', publicKey: {} }),
+      }),
+      { webAuthn }
+    );
+
+    expect(await auth.signInWithPasskey()).toEqual({
+      ok: false,
+      reason: 'unsupported',
+      code: undefined,
+      message: 'Passkeys are not available in this browser.',
+    });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('reports a conditional NotSupportedError the same way', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () =>
+        Promise.reject(
+          new DOMException(
+            "Resident credentials or empty 'allowCredentials' lists are not supported at this time.",
+            'NotSupportedError'
+          )
+        ),
+    });
+    const auth = authWith(
+      routedFetch({
+        '/api/auth/login/passkey/options': () =>
+          jsonResponse({ challenge_id: 'ch_1', publicKey: {} }),
+      }),
+      { webAuthn }
+    );
+
+    expect(
+      await auth.signInWithPasskey({ mediation: 'conditional' })
+    ).toMatchObject({ reason: 'unsupported' });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('models any conditional ceremony failure rather than throwing', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () => Promise.reject(new Error('the autofill went nowhere')),
+    });
+    const auth = authWith(
+      routedFetch({
+        '/api/auth/login/passkey/options': () =>
+          jsonResponse({ challenge_id: 'ch_1', publicKey: {} }),
+      }),
+      { webAuthn }
+    );
+
+    expect(
+      await auth.signInWithPasskey({ mediation: 'conditional' })
+    ).toMatchObject({ reason: 'unsupported' });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('still throws a conditional failure that came off the options leg', async () => {
+    const auth = authWith(
+      routedFetch({
+        '/api/auth/login/passkey/options': () => new Error('offline'),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    await expect(
+      auth.signInWithPasskey({ mediation: 'conditional' })
+    ).rejects.toThrow();
+  });
+
   it('reports an aborted conditional ceremony as cancelled', async () => {
     const webAuthn = stubWebAuthn({
       get: () =>
@@ -1145,6 +1312,230 @@ describe('AuthClient.deletePasskey', () => {
 
     expect(auth.getState().status).toBe('authenticated');
     expect(auth.getState().error).toBeNull();
+  });
+});
+
+describe('AuthClient.stepUpWithPasskey', () => {
+  /** The two legs a passkey step-up runs, wired to a fresher token. */
+  function stepUpRoutes(
+    overrides: {
+      [suffix: string]: (call: number, init: RequestInit) => Response | Error;
+    } = {}
+  ): ReturnType<typeof vi.fn> {
+    return passkeyRoutes({
+      '/api/auth/step-up/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { userVerification: 'required' },
+        }),
+      '/api/auth/step-up': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 }),
+      ...overrides,
+    });
+  }
+
+  it('adopts the fresher token the way a code step-up does', async () => {
+    const fetchMock = stepUpRoutes();
+    const auth = await signedIn(fetchMock, { webAuthn: stubWebAuthn() });
+
+    const outcome = await auth.stepUpWithPasskey();
+
+    expect(outcome).toEqual({ ok: true, expiresIn: 600 });
+    expect(auth.getAccessToken()).toBe('a2');
+    expect(auth.getState().status).toBe('authenticated');
+  });
+
+  it('posts an empty options body with the bearer token', async () => {
+    const fetchMock = stepUpRoutes();
+    const auth = await signedIn(fetchMock, { webAuthn: stubWebAuthn() });
+
+    await auth.stepUpWithPasskey();
+
+    const call = fetchMock.mock.calls.find((entry) =>
+      String(entry[0]).includes('/step-up/passkey/options')
+    );
+    const init = call?.[1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({});
+    expect(new Headers(init.headers).get('authorization')).toBe('Bearer a1');
+  });
+
+  it('verifies on the step-up route with the challenge and the assertion', async () => {
+    const fetchMock = stepUpRoutes();
+    const auth = await signedIn(fetchMock, { webAuthn: stubWebAuthn() });
+
+    await auth.stepUpWithPasskey();
+
+    const call = fetchMock.mock.calls.find(
+      (entry) =>
+        String(entry[0]).includes('/api/auth/step-up') &&
+        !String(entry[0]).includes('/passkey/options')
+    );
+    expect(JSON.parse((call?.[1] as RequestInit).body as string)).toEqual({
+      challenge_id: 'ch_1',
+      credential: { id: 'cred_1', type: 'public-key' },
+    });
+  });
+
+  it('hands the authenticator the options the server scoped', async () => {
+    const webAuthn = stubWebAuthn();
+    const auth = await signedIn(stepUpRoutes(), { webAuthn });
+
+    await auth.stepUpWithPasskey();
+
+    expect(webAuthn.get).toHaveBeenCalledWith({
+      publicKey: { userVerification: 'required' },
+    });
+  });
+
+  it('passes an abort signal through to the ceremony', async () => {
+    const webAuthn = stubWebAuthn();
+    const auth = await signedIn(stepUpRoutes(), { webAuthn });
+    const controller = new AbortController();
+
+    await auth.stepUpWithPasskey({ signal: controller.signal });
+
+    expect(webAuthn.get).toHaveBeenCalledWith({
+      publicKey: { userVerification: 'required' },
+      signal: controller.signal,
+    });
+  });
+
+  it('reports an account with no passkey as no-passkeys', async () => {
+    const auth = await signedIn(
+      stepUpRoutes({
+        '/api/auth/step-up/passkey/options': () =>
+          envelope(
+            409,
+            'PASSKEY_NONE_REGISTERED',
+            'This account has no passkey.'
+          ),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.stepUpWithPasskey()).toEqual({
+      ok: false,
+      reason: 'no-passkeys',
+      code: 'PASSKEY_NONE_REGISTERED',
+      message: 'This account has no passkey.',
+    });
+    expect(auth.getAccessToken()).toBe('a1');
+    expect(auth.getState().status).toBe('authenticated');
+  });
+
+  it('keeps the old token on an assertion the server would not take', async () => {
+    const auth = await signedIn(
+      stepUpRoutes({
+        '/api/auth/step-up': () => envelope(401, 'PASSKEY_REJECTED'),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.stepUpWithPasskey()).toMatchObject({
+      ok: false,
+      reason: 'rejected',
+      code: 'PASSKEY_REJECTED',
+    });
+    expect(auth.getAccessToken()).toBe('a1');
+  });
+
+  it('reports a dismissed prompt as cancelled', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () =>
+        Promise.reject(
+          Object.assign(new Error('dismissed'), { name: 'NotAllowedError' })
+        ),
+    });
+    const auth = await signedIn(stepUpRoutes(), { webAuthn });
+
+    expect(await auth.stepUpWithPasskey()).toMatchObject({
+      ok: false,
+      reason: 'cancelled',
+    });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('reports a browser that will not run the ceremony as unsupported', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () =>
+        Promise.reject(
+          new DOMException('not supported here', 'NotSupportedError')
+        ),
+    });
+    const auth = await signedIn(stepUpRoutes(), { webAuthn });
+
+    expect(await auth.stepUpWithPasskey()).toMatchObject({
+      ok: false,
+      reason: 'unsupported',
+    });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('reports a deployment with passkeys switched off', async () => {
+    const auth = await signedIn(
+      stepUpRoutes({
+        '/api/auth/step-up/passkey/options': () =>
+          envelope(503, 'PASSKEYS_DISABLED', 'Passkeys are not available.'),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.stepUpWithPasskey()).toMatchObject({
+      reason: 'unavailable',
+      code: 'PASSKEYS_DISABLED',
+    });
+  });
+
+  it('reports a rate limit with the retry hint', async () => {
+    const auth = await signedIn(
+      stepUpRoutes({
+        '/api/auth/step-up/passkey/options': () =>
+          envelope(429, undefined, 'Too many attempts.', { retryAfter: '30' }),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.stepUpWithPasskey()).toMatchObject({
+      reason: 'rate-limited',
+      retryAfter: 30,
+    });
+  });
+
+  it('rejects a response with no token rather than reporting success', async () => {
+    const auth = await signedIn(
+      stepUpRoutes({
+        '/api/auth/step-up': () => jsonResponse({ token_type: 'Bearer' }),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    await expect(auth.stepUpWithPasskey()).rejects.toThrow(/no access token/);
+  });
+
+  it('throws rather than calling the server with no session', async () => {
+    const auth = authWith(routedFetch({}), { webAuthn: stubWebAuthn() });
+
+    await expect(auth.stepUpWithPasskey()).rejects.toBeInstanceOf(
+      AuthSessionEndedError
+    );
+  });
+
+  it('uses the overridden options route', async () => {
+    const fetchMock = passkeyRoutes({
+      '/identity/step-up/options': () =>
+        jsonResponse({ challenge_id: 'ch_1', publicKey: {} }),
+      '/identity/step-up': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 }),
+    });
+    const auth = await signedIn(fetchMock, {
+      webAuthn: stubWebAuthn(),
+      paths: {
+        stepUpPasskeyOptions: '/identity/step-up/options',
+        stepUp: '/identity/step-up',
+      },
+    });
+
+    expect(await auth.stepUpWithPasskey()).toMatchObject({ ok: true });
   });
 });
 

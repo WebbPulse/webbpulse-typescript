@@ -159,6 +159,7 @@ await auth.activateTotp({ code }); // { recoveryCodes }
 await auth.disableTotp({ code }); // { ok: true }
 await auth.regenerateRecoveryCodes({ code }); // { recoveryCodes }
 await auth.stepUp({ code }); // adopts a fresher access token
+await auth.stepUpWithPasskey(); // the same, from a passkey assertion
 ```
 
 The first login leg answers 200 with the challenge, not 401: nothing was
@@ -180,12 +181,22 @@ URI to a generator such as `@webbpulse/qrcode`.
 - **`stepUp` is not a second login.** No refresh family starts and the cookie is
   untouched. The new token carries a fresh `auth_time` and a widened `amr`, and
   is adopted into the store, so it is not in the outcome.
+- **`stepUpWithPasskey` is the same step-up run against a factor** rather than a
+  typed code, for gating a sensitive action on a passkey. It runs an options leg
+  scoped to the signed-in caller, with `userVerification: 'required'`, then
+  verifies the assertion on the step-up route itself, adopting the token exactly
+  as `stepUp` does. It needs a session, so it rejects with
+  `AuthSessionEndedError` rather than opening a prompt with no token, and it
+  settles through the passkey refusals: `rejected`, `unavailable`,
+  `rate-limited`, `cancelled`, `unsupported` and `no-passkeys`. The last means
+  the account has no passkey enrolled; offer `stepUp` with a code instead.
 
 Refusal reasons: `invalid-code`, `already-enabled`, `no-pending-enrolment`,
 `rate-limited`, `unavailable`. These return outcomes rather than throwing, and
 reject only for a network failure, a 500, or a 401 the client could not repair.
 
-`paths`: `totpEnrol`, `totpActivate`, `totpDisable`, `recoveryCodes`, `stepUp`.
+`paths`: `totpEnrol`, `totpActivate`, `totpDisable`, `recoveryCodes`, `stepUp`,
+`stepUpPasskeyOptions`.
 
 ## Email verification and password reset
 
@@ -359,6 +370,14 @@ at 64 characters and replaced with `Passkey` when empty.
   are deployment configuration, so hide the control. `code` tells them apart.
 - **`cancelled` does not come from the server.** A dismissed prompt is a
   `DOMException`, recognised by `isPasskeyCancellation`, not an error to render.
+- **`unsupported` does not either.** The support probes are advisory: a browser
+  can accept `conditionalMediationAvailable()` and then reject the request with
+  a `NotSupportedError`, which headless Chromium does for a discoverable
+  credential. That name, and every browser-side rejection of a
+  `mediation: 'conditional'` ceremony, comes back as `unsupported` with
+  `state.error` left null, so an autofill sign-in armed on mount needs no
+  `.catch` and raises no unhandled rejection. Hide the control rather than
+  render it. `isPasskeyUnsupported` recognises the name on its own.
 
 `listPasskeys` returns the credential id, label, two timestamps, reported
 transports, `aaguid`, the backup flags and whether the user was verified at
@@ -373,7 +392,8 @@ shapes are py_webauthn's. `navigator.credentials` is injected through the
 a conditional sign-in can pass `mediation` and `signal`.
 
 `paths`: `passkeyRegisterOptions`, `passkeyRegisterVerify`,
-`passkeyLoginOptions`, `passkeyLoginVerify`, `passkeys`.
+`passkeyLoginOptions`, `passkeyLoginVerify`, `passkeys`,
+`stepUpPasskeyOptions`.
 
 ## Errors
 
@@ -607,7 +627,8 @@ email flows, and reports refusals as outcomes rather than throwing.
   `stripOAuthParams`, `parseOAuthLinks`, `describeOAuthCallbackError`,
   `classifyOAuthError`, and the `OAUTH_*` parameter constants.
 - Passkeys: `passkeysSupported`, `conditionalMediationAvailable`,
-  `isPasskeyCancellation`, `toCreationOptions`, `toRequestOptions`,
+  `isPasskeyCancellation`, `isPasskeyUnsupported`, `toCreationOptions`,
+  `toRequestOptions`,
   `credentialToJSON`, `base64UrlToBuffer`, `bufferToBase64Url`, `parsePasskey`,
   `parsePasskeys`, `parsePasskeyChallenge`, `classifyPasskeyError`.
 

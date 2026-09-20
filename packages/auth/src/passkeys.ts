@@ -108,7 +108,31 @@ export interface PasskeyCancelled {
   message: string;
 }
 
-/** Every refusal the seven routes and the browser can produce. */
+/**
+ * A ceremony this browser will not run, whatever it reported beforehand. The
+ * support probes are advisory: a browser can accept
+ * {@link conditionalMediationAvailable} and then refuse the request with a
+ * `NotSupportedError`, which headless Chromium does for a discoverable
+ * credential. Not a server refusal, so `code` is always `undefined` and the
+ * message is local. Hide the control rather than render a failure.
+ */
+export interface PasskeysNotSupported {
+  ok: false;
+  reason: 'unsupported';
+  code: undefined;
+  message: string;
+}
+
+/**
+ * A step-up on an account with no passkey enrolled. The remedy is to enrol one,
+ * or to step up with a code instead, so a product should offer that path rather
+ * than treat it as a failure.
+ */
+export interface PasskeyNoneRegistered extends PasskeyRefusalFields {
+  reason: 'no-passkeys';
+}
+
+/** Every refusal the routes and the browser can produce. */
 export type PasskeyRefusal =
   | PasskeyRejected
   | PasskeyAlreadyRegistered
@@ -117,7 +141,9 @@ export type PasskeyRefusal =
   | PasskeyNameRequired
   | PasskeysUnavailable
   | PasskeyRateLimited
-  | PasskeyCancelled;
+  | PasskeyCancelled
+  | PasskeysNotSupported
+  | PasskeyNoneRegistered;
 
 /** A passkey that was enrolled. */
 export interface PasskeyRegistered {
@@ -133,7 +159,8 @@ export type PasskeyRegistrationOutcome =
   | PasskeyAlreadyRegistered
   | PasskeysUnavailable
   | PasskeyRateLimited
-  | PasskeyCancelled;
+  | PasskeyCancelled
+  | PasskeysNotSupported;
 
 /**
  * A sign-in that completed. The refresh cookie is set and the access token is
@@ -169,7 +196,8 @@ export type PasskeySignInOutcome =
   | PasskeyRejected
   | PasskeysUnavailable
   | PasskeyRateLimited
-  | PasskeyCancelled;
+  | PasskeyCancelled
+  | PasskeysNotSupported;
 
 /** The passkeys on the account. */
 export interface PasskeysLoaded {
@@ -203,6 +231,28 @@ export type PasskeyDeleteOutcome =
   | PasskeyLastCredential
   | PasskeysUnavailable;
 
+/**
+ * A step-up that produced a fresher access token from a passkey assertion. The
+ * same body as a code step-up, so the two paths are interchangeable to a
+ * caller: the token is adopted into the client's in-memory store rather than
+ * returned.
+ */
+export interface PasskeyStepUpSucceeded {
+  ok: true;
+  /** Seconds until the new access token expires, when the server said. */
+  expiresIn: number | undefined;
+}
+
+/** What {@link AuthClient.stepUpWithPasskey} resolves to. */
+export type PasskeyStepUpOutcome =
+  | PasskeyStepUpSucceeded
+  | PasskeyRejected
+  | PasskeysUnavailable
+  | PasskeyRateLimited
+  | PasskeyCancelled
+  | PasskeysNotSupported
+  | PasskeyNoneRegistered;
+
 /** Where the passkey routes live, relative to the base URL. */
 export interface PasskeyPaths {
   /** Defaults to `/api/auth/passkeys/register/options`. */
@@ -213,6 +263,12 @@ export interface PasskeyPaths {
   passkeyLoginOptions?: string;
   /** Defaults to `/api/auth/login/passkey/verify`. */
   passkeyLoginVerify?: string;
+  /**
+   * Defaults to `/api/auth/step-up/passkey/options`. The options leg of a
+   * passkey step-up, which is scoped to the signed-in caller and so needs a
+   * bearer token; the verify leg is the ordinary `stepUp` path.
+   */
+  stepUpPasskeyOptions?: string;
   /**
    * Defaults to `/api/auth/passkeys`: the collection for the list, and the base
    * the rename and the delete append a credential id to.
@@ -298,6 +354,21 @@ export function isPasskeyCancellation(error: unknown): boolean {
   }
   const name = (error as { name?: unknown }).name;
   return name === 'NotAllowedError' || name === 'AbortError';
+}
+
+/**
+ * True when a thrown value is the browser refusing to run the ceremony at all,
+ * rather than a user dismissing it. `NotSupportedError` is what a browser
+ * raises for a request it cannot satisfy, such as headless Chromium on a
+ * discoverable credential with an empty `allowCredentials`, and it arrives
+ * after the support probes have already said yes. Recognised by `name`, since
+ * `DOMException` is not defined in every runtime this package type checks in.
+ */
+export function isPasskeyUnsupported(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  return (error as { name?: unknown }).name === 'NotSupportedError';
 }
 
 /** base64url to `ArrayBuffer`, for the fallback conversions. */
@@ -542,12 +613,16 @@ function retryAfterOf(error: ApiError): number | undefined {
     : undefined;
 }
 
+/** The sentence a browser-side refusal to run the ceremony renders. */
+const UNSUPPORTED_MESSAGE = 'Passkeys are not available in this browser.';
+
 /**
  * Classifies a thrown error from one of the passkey routes, or returns null.
  * `expected` is the set of reasons the calling method models, so a refusal that
  * is an outcome on one route cannot become a silent success on another. A
  * cancelled browser prompt classifies here too, since both ceremony methods
- * treat it exactly as they treat a server refusal.
+ * treat it exactly as they treat a server refusal, as does a browser that
+ * refuses the ceremony outright once `unsupported` is in `expected`.
  */
 export function classifyPasskeyError<
   TReason extends PasskeyRefusal['reason'],
@@ -555,8 +630,23 @@ export function classifyPasskeyError<
     PasskeyRefusal,
     { reason: TReason }
   >,
->(error: unknown, expected: ReadonlySet<TReason>): TRefusal | null {
-  return classify(error, expected) as TRefusal | null;
+>(
+  error: unknown,
+  expected: ReadonlySet<TReason>,
+  options: PasskeyClassifyOptions = {}
+): TRefusal | null {
+  return classify(error, expected, options) as TRefusal | null;
+}
+
+/** What {@link classifyPasskeyError} needs to know about the ceremony. */
+export interface PasskeyClassifyOptions {
+  /**
+   * True when the throw came out of a `navigator.credentials.get` armed with
+   * `mediation: 'conditional'`. An autofill ceremony is speculative and its
+   * every browser-side rejection is a refusal to run rather than a failure,
+   * since nothing a user did started it and nothing they see reports it.
+   */
+  conditionalMediation?: boolean;
 }
 
 /**
@@ -566,7 +656,8 @@ export function classifyPasskeyError<
  */
 function classify(
   error: unknown,
-  expected: ReadonlySet<PasskeyRefusal['reason']>
+  expected: ReadonlySet<PasskeyRefusal['reason']>,
+  options: PasskeyClassifyOptions
 ): PasskeyRefusal | null {
   if (isPasskeyCancellation(error) && expected.has('cancelled')) {
     return {
@@ -574,6 +665,18 @@ function classify(
       reason: 'cancelled',
       code: undefined,
       message: 'The passkey prompt was dismissed.',
+    };
+  }
+  if (
+    expected.has('unsupported') &&
+    !(error instanceof ApiError) &&
+    (isPasskeyUnsupported(error) || options.conditionalMediation === true)
+  ) {
+    return {
+      ok: false,
+      reason: 'unsupported',
+      code: undefined,
+      message: UNSUPPORTED_MESSAGE,
     };
   }
   if (!(error instanceof ApiError)) {
@@ -607,6 +710,9 @@ function classify(
     expected.has('unavailable')
   ) {
     return { ...base, reason: 'unavailable' };
+  }
+  if (rawCode === 'PASSKEY_NONE_REGISTERED' && expected.has('no-passkeys')) {
+    return { ...base, reason: 'no-passkeys' };
   }
   if (
     (rawCode === 'PASSKEY_REJECTED' ||

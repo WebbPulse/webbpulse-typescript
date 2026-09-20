@@ -50,6 +50,7 @@ import {
   toCreationOptions,
   toRequestOptions,
   type PasskeyChallenge,
+  type PasskeyClassifyOptions,
   type PasskeyDeleteOutcome,
   type PasskeyListOutcome,
   type PasskeyPaths,
@@ -57,6 +58,7 @@ import {
   type PasskeyRegistrationOutcome,
   type PasskeyRenameOutcome,
   type PasskeySignInOutcome,
+  type PasskeyStepUpOutcome,
   type WebAuthnAdapter,
 } from './passkeys.js';
 
@@ -201,6 +203,7 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   totpDisable: '/api/auth/totp/disable',
   recoveryCodes: '/api/auth/recovery-codes',
   stepUp: '/api/auth/step-up',
+  stepUpPasskeyOptions: '/api/auth/step-up/passkey/options',
 };
 
 /** Construction options. */
@@ -344,9 +347,10 @@ const UNLINK_REASONS: ReadonlySet<
 ] as const);
 
 /**
- * The refusals each passkey method models, on the same rule again. `cancelled`
- * and `rate-limited` are on the two ceremony methods alone, and `unavailable` on
- * all five, since a deployment with passkeys off refuses every route.
+ * The refusals each passkey method models, on the same rule again. `cancelled`,
+ * `unsupported` and `rate-limited` are on the ceremony methods alone, and
+ * `unavailable` on all five management routes, since a deployment with passkeys
+ * off refuses every one of them.
  */
 const REGISTER_REASONS: ReadonlySet<
   | 'rejected'
@@ -354,17 +358,41 @@ const REGISTER_REASONS: ReadonlySet<
   | 'unavailable'
   | 'rate-limited'
   | 'cancelled'
+  | 'unsupported'
 > = new Set([
   'rejected',
   'already-registered',
   'unavailable',
   'rate-limited',
   'cancelled',
+  'unsupported',
 ] as const);
 
 const SIGN_IN_REASONS: ReadonlySet<
-  'rejected' | 'unavailable' | 'rate-limited' | 'cancelled'
-> = new Set(['rejected', 'unavailable', 'rate-limited', 'cancelled'] as const);
+  'rejected' | 'unavailable' | 'rate-limited' | 'cancelled' | 'unsupported'
+> = new Set([
+  'rejected',
+  'unavailable',
+  'rate-limited',
+  'cancelled',
+  'unsupported',
+] as const);
+
+const PASSKEY_STEP_UP_REASONS: ReadonlySet<
+  | 'rejected'
+  | 'unavailable'
+  | 'rate-limited'
+  | 'cancelled'
+  | 'unsupported'
+  | 'no-passkeys'
+> = new Set([
+  'rejected',
+  'unavailable',
+  'rate-limited',
+  'cancelled',
+  'unsupported',
+  'no-passkeys',
+] as const);
 
 const PASSKEY_LIST_REASONS: ReadonlySet<'unavailable'> = new Set([
   'unavailable',
@@ -830,11 +858,18 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * user verification and the account has TOTP, to be finished with
    * `completeTotp`. `mediation: 'conditional'` uses the autofill dropdown.
    *
+   * A browser that will not run the ceremony answers `unsupported` rather than
+   * throwing, and a conditional ceremony answers it for every browser-side
+   * rejection, so an autofill sign-in armed on mount needs no `.catch` and
+   * leaves `state.error` untouched.
+   *
    * @example
    * ```ts
    * const outcome = await auth.signInWithPasskey();
    * if (!outcome.ok) {
-   *   if (outcome.reason !== 'cancelled') setBanner(outcome.message);
+   *   if (outcome.reason !== 'cancelled' && outcome.reason !== 'unsupported') {
+   *     setBanner(outcome.message);
+   *   }
    * } else if (outcome.kind === 'mfa-required') {
    *   setPendingTicket(outcome.ticket);
    * } else {
@@ -849,6 +884,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       signal?: AbortSignal;
     } = {}
   ): Promise<PasskeySignInOutcome> {
+    const conditional = input.mediation === 'conditional';
+    let ceremony = false;
     try {
       const webAuthn = this.requireWebAuthn();
       const challenge = await this.passkeyChallenge(
@@ -864,7 +901,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       if (input.signal !== undefined) {
         request['signal'] = input.signal;
       }
+      ceremony = true;
       const assertion = await webAuthn.get(request);
+      ceremony = false;
       const outcome = await this.runTokenCall(this.paths.passkeyLoginVerify, {
         challenge_id: challenge.challengeId,
         credential: credentialToJSON(assertion),
@@ -883,7 +922,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
             expiresIn: outcome.expiresIn,
           };
     } catch (error) {
-      return this.settlePasskeyRefusal(error, SIGN_IN_REASONS);
+      return this.settlePasskeyRefusal(error, SIGN_IN_REASONS, {
+        conditionalMediation: conditional && ceremony,
+      });
     }
   }
 
@@ -967,13 +1008,16 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   /**
    * Turns a thrown passkey error into a modelled refusal, or rethrows. A refusal
    * is not a session ending, so `status` goes back to what the token says, while
-   * a 401 the client could not repair is left to throw.
+   * a 401 the client could not repair is left to throw. `options` carries what
+   * the classifier cannot see from the error alone, namely whether the ceremony
+   * was an autofill one.
    */
   private settlePasskeyRefusal<TReason extends PasskeyRefusal['reason']>(
     error: unknown,
-    reasons: ReadonlySet<TReason>
+    reasons: ReadonlySet<TReason>,
+    options: PasskeyClassifyOptions = {}
   ): Extract<PasskeyRefusal, { reason: TReason }> {
-    const refused = classifyPasskeyError(error, reasons);
+    const refused = classifyPasskeyError(error, reasons, options);
     this.setState({
       status: this.accessToken === null ? 'anonymous' : 'authenticated',
       hasAccessToken: this.accessToken !== null,
@@ -1379,32 +1423,102 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   async stepUp(input: { code: string }): Promise<StepUpOutcome> {
     this.setState({ status: 'loading', error: null });
     try {
-      const response = await this.client.post<TokenResponseBody>(
-        this.paths.stepUp,
-        { code: input.code },
-        { retries: 0, headers: this.authorizationHeader() }
-      );
-      const token = response.data.access_token;
-      if (typeof token !== 'string' || token === '') {
-        throw new AuthSessionEndedError({
-          message: 'The step-up response carried no access token.',
-          reason: 'refresh-failed',
-        });
-      }
-      const expiresIn =
-        typeof response.data.expires_in === 'number'
-          ? response.data.expires_in
-          : undefined;
-      this.adoptToken(token, expiresIn);
-      this.setState({
-        status: 'authenticated',
-        hasAccessToken: true,
-        error: null,
-      });
-      return { ok: true, expiresIn };
+      return await this.runStepUp({ code: input.code });
     } catch (error) {
       return this.settleMfaRefusal(error, CODE_REASONS);
     }
+  }
+
+  /**
+   * Re-authenticates inside the current session with a passkey, for a product
+   * that gates a sensitive action on a factor rather than on a typed code. The
+   * same two legs and the same fresher token as {@link stepUp}: the options leg
+   * is scoped to the signed-in caller and asks the authenticator to verify the
+   * user, and the verify leg is the step-up route itself. Requires a session,
+   * since the challenge is issued against the bearer token.
+   *
+   * An account with no passkey enrolled answers `no-passkeys`, which is an
+   * outcome rather than a throw because the remedy is to offer `stepUp` with a
+   * code instead.
+   *
+   * @example
+   * ```ts
+   * const outcome = await auth.stepUpWithPasskey();
+   * if (outcome.ok) {
+   *   await deleteAccount();
+   * } else if (outcome.reason === 'no-passkeys') {
+   *   setPrompt('code');
+   * } else if (outcome.reason !== 'cancelled') {
+   *   setBanner(outcome.message);
+   * }
+   * ```
+   */
+  async stepUpWithPasskey(
+    input: { signal?: AbortSignal } = {}
+  ): Promise<PasskeyStepUpOutcome> {
+    if (this.accessToken === null) {
+      throw new AuthSessionEndedError({
+        message: 'stepUpWithPasskey requires a signed in session.',
+        reason: 'no-session',
+      });
+    }
+    this.setState({ status: 'loading', error: null });
+    try {
+      const webAuthn = this.requireWebAuthn();
+      const challenge = await this.passkeyChallenge(
+        this.paths.stepUpPasskeyOptions,
+        {},
+        { headers: this.authorizationHeader() }
+      );
+      const request: Record<string, unknown> = {
+        publicKey: parseRequestOptions(challenge.publicKey),
+      };
+      if (input.signal !== undefined) {
+        request['signal'] = input.signal;
+      }
+      const assertion = await webAuthn.get(request);
+      return await this.runStepUp({
+        challenge_id: challenge.challengeId,
+        credential: credentialToJSON(assertion),
+      });
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, PASSKEY_STEP_UP_REASONS);
+    }
+  }
+
+  /**
+   * The verify leg both step-up methods share: one post to the step-up route,
+   * the token adopted into the in-memory store and the proactive timer
+   * re-armed. Split out so the passkey path cannot drift from the code path,
+   * and throwing rather than settling, because each caller classifies a refusal
+   * against a reason set of its own.
+   */
+  private async runStepUp(
+    body: Record<string, unknown>
+  ): Promise<{ ok: true; expiresIn: number | undefined }> {
+    const response = await this.client.post<TokenResponseBody>(
+      this.paths.stepUp,
+      body,
+      { retries: 0, headers: this.authorizationHeader() }
+    );
+    const token = response.data.access_token;
+    if (typeof token !== 'string' || token === '') {
+      throw new AuthSessionEndedError({
+        message: 'The step-up response carried no access token.',
+        reason: 'refresh-failed',
+      });
+    }
+    const expiresIn =
+      typeof response.data.expires_in === 'number'
+        ? response.data.expires_in
+        : undefined;
+    this.adoptToken(token, expiresIn);
+    this.setState({
+      status: 'authenticated',
+      hasAccessToken: true,
+      error: null,
+    });
+    return { ok: true, expiresIn };
   }
 
   /**
