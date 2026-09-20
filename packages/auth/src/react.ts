@@ -344,6 +344,18 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   listPasskeys: AuthClient<TUser>['listPasskeys'];
   renamePasskey: AuthClient<TUser>['renamePasskey'];
   deletePasskey: AuthClient<TUser>['deletePasskey'];
+  /**
+   * Re-authenticates for a fresher access token with a TOTP or recovery code,
+   * for a component gating a sensitive action on freshness rather than on a
+   * session.
+   */
+  stepUp: AuthClient<TUser>['stepUp'];
+  /**
+   * The same step-up run against a passkey instead of a code. An account with
+   * no passkey answers `no-passkeys`, which is the cue to fall back to
+   * {@link UseAuthResult.stepUp}.
+   */
+  stepUpWithPasskey: AuthClient<TUser>['stepUpWithPasskey'];
   startOAuth: AuthClient<TUser>['startOAuth'];
   logout: AuthClient<TUser>['logout'];
   /**
@@ -369,6 +381,8 @@ const AUTH_METHOD_NAMES = [
   'listPasskeys',
   'renamePasskey',
   'deletePasskey',
+  'stepUp',
+  'stepUpWithPasskey',
   'startOAuth',
   'logout',
   'setUser',
@@ -689,9 +703,10 @@ export interface PasskeySignInButton {
   /** Whether the browser can put a passkey in its autofill dropdown. */
   conditional: boolean;
   /**
-   * Runs an `optional` ceremony, reporting every outcome but a cancellation.
-   * Never rejects: a thrown ceremony clears `busy` and reports nothing, so a
-   * click handler that does not await it leaks no unhandled rejection.
+   * Runs an `optional` ceremony, reporting every outcome but a cancellation and
+   * a browser that will not run it. Never rejects: a thrown ceremony clears
+   * `busy` and reports nothing, so a click handler that does not await it leaks
+   * no unhandled rejection.
    */
   signIn: () => Promise<void>;
 }
@@ -712,8 +727,8 @@ export interface PasskeySignInButtonOptions {
    */
   email?: string;
   /**
-   * Called for every outcome except a cancellation, which is silent because a
-   * dismissed prompt is not a failure to report.
+   * Called for every outcome except a cancellation or a browser that will not
+   * run the ceremony, both silent because neither is a failure to report.
    */
   onResult: (result: PasskeySignInOutcome) => void | Promise<void>;
   /**
@@ -737,8 +752,10 @@ export interface PasskeySignInButtonOptions {
  * browser both say yes, and torn down through an `AbortController` on cleanup,
  * so a ceremony does not outlive the page that started it. Its result is
  * dropped when the signal aborted, since a torn-down ceremony reports a
- * cancellation the caller never asked for. `onResult` is read through a ref, so
- * a handler redefined on every render does not restart the ceremony.
+ * cancellation the caller never asked for. A browser that accepts the autofill
+ * probe and then refuses the request answers `unsupported`, which is dropped
+ * for the same reason. `onResult` is read through a ref, so a handler redefined
+ * on every render does not restart the ceremony.
  *
  * @example
  * ```tsx
@@ -804,7 +821,12 @@ export function usePasskeySignInButton(
           ? { mediation: 'optional' }
           : { email: trimmed, mediation: 'optional' }
       );
-      if (!result.ok && result.reason === 'cancelled') return;
+      if (
+        !result.ok &&
+        (result.reason === 'cancelled' || result.reason === 'unsupported')
+      ) {
+        return;
+      }
       await handler.current(result);
     } catch (error) {
       if (errorHandler.current === undefined) throw error;

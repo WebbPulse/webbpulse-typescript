@@ -1108,6 +1108,89 @@ describe('AuthClient passkeys', () => {
     );
   });
 
+  it('models a NotSupportedError rather than letting it escape', async () => {
+    const webAuthn = {
+      create: vi.fn(),
+      get: vi.fn(() =>
+        Promise.reject(
+          new DOMException(
+            "Resident credentials or empty 'allowCredentials' lists are not supported at this time.",
+            'NotSupportedError'
+          )
+        )
+      ),
+    };
+    const fetchMock = routedFetch({
+      '/api/auth/login/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { challenge: 'Y2hhbA', allowCredentials: [] },
+        }),
+    });
+    const auth = authWith(fetchMock, { webAuthn });
+
+    expect(await auth.signInWithPasskey()).toEqual({
+      ok: false,
+      reason: 'unsupported',
+      code: undefined,
+      message: 'Passkeys are not available in this browser.',
+    });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('models the same NotSupportedError under conditional mediation', async () => {
+    const webAuthn = {
+      create: vi.fn(),
+      get: vi.fn(() =>
+        Promise.reject(
+          new DOMException(
+            "Resident credentials or empty 'allowCredentials' lists are not supported at this time.",
+            'NotSupportedError'
+          )
+        )
+      ),
+    };
+    const fetchMock = routedFetch({
+      '/api/auth/login/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { challenge: 'Y2hhbA', allowCredentials: [] },
+        }),
+    });
+    const auth = authWith(fetchMock, { webAuthn });
+
+    expect(
+      await auth.signInWithPasskey({ mediation: 'conditional' })
+    ).toMatchObject({ ok: false, reason: 'unsupported' });
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('steps up with a passkey against the current session', async () => {
+    const webAuthn = {
+      create: vi.fn(),
+      get: vi.fn(() => Promise.resolve({ id: 'cred_1', type: 'public-key' })),
+    };
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/step-up/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { challenge: 'Y2hhbA', userVerification: 'required' },
+        }),
+      '/api/auth/step-up': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 900 }),
+    });
+    const auth = authWith(fetchMock, { webAuthn });
+
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    const outcome = await auth.stepUpWithPasskey();
+
+    expect(outcome).toEqual({ ok: true, expiresIn: 900 });
+    expect(auth.getAccessToken()).toBe('a2');
+    expect(auth.getState().status).toBe('authenticated');
+  });
+
   it('reports an MFA challenge from a passkey with no user verification', async () => {
     const webAuthn = {
       create: vi.fn(),
