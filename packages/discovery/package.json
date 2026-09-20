@@ -1,6 +1,6 @@
 {
   "name": "@webbpulse/discovery",
-  "version": "0.13.3",
+  "version": "0.13.4",
   "description": "Pre-auth capability discovery for the WebbPulse identity service: what a deployment does with passkeys, and which OAuth providers it has configured.",
   "license": "UNLICENSED",
   "type": "module",
@@ -40,7 +40,7 @@
     "type-check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@webbpulse/auth": "^0.15.0"
+    "@webbpulse/auth": "^0.16.0"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",

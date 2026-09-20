@@ -1,5 +1,15 @@
 # @webbpulse/discovery
 
+## 0.13.4
+
+### Patch Changes
+
+- 6ebf85f: Float the `@webbpulse/auth` dependency on a caret range instead of pinning it
+  exactly, so a consumer floating the same package resolves one copy rather than
+  two.
+- Updated dependencies [6ebf85f]
+  - @webbpulse/auth@0.16.0
+
 ## 0.13.3
 
 ### Patch Changes
