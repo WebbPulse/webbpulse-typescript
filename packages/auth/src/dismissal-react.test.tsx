@@ -95,12 +95,12 @@ describe('useDismissedUntilSignIn', () => {
 
     expect(screen.getByText('hidden')).not.toBeNull();
     expect(sessionStorage.getItem(`${DISMISSAL_STORAGE_PREFIX}banner-a`)).toBe(
-      '1'
+      'in'
     );
   });
 
   it('keeps a dismissal across a remount inside the same session', () => {
-    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-b`, '1');
+    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-b`, 'in');
     const { client } = stubClient(SIGNED_IN);
     renderNotice(client, 'banner-b');
 
@@ -108,7 +108,7 @@ describe('useDismissedUntilSignIn', () => {
   });
 
   it('keeps the flag while the session is still unknown', () => {
-    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-c`, '1');
+    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-c`, 'in');
     const { client, move } = stubClient({ status: 'loading', settled: false });
     renderNotice(client, 'banner-c');
 
@@ -117,7 +117,7 @@ describe('useDismissedUntilSignIn', () => {
 
     expect(screen.getByText('hidden')).not.toBeNull();
     expect(sessionStorage.getItem(`${DISMISSAL_STORAGE_PREFIX}banner-c`)).toBe(
-      '1'
+      'in'
     );
   });
 
@@ -152,7 +152,7 @@ describe('useDismissedUntilSignIn', () => {
   });
 
   it('clears a stale flag when the first settle finds no session', () => {
-    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-f`, '1');
+    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-f`, 'in');
     const { client, move } = stubClient({ settled: false });
     renderNotice(client, 'banner-f');
 
@@ -206,5 +206,70 @@ describe('useDismissedUntilSignIn', () => {
     renderNotice(client, 'banner-h');
 
     expect(screen.getByText('hidden')).not.toBeNull();
+  });
+  it('lets a signed out visitor dismiss, keeps it across a remount, and shows it after sign-in', () => {
+    const { client, move } = stubClient(SIGNED_OUT);
+    const first = render(
+      <AuthProvider client={client} initializeOnMount={false}>
+        <Notice storageKey="banner-i" />
+      </AuthProvider>
+    );
+    act(() => {
+      screen.getByRole('button', { name: 'dismiss' }).click();
+    });
+    expect(screen.getByText('hidden')).not.toBeNull();
+    expect(sessionStorage.getItem(`${DISMISSAL_STORAGE_PREFIX}banner-i`)).toBe(
+      'out'
+    );
+    first.unmount();
+
+    renderNotice(client, 'banner-i');
+    expect(screen.getByText('hidden')).not.toBeNull();
+
+    move({ status: 'loading', hasAccessToken: false });
+    expect(screen.getByText('hidden')).not.toBeNull();
+    move(SIGNED_IN);
+    expect(screen.getByRole('button', { name: 'dismiss' })).not.toBeNull();
+
+    act(() => {
+      screen.getByRole('button', { name: 'dismiss' }).click();
+    });
+    move(SIGNED_OUT);
+    move(SIGNED_IN);
+
+    expect(screen.getByRole('button', { name: 'dismiss' })).not.toBeNull();
+  });
+
+  it('keeps a signed out dismissal on a reload that settles signed out', () => {
+    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-j`, 'out');
+    const { client, move } = stubClient({ settled: false });
+    renderNotice(client, 'banner-j');
+
+    move(SIGNED_OUT);
+
+    expect(screen.getByText('hidden')).not.toBeNull();
+    expect(sessionStorage.getItem(`${DISMISSAL_STORAGE_PREFIX}banner-j`)).toBe(
+      'out'
+    );
+  });
+
+  it('never draws the notice in the render where a dismissal lapses', () => {
+    const seen: boolean[] = [];
+    function Recorder(): React.ReactNode {
+      const { dismissed } = useDismissedUntilSignIn('banner-k');
+      seen.push(dismissed);
+      return null;
+    }
+    sessionStorage.setItem(`${DISMISSAL_STORAGE_PREFIX}banner-k`, 'in');
+    const { client, move } = stubClient(SIGNED_IN);
+    render(
+      <AuthProvider client={client} initializeOnMount={false}>
+        <Recorder />
+      </AuthProvider>
+    );
+    move(SIGNED_OUT);
+
+    expect(seen[0]).toBe(true);
+    expect(seen.slice(1).every((value) => !value)).toBe(true);
   });
 });

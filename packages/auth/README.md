@@ -595,10 +595,14 @@ return <Banner onClose={dismiss} />;
 
 - The flag lives in `sessionStorage` under `DISMISSAL_STORAGE_PREFIX` plus the
   key, so it is per tab: a reload keeps it and a new tab starts without it.
-- It clears whenever the session settles signed out, on the first settle of a
-  page load or after a sign-out or an expiry, so the next sign-in shows the
-  notice again. It never clears while the session is still unknown or during a
-  token refresh on a live session.
+- It records whether it was made signed in or signed out, and lapses when the
+  session settles on the other side. One made in a session lapses on the
+  sign-out or expiry that ends it, including one found on the first settle of a
+  page load, so the next sign-in shows the notice again. One made while signed
+  out sticks across reloads and lapses on the next sign-in.
+- Nothing lapses while the session is still unknown or during a token refresh
+  on a live session, and the lapse is derived during render, so the notice never
+  flashes.
 - Storage that throws, as in a privacy mode or a sandboxed frame, falls back to
   memory for the page's lifetime.
 

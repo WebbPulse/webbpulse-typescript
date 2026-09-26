@@ -905,7 +905,16 @@ export function useOAuthProviderLinks(
 /** The prefix every {@link useDismissedUntilSignIn} key is stored under. */
 export const DISMISSAL_STORAGE_PREFIX = 'webbpulse.dismissed.';
 
-const memoryDismissals = new Set<string>();
+/**
+ * Which side of a sign-in a dismissal was made on: `'in'` during a session,
+ * `'out'` while signed out. A dismissal lapses when the session crosses to the
+ * other side, which is what lets one made while signed out survive a reload yet
+ * still lapse on the next sign-in, and one made while signed in lapse on the
+ * sign-out that precedes the next sign-in.
+ */
+type DismissalSide = 'in' | 'out';
+
+const memoryDismissals = new Map<string, DismissalSide>();
 
 /**
  * The tab's session storage, or null where reading the property itself throws,
@@ -919,55 +928,59 @@ function tabStorage(): Storage | null {
   }
 }
 
-/**
- * Whether the flag is set in storage or, where storage refused the write, in the
- * in-memory fallback that keeps a dismissal for the page's lifetime in a privacy
- * mode rather than failing the render.
- */
-function readDismissal(storageKey: string): boolean {
-  try {
-    if (tabStorage()?.getItem(storageKey) === '1') {
-      return true;
-    }
-  } catch {
-    return memoryDismissals.has(storageKey);
-  }
-  return memoryDismissals.has(storageKey);
+/** Narrows a stored value to a side, treating anything else as no dismissal. */
+function asSide(value: string | null | undefined): DismissalSide | null {
+  return value === 'in' || value === 'out' ? value : null;
 }
 
 /**
- * Records the flag in storage, falling back to memory when storage is missing
- * or throws, or clears it from both.
+ * The side stored for a key or, where storage refused the write, the in-memory
+ * fallback that keeps a dismissal for the page's lifetime in a privacy mode
+ * rather than failing the render.
  */
-function writeDismissal(storageKey: string, dismissed: boolean): void {
-  if (!dismissed) {
-    memoryDismissals.delete(storageKey);
+function readDismissal(storageKey: string): DismissalSide | null {
+  try {
+    const stored = asSide(tabStorage()?.getItem(storageKey));
+    if (stored !== null) {
+      return stored;
+    }
+  } catch {
+    return memoryDismissals.get(storageKey) ?? null;
   }
+  return memoryDismissals.get(storageKey) ?? null;
+}
+
+/**
+ * Records a side in storage, falling back to memory when storage is missing or
+ * throws, or clears the key from both when `side` is null.
+ */
+function writeDismissal(storageKey: string, side: DismissalSide | null): void {
+  memoryDismissals.delete(storageKey);
   try {
     const storage = tabStorage();
     if (storage === null) {
-      if (dismissed) {
-        memoryDismissals.add(storageKey);
+      if (side !== null) {
+        memoryDismissals.set(storageKey, side);
       }
       return;
     }
-    if (dismissed) {
-      storage.setItem(storageKey, '1');
-    } else {
+    if (side === null) {
       storage.removeItem(storageKey);
+    } else {
+      storage.setItem(storageKey, side);
     }
   } catch {
-    if (dismissed) {
-      memoryDismissals.add(storageKey);
+    if (side !== null) {
+      memoryDismissals.set(storageKey, side);
     }
   }
 }
 
 /** What {@link useDismissedUntilSignIn} returns. */
 export interface DismissedUntilSignIn {
-  /** Whether the notice was dismissed during the current signed in session. */
+  /** Whether the notice is currently dismissed. */
   dismissed: boolean;
-  /** Hides the notice until the next sign-in in this tab. */
+  /** Hides the notice until the session next crosses a sign-in or sign-out. */
   dismiss: () => void;
 }
 
@@ -977,12 +990,16 @@ export interface DismissedUntilSignIn {
  * each page load inside one.
  *
  * The flag lives in session storage under {@link DISMISSAL_STORAGE_PREFIX} plus
- * `key`, so it is per tab: a reload keeps it and a new tab starts without it.
- * It is cleared whenever the session settles signed out, whether on the first
- * settle of a page load or after a sign-out or an expiry, and never while the
- * session is still unknown, so the next sign-in shows the notice again. Storage
- * that throws falls back to memory for the page's lifetime. Headless: the
- * application draws the notice.
+ * `key`, so it is per tab: a reload keeps it and a new tab starts without it. It
+ * records whether it was made signed in or signed out, and lapses when the
+ * session settles on the other side. A dismissal made in a session lapses on the
+ * sign-out or expiry that ends it, including one found on the first settle of a
+ * page load, so the next sign-in shows the notice again. A dismissal made while
+ * signed out sticks across reloads and lapses on the next sign-in. Nothing lapses
+ * while the session is still unknown or during a token refresh on a live
+ * session, and the lapse is derived during render, so the notice never flashes.
+ * Storage that throws falls back to memory for the page's lifetime. Headless:
+ * the application draws the notice.
  *
  * @example
  * ```tsx
@@ -994,24 +1011,36 @@ export interface DismissedUntilSignIn {
 export function useDismissedUntilSignIn(key: string): DismissedUntilSignIn {
   const storageKey = `${DISMISSAL_STORAGE_PREFIX}${key}`;
   const state = useAuthState();
-  const signedOut =
-    state.settled &&
-    state.status !== 'authenticated' &&
-    !(state.status === 'loading' && state.hasAccessToken);
-  const [dismissed, setDismissed] = useState(() => readDismissal(storageKey));
+  const signedIn =
+    state.status === 'authenticated' ||
+    (state.status === 'loading' && state.hasAccessToken);
+  const side: DismissalSide | null = signedIn
+    ? 'in'
+    : state.settled
+      ? 'out'
+      : null;
+  const [stored, setStored] = useState(() => ({
+    storageKey,
+    side: readDismissal(storageKey),
+  }));
+  const dismissedSide =
+    stored.storageKey === storageKey ? stored.side : readDismissal(storageKey);
+  const lapsed =
+    dismissedSide !== null && side !== null && dismissedSide !== side;
 
   useEffect(() => {
-    if (!signedOut) {
+    if (!lapsed) {
       return;
     }
-    writeDismissal(storageKey, false);
-    setDismissed(false);
-  }, [signedOut, storageKey]);
+    writeDismissal(storageKey, null);
+    setStored({ storageKey, side: null });
+  }, [lapsed, storageKey]);
 
   const dismiss = useCallback(() => {
-    writeDismissal(storageKey, true);
-    setDismissed(true);
-  }, [storageKey]);
+    const at: DismissalSide = side ?? 'in';
+    writeDismissal(storageKey, at);
+    setStored({ storageKey, side: at });
+  }, [side, storageKey]);
 
-  return { dismissed: dismissed && !signedOut, dismiss };
+  return { dismissed: dismissedSide !== null && !lapsed, dismiss };
 }
