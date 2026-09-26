@@ -282,16 +282,28 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
   than the interval cannot stack requests behind itself. `intervalMs` defaults
   to 30000.
 - **A failure backs off** exponentially from the interval with jitter, capped at
-  `maxBackoffMs` (default five minutes), and a success resets it. `data` is left
-  alone by a failure, so a panel keeps the last good value with the error beside
-  it rather than blinking empty.
+  `maxBackoffMs` (default 15 seconds) and never below the interval, and a
+  success resets it. `data` is left alone by a failure, so a panel keeps the
+  last good value with the error beside it rather than blinking empty.
+- **Every attempt has a deadline.** `attemptTimeoutMs` (default 30000, 0
+  disables it) covers the whole attempt: the `waitForToken` wait and the
+  fetcher, including any token refresh and the body read. An attempt that
+  outlives it is aborted through its signal, rejects with
+  `PolledQueryTimeoutError`, counts as a failure, and the next poll starts a new
+  attempt, so a hung refresh or body read cannot stall the loop.
+- **A watchdog restarts a stalled loop.** When no attempt has started or
+  settled within `stallTimeoutMs` while the document is visible, polling
+  restarts, and the check runs again the moment the document returns to
+  visible. The default is `max(intervalMs, maxBackoffMs)` plus the attempt
+  deadline, the longest gap a healthy loop can leave, and 0 disables it.
 - **Focus and visibility.** `refetchOnFocus` refetches when the window regains
   focus and `refetchOnVisible` pauses the timer while the document is hidden and
   refetches on the way back. Both default to true: a background tab that polls is
   a bill and a battery drain for data nobody is reading.
 - **Requests are de-duplicated.** A focus event landing on top of an interval
   tick is handed the running promise rather than starting a second request, and
-  `refetch()` while one is in flight returns that one.
+  `refetch()` while one is in flight returns that one, unless it is past its
+  deadline, in which case a new attempt replaces it.
 - **The in-flight request is aborted on unmount**, and the signal the fetcher
   receives should be passed straight to the client as `{ signal }`.
 - **`auth` honours the token readiness the client already exposes.** Given a
@@ -359,7 +371,8 @@ keys as an array holding at least one array key, `[['jobs', 1], 'counts']`.
 `QueryKeyPart` and `Unsubscribe`.
 
 `@webbpulse/api-client/react` adds `usePolledQuery` and
-`useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS` and
-`DEFAULT_MAX_BACKOFF_MS`, and the types `PolledQueryOptions`,
+`useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS`,
+`DEFAULT_MAX_BACKOFF_MS` and `DEFAULT_ATTEMPT_TIMEOUT_MS`, the error
+`PolledQueryTimeoutError`, and the types `PolledQueryOptions`,
 `PolledQueryResult`, `PolledQueryFetcher`, `PolledQueryContext` and
 `MutationWithRefetch`.
