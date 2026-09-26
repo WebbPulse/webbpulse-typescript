@@ -18,7 +18,26 @@ import {
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
 /** Ceiling on the error backoff when `maxBackoffMs` is not given. */
-export const DEFAULT_MAX_BACKOFF_MS = 5 * 60_000;
+export const DEFAULT_MAX_BACKOFF_MS = 15_000;
+
+/** Deadline on one whole poll attempt when `attemptTimeoutMs` is not given. */
+export const DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000;
+
+/**
+ * What a poll attempt rejects with when it outlives `attemptTimeoutMs`. It
+ * lands in {@link PolledQueryResult.error} and counts as a failure for backoff.
+ */
+export class PolledQueryTimeoutError extends Error {
+  /** The deadline the attempt exceeded, in milliseconds. */
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(`Poll attempt timed out after ${String(timeoutMs)}ms.`);
+    this.name = 'PolledQueryTimeoutError';
+    this.timeoutMs = timeoutMs;
+    Object.setPrototypeOf(this, PolledQueryTimeoutError.prototype);
+  }
+}
 
 /** What a fetcher receives. The signal aborts on unmount and on a supersede. */
 export interface PolledQueryContext {
@@ -50,8 +69,29 @@ export interface PolledQueryOptions {
    * battery drain for data nobody is reading.
    */
   refetchOnVisible?: boolean;
-  /** Ceiling on the error backoff. Defaults to {@link DEFAULT_MAX_BACKOFF_MS}. */
+  /**
+   * Ceiling on the error backoff. Defaults to {@link DEFAULT_MAX_BACKOFF_MS}.
+   * The backoff never drops below `intervalMs`, so a failing query is never
+   * polled faster than a healthy one.
+   */
   maxBackoffMs?: number;
+  /**
+   * Deadline on one whole attempt: the `waitForToken` wait and the fetcher,
+   * which covers any token refresh, the request and reading the body. An
+   * attempt that outlives it is aborted through its signal, rejects with
+   * {@link PolledQueryTimeoutError} and the next poll starts a new attempt.
+   * Defaults to {@link DEFAULT_ATTEMPT_TIMEOUT_MS}. 0 disables it.
+   */
+  attemptTimeoutMs?: number;
+  /**
+   * Milliseconds without an attempt starting or settling after which the
+   * watchdog restarts polling, aborting anything still in flight. It only fires
+   * while the document is visible, and checks again as soon as the document
+   * returns to visible. Defaults to the longest healthy gap between attempts,
+   * `max(intervalMs, maxBackoffMs)` plus the attempt deadline, so it fires only
+   * when the poll loop has stalled. 0 disables it.
+   */
+  stallTimeoutMs?: number;
   /**
    * Milliseconds after which {@link PolledQueryResult.isStale} reads true.
    * Defaults to `intervalMs`, so data is stale once its replacement is due.
@@ -102,7 +142,8 @@ export interface PolledQueryResult<T> {
   /**
    * Fetches now, resetting the interval and any backoff. De-duplicated against
    * an in-flight fetch: calling it while one is running returns that one rather
-   * than starting a second.
+   * than starting a second, unless that one is past its deadline, in which case
+   * it is aborted and a new attempt starts.
    */
   refetch: () => Promise<void>;
 }
@@ -130,8 +171,16 @@ function documentVisible(): boolean {
  * interval cannot stack requests behind itself.
  *
  * A failure backs off exponentially from the interval with full jitter up to
- * `maxBackoffMs`, and a success resets it. `data` is left alone by a failure,
- * so a panel keeps showing the last good value with the error beside it.
+ * `maxBackoffMs`, never below the interval, and a success resets it. `data` is
+ * left alone by a failure, so a panel keeps showing the last good value with
+ * the error beside it.
+ *
+ * Nothing can stall the loop for good. Each attempt, from the token wait to the
+ * last byte of the body, runs under `attemptTimeoutMs`; one that outlives it is
+ * aborted and counted as a failure, and the next poll starts afresh. A watchdog
+ * restarts polling when no attempt has started or settled within
+ * `stallTimeoutMs` while the document is visible, and checks the moment the
+ * document returns to visible.
  *
  * `queryKey` identifies the query, not just the invalidation channel. Changing
  * it starts a fresh query: the timer and any backoff reset, a fetch goes out
@@ -170,9 +219,14 @@ export function usePolledQuery<T>(
     refetchOnVisible = true,
     maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
     staleTimeMs = intervalMs,
+    attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS,
     queryKey,
     auth,
   } = options;
+  const stallTimeoutMs =
+    options.stallTimeoutMs ??
+    Math.max(intervalMs, maxBackoffMs) +
+      (attemptTimeoutMs > 0 ? attemptTimeoutMs : DEFAULT_ATTEMPT_TIMEOUT_MS);
 
   const serializedKey = useMemo(
     () => (queryKey === undefined ? undefined : serializeQueryKey(queryKey)),
@@ -196,6 +250,8 @@ export function usePolledQuery<T>(
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const controller = useRef<AbortController | undefined>(undefined);
   const inFlight = useRef<Promise<void> | undefined>(undefined);
+  const deadlineAt = useRef<number | undefined>(undefined);
+  const lastProgressAt = useRef(0);
   const failures = useRef(0);
   const waited = useRef(false);
 
@@ -207,15 +263,31 @@ export function usePolledQuery<T>(
   }, []);
 
   /**
+   * Lets go of the attempt in flight: forgets it first, so it knows it has
+   * been superseded, then aborts it.
+   */
+  const release = useCallback((): void => {
+    const current = controller.current;
+    controller.current = undefined;
+    inFlight.current = undefined;
+    deadlineAt.current = undefined;
+    current?.abort();
+  }, []);
+
+  /**
    * The wait before the next poll: the interval when the last fetch succeeded,
-   * and an exponential backoff with full jitter once it has not.
+   * and an exponential backoff with full jitter once it has not, capped at
+   * `maxBackoffMs` and never shorter than the interval.
    */
   const nextDelay = useCallback((): number => {
     if (failures.current === 0) {
       return intervalMs;
     }
     const ceiling = Math.min(intervalMs * 2 ** failures.current, maxBackoffMs);
-    return ceiling * (1 - BACKOFF_JITTER + Math.random() * BACKOFF_JITTER);
+    return Math.max(
+      intervalMs,
+      ceiling * (1 - BACKOFF_JITTER + Math.random() * BACKOFF_JITTER)
+    );
   }, [intervalMs, maxBackoffMs]);
 
   /** Everything the run loop needs, read through a ref to keep `run` stable. */
@@ -224,40 +296,89 @@ export function usePolledQuery<T>(
     intervalMs,
     staleTimeMs,
     refetchOnVisible,
+    attemptTimeoutMs,
   });
-  settings.current = { enabled, intervalMs, staleTimeMs, refetchOnVisible };
+  settings.current = {
+    enabled,
+    intervalMs,
+    staleTimeMs,
+    refetchOnVisible,
+    attemptTimeoutMs,
+  };
 
   const schedule = useRef<() => void>(() => undefined);
 
   /**
-   * One fetch. De-duplication is the `inFlight` promise: a concurrent caller
+   * One attempt. De-duplication is the `inFlight` promise: a concurrent caller
    * is handed the running one, so a focus event landing on top of an interval
-   * tick does not double the request.
+   * tick does not double the request. An attempt past its deadline is never
+   * handed out; it is released and a new one starts, which also covers a
+   * background tab whose deadline timer was throttled.
+   *
+   * The deadline races the whole attempt, token wait and fetcher alike, so a
+   * hung token refresh or body read cannot hold the loop even when the fetcher
+   * ignores its signal.
    */
   const run = useCallback((): Promise<void> => {
     if (inFlight.current !== undefined) {
-      return inFlight.current;
+      if (deadlineAt.current === undefined || Date.now() < deadlineAt.current) {
+        return inFlight.current;
+      }
+      release();
     }
     const abort = new AbortController();
     controller.current = abort;
     const generationAtStart = generation.current;
+    const timeoutMs = settings.current.attemptTimeoutMs;
+    const startedAt = Date.now();
+    deadlineAt.current = timeoutMs > 0 ? startedAt + timeoutMs : undefined;
+    lastProgressAt.current = startedAt;
     setIsFetching(true);
 
+    const superseded = (): boolean =>
+      !live.current ||
+      controller.current !== abort ||
+      generation.current !== generationAtStart;
+
+    const work = async (): Promise<T> => {
+      const waitForToken = authRef.current?.waitForToken;
+      if (waitForToken !== undefined && !waited.current) {
+        waited.current = true;
+        await waitForToken.call(authRef.current);
+      }
+      abort.signal.throwIfAborted();
+      return fetcherRef.current({ signal: abort.signal });
+    };
+
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopListening = (): void => undefined;
+    const cutoff = new Promise<never>((_resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(deadlineTimer);
+        reject(
+          abort.signal.reason instanceof Error
+            ? abort.signal.reason
+            : new Error('Poll attempt aborted.')
+        );
+      };
+      abort.signal.addEventListener('abort', onAbort, { once: true });
+      stopListening = () => {
+        abort.signal.removeEventListener('abort', onAbort);
+      };
+      if (timeoutMs > 0) {
+        deadlineTimer = setTimeout(() => {
+          abort.abort(new PolledQueryTimeoutError(timeoutMs));
+        }, timeoutMs);
+      }
+    });
+    const pending = work();
+    pending.catch(() => undefined);
+    cutoff.catch(() => undefined);
+
     const attempt = (async (): Promise<void> => {
-      const superseded = (): boolean =>
-        !live.current ||
-        abort.signal.aborted ||
-        generation.current !== generationAtStart;
+      let owned = false;
       try {
-        const waitForToken = authRef.current?.waitForToken;
-        if (waitForToken !== undefined && !waited.current) {
-          waited.current = true;
-          await waitForToken.call(authRef.current);
-        }
-        if (superseded()) {
-          return;
-        }
-        const value = await fetcherRef.current({ signal: abort.signal });
+        const value = await Promise.race([pending, cutoff]);
         if (superseded()) {
           return;
         }
@@ -274,26 +395,26 @@ export function usePolledQuery<T>(
         failures.current += 1;
         setError(thrown);
       } finally {
-        if (
-          controller.current === abort ||
-          generation.current === generationAtStart
-        ) {
-          inFlight.current = undefined;
-        }
-        if (live.current && controller.current === abort) {
+        owned = !superseded();
+        clearTimeout(deadlineTimer);
+        stopListening();
+        if (owned) {
           controller.current = undefined;
+          inFlight.current = undefined;
+          deadlineAt.current = undefined;
+          lastProgressAt.current = Date.now();
           setIsFetching(false);
           setIsLoading(false);
         }
       }
-      if (live.current && settings.current.enabled && !superseded()) {
+      if (owned && settings.current.enabled) {
         schedule.current();
       }
     })();
 
     inFlight.current = attempt;
     return attempt;
-  }, []);
+  }, [release]);
 
   schedule.current = useCallback((): void => {
     clearTimer();
@@ -317,16 +438,24 @@ export function usePolledQuery<T>(
     return run();
   }, [clearTimer, run]);
 
+  /**
+   * Starts polling over: drops the timer and whatever is in flight and fetches
+   * now, keeping the backoff count so a failing query stays backed off.
+   */
+  const restart = useCallback((): void => {
+    clearTimer();
+    release();
+    void run();
+  }, [clearTimer, release, run]);
+
   useEffect(() => {
     live.current = true;
     return () => {
       live.current = false;
       clearTimer();
-      controller.current?.abort();
-      controller.current = undefined;
-      inFlight.current = undefined;
+      release();
     };
-  }, [clearTimer]);
+  }, [clearTimer, release]);
 
   const activeKey = useRef(serializedKey);
   const enabledRef = useRef(enabled);
@@ -339,9 +468,7 @@ export function usePolledQuery<T>(
     activeKey.current = serializedKey;
     generation.current += 1;
     clearTimer();
-    controller.current?.abort();
-    controller.current = undefined;
-    inFlight.current = undefined;
+    release();
     failures.current = 0;
     waited.current = false;
     setData(null);
@@ -350,21 +477,19 @@ export function usePolledQuery<T>(
     setStaleAt(null);
     setIsFetching(false);
     setIsLoading(enabledRef.current);
-  }, [serializedKey, clearTimer]);
+  }, [serializedKey, clearTimer, release]);
 
   useEffect(() => {
     if (!enabled) {
       clearTimer();
-      controller.current?.abort();
-      controller.current = undefined;
-      inFlight.current = undefined;
+      release();
       failures.current = 0;
       setIsFetching(false);
       return;
     }
     void run();
     return clearTimer;
-  }, [enabled, intervalMs, serializedKey, clearTimer, run]);
+  }, [enabled, intervalMs, serializedKey, clearTimer, release, run]);
 
   useEffect(() => {
     if (!enabled || serializedKey === undefined) {
@@ -407,6 +532,31 @@ export function usePolledQuery<T>(
       }
     };
   }, [enabled, refetchOnFocus, refetchOnVisible, clearTimer, run]);
+
+  useEffect(() => {
+    if (!enabled || stallTimeoutMs <= 0) {
+      return;
+    }
+    const check = (): void => {
+      if (!documentVisible()) {
+        return;
+      }
+      if (Date.now() - lastProgressAt.current > stallTimeoutMs) {
+        restart();
+      }
+    };
+    const watchdog = setInterval(check, Math.max(1, stallTimeoutMs / 4));
+    const hasDocument = typeof document !== 'undefined';
+    if (hasDocument) {
+      document.addEventListener('visibilitychange', check);
+    }
+    return () => {
+      clearInterval(watchdog);
+      if (hasDocument) {
+        document.removeEventListener('visibilitychange', check);
+      }
+    };
+  }, [enabled, stallTimeoutMs, restart]);
 
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
