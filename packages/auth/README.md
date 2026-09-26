@@ -579,6 +579,29 @@ mount and reports `confirming`, `confirmed`, `missing-token`, `refused` or
 `failed`, leaving every sentence to the caller. A ref guards the single-use
 token against the double mount StrictMode performs in development.
 
+## A notice dismissed until the next sign-in
+
+`useDismissedUntilSignIn(key)` in `@webbpulse/auth/react` is the state behind a
+dismissible notice, such as an "in development" banner, that should greet every
+new session without returning on each page load inside one. It returns
+`{ dismissed, dismiss }` and draws nothing, so each application keeps its own
+markup.
+
+```tsx
+const { dismissed, dismiss } = useDismissedUntilSignIn('dev-banner');
+if (dismissed) return null;
+return <Banner onClose={dismiss} />;
+```
+
+- The flag lives in `sessionStorage` under `DISMISSAL_STORAGE_PREFIX` plus the
+  key, so it is per tab: a reload keeps it and a new tab starts without it.
+- It clears whenever the session settles signed out, on the first settle of a
+  page load or after a sign-out or an expiry, so the next sign-in shows the
+  notice again. It never clears while the session is still unknown or during a
+  token refresh on a live session.
+- Storage that throws, as in a privacy mode or a sandboxed frame, falls back to
+  memory for the page's lifetime.
+
 ## Polled queries
 
 `useQueryAuth` is the `auth` option `usePolledQuery` takes, bound to the client
@@ -640,12 +663,14 @@ Types accompany each group, including `AuthClientOptions`, `AuthState`,
 
 `AuthProvider`, `useAuth`, `useAuthClient`, `useAuthState`, `useSessionEnded`,
 `useOAuthCallback`, `usePasskeySignInSupport`, `usePasskeySignInButton`,
-`useOAuthProviderLinks`, `useEmailVerificationLink`, `useQueryAuth`, and the
+`useOAuthProviderLinks`, `useEmailVerificationLink`, `useQueryAuth`,
+`useDismissedUntilSignIn`, `DISMISSAL_STORAGE_PREFIX`, and the
 deprecated `SessionProvider`, `useSession`, `useSessionState`,
 `useSessionManager`, with `AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`,
 `PasskeySignInSupport`, `PasskeySignInSupportOptions`, `PasskeySignInButton`,
 `PasskeySignInButtonOptions`, `OAuthProviderLink`, `OAuthProviderLinksOptions`,
 `EmailVerificationLinkState`, `EmailVerificationLinkOptions`, `QueryAuth`,
+`DismissedUntilSignIn`,
 `SessionProviderProps`, `UseSessionResult`, `AnySessionManager` and
 `OAuthCallbackHandler`.
 

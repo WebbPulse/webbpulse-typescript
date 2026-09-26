@@ -901,3 +901,117 @@ export function useOAuthProviderLinks(
     }));
   }, [client, providers, returnTo]);
 }
+
+/** The prefix every {@link useDismissedUntilSignIn} key is stored under. */
+export const DISMISSAL_STORAGE_PREFIX = 'webbpulse.dismissed.';
+
+const memoryDismissals = new Set<string>();
+
+/**
+ * The tab's session storage, or null where reading the property itself throws,
+ * as it does with site data blocked or in a sandboxed frame.
+ */
+function tabStorage(): Storage | null {
+  try {
+    return globalThis.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the flag is set in storage or, where storage refused the write, in the
+ * in-memory fallback that keeps a dismissal for the page's lifetime in a privacy
+ * mode rather than failing the render.
+ */
+function readDismissal(storageKey: string): boolean {
+  try {
+    if (tabStorage()?.getItem(storageKey) === '1') {
+      return true;
+    }
+  } catch {
+    return memoryDismissals.has(storageKey);
+  }
+  return memoryDismissals.has(storageKey);
+}
+
+/**
+ * Records the flag in storage, falling back to memory when storage is missing
+ * or throws, or clears it from both.
+ */
+function writeDismissal(storageKey: string, dismissed: boolean): void {
+  if (!dismissed) {
+    memoryDismissals.delete(storageKey);
+  }
+  try {
+    const storage = tabStorage();
+    if (storage === null) {
+      if (dismissed) {
+        memoryDismissals.add(storageKey);
+      }
+      return;
+    }
+    if (dismissed) {
+      storage.setItem(storageKey, '1');
+    } else {
+      storage.removeItem(storageKey);
+    }
+  } catch {
+    if (dismissed) {
+      memoryDismissals.add(storageKey);
+    }
+  }
+}
+
+/** What {@link useDismissedUntilSignIn} returns. */
+export interface DismissedUntilSignIn {
+  /** Whether the notice was dismissed during the current signed in session. */
+  dismissed: boolean;
+  /** Hides the notice until the next sign-in in this tab. */
+  dismiss: () => void;
+}
+
+/**
+ * A dismissal that lasts until the next sign-in, for a notice such as an "in
+ * development" banner that should greet every new session without nagging on
+ * each page load inside one.
+ *
+ * The flag lives in session storage under {@link DISMISSAL_STORAGE_PREFIX} plus
+ * `key`, so it is per tab: a reload keeps it and a new tab starts without it.
+ * It is cleared whenever the session settles signed out, whether on the first
+ * settle of a page load or after a sign-out or an expiry, and never while the
+ * session is still unknown, so the next sign-in shows the notice again. Storage
+ * that throws falls back to memory for the page's lifetime. Headless: the
+ * application draws the notice.
+ *
+ * @example
+ * ```tsx
+ * const { dismissed, dismiss } = useDismissedUntilSignIn('dev-banner');
+ * if (dismissed) return null;
+ * return <Banner onClose={dismiss} />;
+ * ```
+ */
+export function useDismissedUntilSignIn(key: string): DismissedUntilSignIn {
+  const storageKey = `${DISMISSAL_STORAGE_PREFIX}${key}`;
+  const state = useAuthState();
+  const signedOut =
+    state.settled &&
+    state.status !== 'authenticated' &&
+    !(state.status === 'loading' && state.hasAccessToken);
+  const [dismissed, setDismissed] = useState(() => readDismissal(storageKey));
+
+  useEffect(() => {
+    if (!signedOut) {
+      return;
+    }
+    writeDismissal(storageKey, false);
+    setDismissed(false);
+  }, [signedOut, storageKey]);
+
+  const dismiss = useCallback(() => {
+    writeDismissal(storageKey, true);
+    setDismissed(true);
+  }, [storageKey]);
+
+  return { dismissed: dismissed && !signedOut, dismiss };
+}
