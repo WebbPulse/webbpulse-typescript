@@ -784,6 +784,19 @@ describe('parseOAuthLinks', () => {
     expect(parseOAuthLinks({ links: 'nope' })).toEqual([]);
   });
 
+  it('keeps a provider login when the server sends one', () => {
+    const links = parseOAuthLinks({
+      links: [
+        { provider: 'github', login: 'octocat' },
+        { provider: 'google', login: '' },
+        { provider: 'gitlab', login: 42 },
+      ],
+    });
+    expect(links[0]?.login).toBe('octocat');
+    expect(links[1]).not.toHaveProperty('login');
+    expect(links[2]).not.toHaveProperty('login');
+  });
+
   it('treats anything but true as unverified', () => {
     const links = parseOAuthLinks({
       links: [{ provider: 'github', email_verified: 'true' }],
