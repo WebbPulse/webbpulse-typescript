@@ -33,7 +33,9 @@ import {
 } from './oauth.js';
 import {
   classifyMfaError,
+  classifyPasswordStepUpError,
   type MfaPaths,
+  type PasswordStepUpOutcome,
   type MfaRefusal,
   type RecoveryCodesOutcome,
   type StepUpOutcome,
@@ -61,6 +63,7 @@ import {
   type PasskeyStepUpOutcome,
   type WebAuthnAdapter,
 } from './passkeys.js';
+import { readAuthTime } from './token-claims.js';
 
 /** Status of the session, as a single field. */
 export type AuthStatus =
@@ -1413,15 +1416,56 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
+   * The `auth_time` claim of the access token held now, in epoch seconds: when
+   * the person last proved who they are, which a step-up moves forward and a
+   * plain refresh does not. Null with no token or no claim. Read unverified,
+   * so it is a hint for the client and never a security decision.
+   */
+  authTime(): number | null {
+    return readAuthTime(this.accessToken);
+  }
+
+  /**
+   * Whether the held token's `auth_time` is within `maxAgeSeconds` of `now`, in
+   * epoch milliseconds. False with no token or no claim. For deciding to prompt
+   * before a sensitive call; the server's `STEP_UP_REQUIRED` stays the authority.
+   */
+  isRecentlyAuthenticated(
+    maxAgeSeconds: number,
+    now: number = Date.now()
+  ): boolean {
+    const authTime = this.authTime();
+    if (authTime === null) {
+      return false;
+    }
+    return now / 1000 - authTime <= maxAgeSeconds;
+  }
+
+  /**
    * Re-authenticates inside the current session for a fresher access token. Not
    * a second login: no refresh family is started and the cookie is untouched,
    * but the new token's `auth_time` and `amr` let a sensitive route assert on
    * freshness. The token is adopted into the in-memory store and the timer
    * re-armed, so it is not in the outcome. `code` takes a TOTP or recovery code,
-   * which the server tells apart by shape.
+   * which the server tells apart by shape; `password` takes the account
+   * password and answers `invalid-password` when it is wrong.
    */
-  async stepUp(input: { code: string }): Promise<StepUpOutcome> {
+  async stepUp(input: { code: string }): Promise<StepUpOutcome>;
+  async stepUp(input: { password: string }): Promise<PasswordStepUpOutcome>;
+  async stepUp(
+    input: { code: string } | { password: string }
+  ): Promise<StepUpOutcome | PasswordStepUpOutcome>;
+  async stepUp(
+    input: { code: string } | { password: string }
+  ): Promise<StepUpOutcome | PasswordStepUpOutcome> {
     this.setState({ status: 'loading', error: null });
+    if ('password' in input) {
+      try {
+        return await this.runStepUp({ password: input.password });
+      } catch (error) {
+        return this.settleRefusal(error, classifyPasswordStepUpError(error));
+      }
+    }
     try {
       return await this.runStepUp({ code: input.code });
     } catch (error) {
@@ -1557,7 +1601,17 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     error: unknown,
     reasons: ReadonlySet<TReason>
   ): Extract<MfaRefusal, { reason: TReason }> {
-    const refused = classifyMfaError(error, reasons);
+    return this.settleRefusal(error, classifyMfaError(error, reasons));
+  }
+
+  /**
+   * Settles a refusal already classified, or rethrows when `refused` is null,
+   * restoring `status` to what the token says either way.
+   */
+  private settleRefusal<TRefusal>(
+    error: unknown,
+    refused: TRefusal | null
+  ): TRefusal {
     this.setState({
       status: this.accessToken === null ? 'anonymous' : 'authenticated',
       hasAccessToken: this.accessToken !== null,

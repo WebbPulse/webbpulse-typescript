@@ -41,6 +41,11 @@ export interface WebbPulseErrorBody {
    * with one entry per offending field, or a mapping for anything else.
    */
   details?: unknown[] | Record<string, unknown>;
+  /**
+   * Seconds within which the caller must have authenticated, sent alongside
+   * `error_code: 'STEP_UP_REQUIRED'` by a route that demands a recent sign-in.
+   */
+  max_age?: number;
 }
 
 /**
@@ -271,6 +276,83 @@ export function getWebbPulseError(error: ApiError): WebbPulseErrorInfo {
     requestId: error.requestId,
     status: error.status,
   };
+}
+
+/** The envelope `error_code` a route answers with when it needs a recent sign-in. */
+export const STEP_UP_REQUIRED_ERROR_CODE = 'STEP_UP_REQUIRED';
+
+/** The RFC 9470 bearer `error` a step-up challenge carries in `WWW-Authenticate`. */
+const INSUFFICIENT_USER_AUTHENTICATION =
+  /error\s*=\s*"?insufficient_user_authentication"?/i;
+
+const MAX_AGE_PARAM = /max_age\s*=\s*"?(\d+)"?/i;
+
+/**
+ * Thrown for a 401 that asks the caller to re-authenticate rather than saying
+ * the session is gone: the envelope carries `error_code: 'STEP_UP_REQUIRED'`,
+ * or `WWW-Authenticate` carries `error="insufficient_user_authentication"`.
+ * The token is still valid, so the client neither refreshes nor reports it to
+ * `onUnauthorized`, and `isUnauthorized` reads false.
+ */
+export class StepUpRequiredError extends ApiError {
+  /**
+   * Seconds within which the caller must have authenticated, from the body's
+   * `max_age` or else the header's `max_age` parameter. `undefined` when
+   * neither carried one.
+   */
+  readonly maxAge: number | undefined;
+
+  constructor(
+    init: ConstructorParameters<typeof ApiError>[0] & {
+      maxAge?: number | undefined;
+    }
+  ) {
+    super(init);
+    this.name = 'StepUpRequiredError';
+    this.maxAge = init.maxAge;
+    Object.setPrototypeOf(this, StepUpRequiredError.prototype);
+  }
+
+  /** Always false: a step-up challenge is not an ended session. */
+  override get isUnauthorized(): boolean {
+    return false;
+  }
+}
+
+/** Narrows a thrown value to a {@link StepUpRequiredError}. */
+export function isStepUpRequired(error: unknown): error is StepUpRequiredError {
+  return error instanceof StepUpRequiredError;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const parsed = typeof value === 'string' ? Number(value) : value;
+  return typeof parsed === 'number' && Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : undefined;
+}
+
+/**
+ * Builds the error for a non 2xx response: a {@link StepUpRequiredError} for a
+ * 401 step-up challenge and a plain {@link ApiError} for everything else.
+ */
+export function apiErrorFromResponse(
+  init: ConstructorParameters<typeof ApiError>[0],
+  headers: { get(name: string): string | null }
+): ApiError {
+  if (init.status !== 401) {
+    return new ApiError(init);
+  }
+  const body = isWebbPulseErrorBody(init.body) ? init.body : undefined;
+  const challenge = headers.get('www-authenticate') ?? '';
+  const byCode = body?.error_code === STEP_UP_REQUIRED_ERROR_CODE;
+  const byHeader = INSUFFICIENT_USER_AUTHENTICATION.test(challenge);
+  if (!byCode && !byHeader) {
+    return new ApiError(init);
+  }
+  const maxAge =
+    nonNegativeInteger(body?.max_age) ??
+    nonNegativeInteger(MAX_AGE_PARAM.exec(challenge)?.[1]);
+  return new StepUpRequiredError({ ...init, maxAge });
 }
 
 /** Thrown when the request aborts, whether by timeout or by caller signal. */

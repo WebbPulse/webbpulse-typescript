@@ -555,6 +555,145 @@ describe('stepUp', () => {
   });
 });
 
+/** An unsigned JWT carrying `claims`; the client only reads the payload. */
+function fakeJwt(claims: Record<string, unknown>): string {
+  const encode = (value: unknown): string =>
+    btoa(JSON.stringify(value))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(claims)}.sig`;
+}
+
+describe('stepUp with a password', () => {
+  it('sends the password and adopts the fresher token', async () => {
+    const { auth, fetchMock } = await signedIn({
+      '/api/auth/step-up': () =>
+        jsonResponse({ access_token: 'access-2', expires_in: 600 }),
+    });
+
+    const outcome = await auth.stepUp({ password: 'hunter2' });
+
+    expect(outcome).toEqual({ ok: true, expiresIn: 600 });
+    expect(auth.getAccessToken()).toBe('access-2');
+    expect(bodyOf(fetchMock, '/api/auth/step-up')).toEqual({
+      password: 'hunter2',
+    });
+    expect(headerOf(fetchMock, '/api/auth/step-up', 'authorization')).toBe(
+      'Bearer access-1'
+    );
+  });
+
+  it('reports a wrong password without ending the session', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/step-up': () =>
+        envelope(401, 'INVALID_CREDENTIALS', 'Incorrect password.'),
+    });
+
+    const outcome = await auth.stepUp({ password: 'nope' });
+
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'invalid-password',
+      code: 'INVALID_CREDENTIALS',
+      message: 'Incorrect password.',
+    });
+    expect(auth.getAccessToken()).toBe('access-1');
+    expect(auth.getState().status).toBe('authenticated');
+  });
+
+  it('reports the lockout as rate limited with its retry hint', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/step-up': () =>
+        envelope(429, 'TOO_MANY_ATTEMPTS', 'Too many attempts.', {
+          retry_after: 120,
+        }),
+    });
+
+    const outcome = await auth.stepUp({ password: 'nope' });
+
+    if (outcome.ok || outcome.reason !== 'rate-limited') {
+      throw new Error('expected a rate limit');
+    }
+    expect(outcome.retryAfter).toBe(120);
+    expect(outcome.code).toBe('TOO_MANY_ATTEMPTS');
+    expect(auth.getState().status).toBe('authenticated');
+  });
+
+  it('rethrows a failure it cannot classify', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/step-up': () => envelope(500, 'INTERNAL_ERROR', 'Boom.'),
+    });
+
+    await expect(auth.stepUp({ password: 'pw' })).rejects.toThrow();
+    expect(auth.getState().status).toBe('authenticated');
+  });
+});
+
+describe('authTime and isRecentlyAuthenticated', () => {
+  it('are null and false with no token', () => {
+    const auth = authWith(routedFetch({}));
+
+    expect(auth.authTime()).toBeNull();
+    expect(auth.isRecentlyAuthenticated(300)).toBe(false);
+  });
+
+  it('are null and false for a token with no auth_time claim', async () => {
+    const { auth } = await signedIn({});
+
+    expect(auth.authTime()).toBeNull();
+    expect(auth.isRecentlyAuthenticated(300)).toBe(false);
+  });
+
+  it('read auth_time from the held token and compare it with now', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({
+          ...LOGIN_TOKENS,
+          access_token: fakeJwt({ sub: 'u_1', auth_time: 1_000 }),
+        }),
+    });
+    const auth = authWith(fetchMock);
+    await auth.login({ email: 'user@example.test', password: 'pw' });
+
+    expect(auth.authTime()).toBe(1_000);
+    expect(auth.isRecentlyAuthenticated(300, 1_200_000)).toBe(true);
+    expect(auth.isRecentlyAuthenticated(300, 1_300_000)).toBe(true);
+    expect(auth.isRecentlyAuthenticated(300, 1_300_001)).toBe(false);
+  });
+
+  it('move forward once a step-up adopts a fresher token', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/login': () =>
+        jsonResponse({
+          ...LOGIN_TOKENS,
+          access_token: fakeJwt({ sub: 'u_1', auth_time: 1_000 }),
+        }),
+      '/api/auth/step-up': () =>
+        jsonResponse({
+          access_token: fakeJwt({ sub: 'u_1', auth_time: 5_000 }),
+          expires_in: 600,
+        }),
+    });
+
+    expect(auth.isRecentlyAuthenticated(300, 5_100_000)).toBe(false);
+
+    await auth.stepUp({ password: 'pw' });
+
+    expect(auth.authTime()).toBe(5_000);
+    expect(auth.isRecentlyAuthenticated(300, 5_100_000)).toBe(true);
+  });
+
+  it('ignore a malformed token rather than throwing', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/login': () =>
+        jsonResponse({ ...LOGIN_TOKENS, access_token: 'a.%%%.c' }),
+    });
+
+    expect(auth.authTime()).toBeNull();
+  });
+});
+
 describe('paths', () => {
   it('default to the issuer path the standard fixes', async () => {
     const { auth, fetchMock } = await signedIn({

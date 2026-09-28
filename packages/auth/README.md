@@ -159,6 +159,7 @@ await auth.activateTotp({ code }); // { recoveryCodes }
 await auth.disableTotp({ code }); // { ok: true }
 await auth.regenerateRecoveryCodes({ code }); // { recoveryCodes }
 await auth.stepUp({ code }); // adopts a fresher access token
+await auth.stepUp({ password }); // the same, from the account password
 await auth.stepUpWithPasskey(); // the same, from a passkey assertion
 ```
 
@@ -190,13 +191,59 @@ URI to a generator such as `@webbpulse/qrcode`.
   settles through the passkey refusals: `rejected`, `unavailable`,
   `rate-limited`, `cancelled`, `unsupported` and `no-passkeys`. The last means
   the account has no passkey enrolled; offer `stepUp` with a code instead.
+- **`stepUp({ password })` confirms the account password** for an account with
+  no second factor. It settles `invalid-password` on a wrong password and
+  `rate-limited` on the lockout, keeping the session either way.
+- **`authTime()` and `isRecentlyAuthenticated(maxAgeSeconds)`** read the held
+  token's `auth_time` claim, unverified, so a product can prompt before a
+  sensitive call instead of after its refusal. Both are on `useAuth()` too. The
+  server's `STEP_UP_REQUIRED` stays the authority.
 
-Refusal reasons: `invalid-code`, `already-enabled`, `no-pending-enrolment`,
+Refusal reasons: `invalid-code`, `invalid-password`, `already-enabled`, `no-pending-enrolment`,
 `rate-limited`, `unavailable`. These return outcomes rather than throwing, and
 reject only for a network failure, a 500, or a 401 the client could not repair.
 
 `paths`: `totpEnrol`, `totpActivate`, `totpDisable`, `recoveryCodes`, `stepUp`,
 `stepUpPasskeyOptions`.
+
+## Step-up prompts
+
+`useStepUp` from `@webbpulse/auth/react` is the headless gate for a call the
+server refuses with `STEP_UP_REQUIRED`. It holds state and callbacks only; the
+product renders its own prompt.
+
+```tsx
+const stepUp = useStepUp();
+const { mutate } = useMutationWithRefetch(
+  stepUp.withStepUp((id: string) => api.delete(`/workspaces/${id}`)),
+  'workspaces'
+);
+
+{
+  stepUp.open && (
+    <ConfirmPasswordDialog
+      maxAge={stepUp.maxAge}
+      error={stepUp.error?.message}
+      busy={stepUp.pending}
+      onSubmit={(password) => stepUp.submit({ password })}
+      onCancel={stepUp.cancel}
+    />
+  );
+}
+```
+
+- **`withStepUp(fn)` parks the refused call** and opens the prompt, so its
+  caller's promise stays pending and a wrapped `mutate` stays `isMutating`.
+  Any other outcome passes straight through.
+- **`submit(method)` takes `{ password }`, `{ code }` or `{ passkey: true }`.**
+  On success the prompt closes and every parked call replays once, its caller
+  settling with the replay. A second challenge on the replay reaches the caller
+  rather than reopening. A refusal or a throw lands in `error`, the prompt
+  stays open, and `submit` resolves false.
+- **`cancel()` rejects every parked call with `StepUpCancelledError`**, whose
+  `cause` is the challenge. Unmounting with calls parked does the same. A
+  mutation's `reset()` clears the resulting error.
+- **`maxAge` is the strictest** `max_age` among the parked challenges.
 
 ## Email verification and password reset
 
@@ -645,11 +692,11 @@ email flows, and reports refusals as outcomes rather than throwing.
 
 - Client: `AuthClient`, `createAuthClient`, and the deprecated
   `SessionManager`.
-- Errors: `AUTH_ERROR_CODES`, `AuthSessionEndedError`, `getAuthErrorCode`,
+- Errors: `AUTH_ERROR_CODES`, `AuthSessionEndedError`, `StepUpCancelledError`, `getAuthErrorCode`,
   `isAuthErrorCode`, `describeAuthError`.
 - Link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`, `LINK_TOKEN_PARAM`,
   `readLinkToken`, `retryAfterSeconds`, `classifyLinkError`.
-- MFA: `TOTP_FACTOR`, `classifyMfaError`.
+- MFA: `TOTP_FACTOR`, `classifyMfaError`, `classifyPasswordStepUpError`.
 - OAuth: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`, `readOAuthCallback`,
   `stripOAuthParams`, `parseOAuthLinks`, `describeOAuthCallbackError`,
   `classifyOAuthError`, and the `OAUTH_*` parameter constants.
@@ -668,13 +715,13 @@ Types accompany each group, including `AuthClientOptions`, `AuthState`,
 `AuthProvider`, `useAuth`, `useAuthClient`, `useAuthState`, `useSessionEnded`,
 `useOAuthCallback`, `usePasskeySignInSupport`, `usePasskeySignInButton`,
 `useOAuthProviderLinks`, `useEmailVerificationLink`, `useQueryAuth`,
-`useDismissedUntilSignIn`, `DISMISSAL_STORAGE_PREFIX`, and the
+`useDismissedUntilSignIn`, `useStepUp`, `DISMISSAL_STORAGE_PREFIX`, and the
 deprecated `SessionProvider`, `useSession`, `useSessionState`,
 `useSessionManager`, with `AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`,
 `PasskeySignInSupport`, `PasskeySignInSupportOptions`, `PasskeySignInButton`,
 `PasskeySignInButtonOptions`, `OAuthProviderLink`, `OAuthProviderLinksOptions`,
 `EmailVerificationLinkState`, `EmailVerificationLinkOptions`, `QueryAuth`,
-`DismissedUntilSignIn`,
+`DismissedUntilSignIn`, `StepUpGate`, `StepUpMethod`, `StepUpFailure`,
 `SessionProviderProps`, `UseSessionResult`, `AnySessionManager` and
 `OAuthCallbackHandler`.
 
