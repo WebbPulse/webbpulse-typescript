@@ -766,7 +766,10 @@ export interface PasskeySignInButtonOptions {
  *
  * Conditional mediation is armed in an effect once the deployment and the
  * browser both say yes, and torn down through an `AbortController` on cleanup,
- * so a ceremony does not outlive the page that started it. Its result is
+ * so a ceremony does not outlive the page that started it. A click aborts the
+ * armed autofill request before starting its own, since a browser refuses a
+ * second request while one is pending, and arms it again afterwards unless the
+ * click signed the person in. The autofill result is
  * dropped when the signal aborted, since a torn-down ceremony reports a
  * cancellation the caller never asked for. A browser that accepts the autofill
  * probe and then refuses the request answers `unsupported`, which is dropped
@@ -805,10 +808,13 @@ export function usePasskeySignInButton(
   });
 
   const armed = conditional && support.conditional && client !== null;
+  const autofill = useRef<AbortController | null>(null);
+  const [armings, setArmings] = useState(0);
 
   useEffect(() => {
     if (!armed || client === null) return;
     const controller = new AbortController();
+    autofill.current = controller;
 
     void client
       .signInWithPasskey({
@@ -824,12 +830,17 @@ export function usePasskeySignInButton(
 
     return () => {
       controller.abort();
+      if (autofill.current === controller) autofill.current = null;
     };
-  }, [armed, client]);
+  }, [armed, client, armings]);
 
   const signIn = useCallback(async (): Promise<void> => {
     if (client === null) return;
+    const pending = autofill.current;
+    autofill.current = null;
+    pending?.abort();
     setBusy(true);
+    let signedIn = false;
     try {
       const trimmed = email?.trim() ?? '';
       const result = await client.signInWithPasskey(
@@ -843,12 +854,14 @@ export function usePasskeySignInButton(
       ) {
         return;
       }
+      signedIn = result.ok && result.kind === 'signed-in';
       await handler.current(result);
     } catch (error) {
       if (errorHandler.current === undefined) throw error;
       errorHandler.current(error);
     } finally {
       setBusy(false);
+      if (pending !== null && !signedIn) setArmings((count) => count + 1);
     }
   }, [client, email]);
 

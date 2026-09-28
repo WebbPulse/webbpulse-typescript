@@ -412,6 +412,88 @@ describe('usePasskeySignInButton', () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it('aborts the armed autofill request before the click starts its own', async () => {
+    browserWithPasskeys(true);
+    const signals: (AbortSignal | undefined)[] = [];
+    const client = {
+      signInWithPasskey: vi.fn(
+        (options: { mediation?: string; signal?: AbortSignal }) => {
+          if (options.mediation === 'conditional') {
+            signals.push(options.signal);
+            return new Promise<PasskeySignInOutcome>(() => undefined);
+          }
+          expect(signals.every((signal) => signal?.aborted === true)).toBe(
+            true
+          );
+          return Promise.resolve(SIGNED_IN);
+        }
+      ),
+    };
+    const onResult = vi.fn();
+
+    const { getByRole } = render(
+      <PasskeyProbe
+        client={client as never}
+        probe={probeAnswering('available')}
+        onResult={onResult}
+      />
+    );
+    await waitFor(() => {
+      expect(signals).toHaveLength(1);
+    });
+
+    await act(async () => {
+      getByRole('button').click();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(onResult).toHaveBeenCalledWith(SIGNED_IN);
+    });
+    expect(signals).toHaveLength(1);
+  });
+
+  it('arms autofill again after a click that did not sign in', async () => {
+    browserWithPasskeys(true);
+    const signals: (AbortSignal | undefined)[] = [];
+    const client = {
+      signInWithPasskey: vi.fn(
+        (options: { mediation?: string; signal?: AbortSignal }) => {
+          if (options.mediation === 'conditional') {
+            signals.push(options.signal);
+            return new Promise<PasskeySignInOutcome>(() => undefined);
+          }
+          return Promise.resolve({
+            ok: false,
+            reason: 'cancelled',
+          } as PasskeySignInOutcome);
+        }
+      ),
+    };
+
+    const { getByRole } = render(
+      <PasskeyProbe
+        client={client as never}
+        probe={probeAnswering('available')}
+        onResult={vi.fn()}
+      />
+    );
+    await waitFor(() => {
+      expect(signals).toHaveLength(1);
+    });
+
+    await act(async () => {
+      getByRole('button').click();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(signals).toHaveLength(2);
+    });
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+  });
+
   it('drops the result of a conditional ceremony that was torn down', async () => {
     browserWithPasskeys(true);
     let settle: ((outcome: PasskeySignInOutcome) => void) | undefined;
