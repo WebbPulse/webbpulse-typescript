@@ -296,3 +296,64 @@ describe('the client on a step-up challenge', () => {
     expect(auth.refreshSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('skipUnauthorizedHandling', () => {
+  function invalidCredentials(): Response {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        status: 401,
+        message: 'Incorrect password.',
+        error_code: 'INVALID_CREDENTIALS',
+      }),
+      { status: 401, headers: { 'content-type': 'application/json' } }
+    );
+  }
+
+  it('reads a 401 as a refusal: no refresh, no replay, no onUnauthorized', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(invalidCredentials()));
+    const auth = stubAuth();
+    const onUnauthorized = vi.fn();
+    const client = createApiClient({
+      baseUrl: 'https://api.example.test',
+      fetch: fetchMock,
+      retries: 0,
+      auth,
+      onUnauthorized,
+    });
+
+    const error: unknown = await client
+      .post(
+        '/api/auth/step-up',
+        { password: 'nope' },
+        {
+          skipUnauthorizedHandling: true,
+        }
+      )
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect(auth.refreshSpy).not.toHaveBeenCalled();
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the same 401 on the ordinary path without it', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(invalidCredentials()));
+    const auth = stubAuth();
+    const onUnauthorized = vi.fn();
+    const client = createApiClient({
+      baseUrl: 'https://api.example.test',
+      fetch: fetchMock,
+      retries: 0,
+      auth,
+      onUnauthorized,
+    });
+
+    await client.post('/api/auth/step-up', {}).catch(() => undefined);
+
+    expect(auth.refreshSpy).toHaveBeenCalledTimes(1);
+    expect(onUnauthorized).toHaveBeenCalledTimes(2);
+  });
+});

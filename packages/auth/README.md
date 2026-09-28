@@ -193,7 +193,9 @@ URI to a generator such as `@webbpulse/qrcode`.
   the account has no passkey enrolled; offer `stepUp` with a code instead.
 - **`stepUp({ password })` confirms the account password** for an account with
   no second factor. It settles `invalid-password` on a wrong password and
-  `rate-limited` on the lockout, keeping the session either way.
+  `rate-limited` on the lockout, keeping the session either way. Every step-up
+  call, by password, code or passkey, reads a 401 from the step-up route as a
+  refusal: it never refreshes, replays or reaches `onUnauthorized`.
 - **`authTime()` and `isRecentlyAuthenticated(maxAgeSeconds)`** read the held
   token's `auth_time` claim, unverified, so a product can prompt before a
   sensitive call instead of after its refusal. Both are on `useAuth()` too. The

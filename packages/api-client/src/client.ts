@@ -67,6 +67,13 @@ export interface RequestOptions {
    * set it: neither refresh nor login can be repaired by a refresh.
    */
   skipAuthRetry?: boolean;
+  /**
+   * Reads a 401 on this call as a refusal of what was sent rather than a lost
+   * session: no refresh, no replay and no `onUnauthorized`. For a route that
+   * checks a credential inside a live session, such as a step-up, where a
+   * wrong password must not sign the person out.
+   */
+  skipUnauthorizedHandling?: boolean;
 }
 
 /** A response, plus the metadata a caller needs for logging and auth. */
@@ -265,7 +272,11 @@ export class ApiClient {
     options: RequestOptions = {}
   ): Promise<ApiResponse<T>> {
     const auth = this.options.auth;
-    if (auth === undefined || options.skipAuthRetry === true) {
+    if (
+      auth === undefined ||
+      options.skipAuthRetry === true ||
+      options.skipUnauthorizedHandling === true
+    ) {
       return this.requestOnce<T>(method, path, options);
     }
 
@@ -485,7 +496,10 @@ export class ApiClient {
         },
         response.headers
       );
-      if (apiError.isUnauthorized) {
+      if (
+        apiError.isUnauthorized &&
+        options.skipUnauthorizedHandling !== true
+      ) {
         this.options.onUnauthorized?.(apiError);
       }
       throw apiError;

@@ -104,8 +104,11 @@ try {
   primary signal and the header covers a body that carried none.
 - **`maxAge` is `number | undefined`**, from the body's `max_age` or else the
   header's `max_age` parameter.
-- **Any other 401 is unchanged**, including a wrong password, and still takes
-  the refresh and replay.
+- **Any other 401 is unchanged** and still takes the refresh and replay.
+- **`skipUnauthorizedHandling: true` on a `RequestOptions`** reads a 401 as a
+  refusal of what was sent: no refresh, no replay, no `onUnauthorized`. The
+  auth client sets it on the step-up route, so a mistyped password during a
+  step-up cannot sign the person out.
 
 `apiErrorFromResponse(init, headers)` is the classifier the transport uses, for
 a caller building errors from its own fetch. `@webbpulse/auth/react` has the

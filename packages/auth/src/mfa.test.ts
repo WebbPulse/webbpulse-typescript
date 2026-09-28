@@ -1,3 +1,4 @@
+import { createApiClient } from '@webbpulse/api-client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
@@ -626,6 +627,79 @@ describe('stepUp with a password', () => {
     });
 
     await expect(auth.stepUp({ password: 'pw' })).rejects.toThrow();
+    expect(auth.getState().status).toBe('authenticated');
+  });
+});
+
+describe('a 401 from the step-up route', () => {
+  /**
+   * The person is signed in while they step up, so a typo must read as a
+   * refusal. A refresh or an onUnauthorized here would sign them out.
+   */
+  async function steppingUpWith(stepUpResponse: () => Response): Promise<{
+    auth: AuthClient;
+    fetchMock: ReturnType<typeof vi.fn>;
+    onUnauthorized: ReturnType<typeof vi.fn>;
+    refresh: ReturnType<typeof vi.fn>;
+  }> {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () => jsonResponse(LOGIN_TOKENS),
+      '/api/auth/refresh': () => jsonResponse(LOGIN_TOKENS),
+      '/api/auth/step-up': stepUpResponse,
+    });
+    const onUnauthorized = vi.fn();
+    const refresh = vi.fn(() => Promise.resolve('access-1'));
+    let token: string | null = null;
+    const client = createApiClient({
+      baseUrl: 'https://api.example.test',
+      fetch: fetchMock,
+      retries: 0,
+      onUnauthorized,
+      auth: { getAccessToken: () => token, refresh },
+    });
+    const auth = createAuthClient({
+      client,
+      disableProactiveRefresh: true,
+    });
+    await auth.login({ email: 'user@example.test', password: 'pw' });
+    token = auth.getAccessToken();
+    return { auth, fetchMock, onUnauthorized, refresh };
+  }
+
+  it('is a refusal for a wrong password: no onUnauthorized, no refresh, no replay', async () => {
+    const { auth, fetchMock, onUnauthorized, refresh } = await steppingUpWith(
+      () => envelope(401, 'INVALID_CREDENTIALS', 'Incorrect password.')
+    );
+
+    const outcome = await auth.stepUp({ password: 'typo' });
+
+    expect(outcome.ok).toBe(false);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(
+      fetchMock.mock.calls.filter((c) =>
+        String(c[0]).includes('/api/auth/step-up')
+      )
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some((c) =>
+        String(c[0]).includes('/api/auth/refresh')
+      )
+    ).toBe(false);
+    expect(auth.getState().status).toBe('authenticated');
+    expect(auth.getAccessToken()).toBe('access-1');
+  });
+
+  it('is a refusal for a wrong code as well', async () => {
+    const { auth, onUnauthorized, refresh } = await steppingUpWith(() =>
+      envelope(401, 'INVALID_MFA_CODE')
+    );
+
+    const outcome = await auth.stepUp({ code: '000000' });
+
+    expect(outcome.ok).toBe(false);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
     expect(auth.getState().status).toBe('authenticated');
   });
 });

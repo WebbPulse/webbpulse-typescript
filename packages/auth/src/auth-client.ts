@@ -1543,7 +1543,11 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     const response = await this.client.post<TokenResponseBody>(
       this.paths.stepUp,
       body,
-      { retries: 0, headers: this.authorizationHeader() }
+      {
+        retries: 0,
+        headers: this.authorizationHeader(),
+        skipUnauthorizedHandling: true,
+      }
     );
     const token = response.data.access_token;
     if (typeof token !== 'string' || token === '') {
