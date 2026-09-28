@@ -134,6 +134,11 @@ export interface OAuthLink {
   email: string;
   /** Whether the provider says it verified that address. */
   emailVerified: boolean;
+  /**
+   * The provider's username, such as the GitHub login, when the server sent
+   * one. Absent for Google and for servers older than webbpulse 0.65.
+   */
+  login?: string;
   /** ISO 8601 instant the link was created. */
   linkedAt: string;
   /** ISO 8601 instant of the most recent sign-in through it, when there is one. */
@@ -472,7 +477,8 @@ export function parseOAuthLinks(body: unknown): OAuthLink[] {
       continue;
     }
     const lastLoginAt = record['last_login_at'];
-    links.push({
+    const login = record['login'];
+    const link: OAuthLink = {
       provider,
       email: typeof record['email'] === 'string' ? record['email'] : '',
       emailVerified: record['email_verified'] === true,
@@ -482,7 +488,11 @@ export function parseOAuthLinks(body: unknown): OAuthLink[] {
         typeof lastLoginAt === 'string' && lastLoginAt !== ''
           ? lastLoginAt
           : undefined,
-    });
+    };
+    if (typeof login === 'string' && login !== '') {
+      link.login = login;
+    }
+    links.push(link);
   }
   return links;
 }
