@@ -973,4 +973,59 @@ describe('useMutationWithRefetch', () => {
     expect(mutation.result.current.error).toBeInstanceOf(Error);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('reset clears the error and returns to idle', async () => {
+    const write = vi.fn(() => Promise.reject(new Error('refused')));
+    const mutation = renderHook(() => useMutationWithRefetch(write, 'rows'));
+
+    await act(async () => {
+      await expect(mutation.result.current.mutate()).rejects.toThrow('refused');
+    });
+    expect(mutation.result.current.error).toBeInstanceOf(Error);
+
+    act(() => {
+      mutation.result.current.reset();
+    });
+
+    expect(mutation.result.current.error).toBeNull();
+    expect(mutation.result.current.isMutating).toBe(false);
+  });
+
+  it('reset detaches a write already in flight from the state', async () => {
+    let reject: (reason: unknown) => void = () => undefined;
+    const write = vi.fn(
+      () =>
+        new Promise<string>((_resolve, rejectWrite) => {
+          reject = rejectWrite;
+        })
+    );
+    const mutation = renderHook(() => useMutationWithRefetch(write, 'rows'));
+
+    let pending: Promise<string> = Promise.resolve('');
+    act(() => {
+      pending = mutation.result.current.mutate();
+      pending.catch(() => undefined);
+    });
+    expect(mutation.result.current.isMutating).toBe(true);
+
+    act(() => {
+      mutation.result.current.reset();
+    });
+    expect(mutation.result.current.isMutating).toBe(false);
+
+    await act(async () => {
+      reject(new Error('late'));
+      await expect(pending).rejects.toThrow('late');
+    });
+
+    expect(mutation.result.current.error).toBeNull();
+    expect(mutation.result.current.isMutating).toBe(false);
+  });
+
+  it('keeps reset referentially stable across renders', () => {
+    const write = vi.fn(() => Promise.resolve('ok'));
+    const mutation = renderHook(() => useMutationWithRefetch(write, 'rows'));
+    const first = mutation.result.current.reset;
+    mutation.rerender();
+    expect(mutation.result.current.reset).toBe(first);
+  });
 });

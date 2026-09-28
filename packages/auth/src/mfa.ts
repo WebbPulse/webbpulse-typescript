@@ -133,9 +133,51 @@ export interface StepUpSucceeded {
   expiresIn: number | undefined;
 }
 
-/** What {@link AuthClient.stepUp} resolves to. */
+/** What {@link AuthClient.stepUp} resolves to for a code. */
 export type StepUpOutcome =
   StepUpSucceeded | MfaCodeRejected | MfaRateLimited | MfaUnavailable;
+
+/** A password step-up the server refused because the password was wrong. */
+export interface StepUpPasswordRejected {
+  ok: false;
+  reason: 'invalid-password';
+  code: AuthErrorCode | undefined;
+  /** The server's own sentence. Render this rather than a local one. */
+  message: string;
+}
+
+/** What {@link AuthClient.stepUp} resolves to for a password. */
+export type PasswordStepUpOutcome =
+  StepUpSucceeded | StepUpPasswordRejected | MfaRateLimited;
+
+/**
+ * Classifies a thrown error from a password step-up, or returns null: a wrong
+ * password is `invalid-password` and a 429 is `rate-limited`.
+ */
+export function classifyPasswordStepUpError(
+  error: unknown
+): StepUpPasswordRejected | MfaRateLimited | null {
+  if (!(error instanceof ApiError)) {
+    return null;
+  }
+  const envelope = getWebbPulseError(error);
+  const base = {
+    ok: false as const,
+    code: getAuthErrorCode(error),
+    message: envelope.message,
+  };
+  if (envelope.errorCode === 'INVALID_CREDENTIALS') {
+    return { ...base, reason: 'invalid-password' };
+  }
+  if (error.status === 429) {
+    return {
+      ...base,
+      reason: 'rate-limited',
+      retryAfter: retryAfterOf(error) ?? error.retryAfterSeconds,
+    };
+  }
+  return null;
+}
 
 /** Where the five authorized MFA routes live, relative to the base URL. */
 export interface MfaPaths {

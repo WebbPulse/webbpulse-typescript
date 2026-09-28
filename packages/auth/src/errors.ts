@@ -61,6 +61,7 @@ export const AUTH_ERROR_CODES = [
   'PASSKEY_NONE_REGISTERED',
   'LAST_CREDENTIAL',
   'CREDENTIAL_REQUIRED',
+  'STEP_UP_REQUIRED',
 ] as const;
 
 /** One of the codes in {@link AUTH_ERROR_CODES}. */
@@ -124,5 +125,20 @@ export class AuthSessionEndedError extends Error {
     this.code = init.code;
     this.reason = init.reason;
     Object.setPrototypeOf(this, AuthSessionEndedError.prototype);
+  }
+}
+
+/**
+ * What a request wrapped by `useStepUp` rejects with when the person dismissed
+ * the step-up prompt, or the component unmounted with it open. `cause` holds
+ * the step-up challenge that opened the prompt.
+ */
+export class StepUpCancelledError extends Error {
+  constructor(init: { message?: string; cause?: unknown } = {}) {
+    super(init.message ?? 'Re-authentication was cancelled.', {
+      cause: init.cause,
+    });
+    this.name = 'StepUpCancelledError';
+    Object.setPrototypeOf(this, StepUpCancelledError.prototype);
   }
 }

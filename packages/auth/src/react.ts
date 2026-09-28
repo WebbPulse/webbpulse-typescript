@@ -32,6 +32,13 @@ import {
   type OAuthCallbackResult,
 } from './oauth.js';
 import type { SessionManager, SessionState } from './session.js';
+import { useStepUpGate, type StepUpGate } from './step-up-react.js';
+
+export type {
+  StepUpFailure,
+  StepUpGate,
+  StepUpMethod,
+} from './step-up-react.js';
 
 const SessionManagerContext = createContext<SessionManager<
   unknown,
@@ -356,6 +363,13 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
    * {@link UseAuthResult.stepUp}.
    */
   stepUpWithPasskey: AuthClient<TUser>['stepUpWithPasskey'];
+  /**
+   * The held token's `auth_time` in epoch seconds, or null. A step-up moves it
+   * forward and re-renders the component; a plain refresh does not move it.
+   */
+  authTime: AuthClient<TUser>['authTime'];
+  /** Whether `auth_time` is within the given number of seconds of now. */
+  isRecentlyAuthenticated: AuthClient<TUser>['isRecentlyAuthenticated'];
   startOAuth: AuthClient<TUser>['startOAuth'];
   logout: AuthClient<TUser>['logout'];
   /**
@@ -383,6 +397,8 @@ const AUTH_METHOD_NAMES = [
   'deletePasskey',
   'stepUp',
   'stepUpWithPasskey',
+  'authTime',
+  'isRecentlyAuthenticated',
   'startOAuth',
   'logout',
   'setUser',
@@ -1043,4 +1059,36 @@ export function useDismissedUntilSignIn(key: string): DismissedUntilSignIn {
   }, [side, storageKey]);
 
   return { dismissed: dismissedSide !== null && !lapsed, dismiss };
+}
+
+/**
+ * The step-up gate for the {@link AuthClient} in context. Wrap a sensitive call
+ * with `withStepUp`; when the server answers `STEP_UP_REQUIRED`, `open` turns
+ * true, the product renders its own prompt and calls `submit`, and the original
+ * call replays once and resolves its caller. `cancel` rejects it with a
+ * `StepUpCancelledError`, as does unmounting with the prompt open.
+ *
+ * It composes with `useMutationWithRefetch` from `@webbpulse/api-client/react`
+ * by wrapping the write, which stays `isMutating` while the prompt is open.
+ *
+ * @example
+ * ```tsx
+ * const stepUp = useStepUp();
+ * const { mutate } = useMutationWithRefetch(
+ *   stepUp.withStepUp((id: string) => api.delete(`/workspaces/${id}`)),
+ *   'workspaces'
+ * );
+ *
+ * {stepUp.open && (
+ *   <ConfirmPasswordDialog
+ *     error={stepUp.error?.message}
+ *     busy={stepUp.pending}
+ *     onSubmit={(password) => stepUp.submit({ password })}
+ *     onCancel={stepUp.cancel}
+ *   />
+ * )}
+ * ```
+ */
+export function useStepUp(): StepUpGate {
+  return useStepUpGate(useAuthClient());
 }

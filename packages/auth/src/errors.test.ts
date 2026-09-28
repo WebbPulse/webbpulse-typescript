@@ -91,7 +91,7 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the codes the M5 passkey routes emit', () => {
-    expect([...AUTH_ERROR_CODES].slice(39)).toEqual([
+    expect([...AUTH_ERROR_CODES].slice(39, 49)).toEqual([
       'PASSKEY_REJECTED',
       'PASSKEY_ALREADY_REGISTERED',
       'PASSKEY_NOT_FOUND',
@@ -103,6 +103,10 @@ describe('AUTH_ERROR_CODES', () => {
       'LAST_CREDENTIAL',
       'CREDENTIAL_REQUIRED',
     ]);
+  });
+
+  it('adds the code a step-up gated route emits', () => {
+    expect([...AUTH_ERROR_CODES].slice(49)).toEqual(['STEP_UP_REQUIRED']);
   });
 });
 

@@ -2,6 +2,8 @@ import {
   ApiError,
   ApiNetworkError,
   ApiTimeoutError,
+  StepUpRequiredError,
+  apiErrorFromResponse,
   retryAfterFromHeaders,
 } from './errors.js';
 import { joinUrl, serializeQuery, type QueryParams } from './query.js';
@@ -65,6 +67,13 @@ export interface RequestOptions {
    * set it: neither refresh nor login can be repaired by a refresh.
    */
   skipAuthRetry?: boolean;
+  /**
+   * Reads a 401 on this call as a refusal of what was sent rather than a lost
+   * session: no refresh, no replay and no `onUnauthorized`. For a route that
+   * checks a credential inside a live session, such as a step-up, where a
+   * wrong password must not sign the person out.
+   */
+  skipUnauthorizedHandling?: boolean;
 }
 
 /** A response, plus the metadata a caller needs for logging and auth. */
@@ -116,7 +125,10 @@ export interface ApiClientOptions {
   auth?: AuthTokenProvider;
   /** Called with a token the API rotated in via a response header. */
   onTokenRefresh?: (token: string) => void;
-  /** Called for every 401, so the auth layer can clear its session. */
+  /**
+   * Called for every 401 that means the session is gone, so the auth layer can
+   * clear it. A {@link StepUpRequiredError} is not reported: the token is good.
+   */
   onUnauthorized?: (error: ApiError) => void;
   /** Generates a request id. Defaults to `crypto.randomUUID`. */
   generateRequestId?: () => string;
@@ -250,7 +262,9 @@ export class ApiClient {
   /**
    * Sends a request, refreshing and replaying once on a 401. This wrapper has
    * no loop of its own and calls `requestOnce` at most twice, so exactly once
-   * is a property of the control flow rather than a counter.
+   * is a property of the control flow rather than a counter. A
+   * {@link StepUpRequiredError} is thrown straight through: a refresh keeps
+   * `auth_time`, so a replay would only earn the same answer.
    */
   async request<T = unknown>(
     method: string,
@@ -258,14 +272,22 @@ export class ApiClient {
     options: RequestOptions = {}
   ): Promise<ApiResponse<T>> {
     const auth = this.options.auth;
-    if (auth === undefined || options.skipAuthRetry === true) {
+    if (
+      auth === undefined ||
+      options.skipAuthRetry === true ||
+      options.skipUnauthorizedHandling === true
+    ) {
       return this.requestOnce<T>(method, path, options);
     }
 
     try {
       return await this.requestOnce<T>(method, path, options);
     } catch (error) {
-      if (!(error instanceof ApiError) || !error.isUnauthorized) {
+      if (
+        !(error instanceof ApiError) ||
+        error instanceof StepUpRequiredError ||
+        !error.isUnauthorized
+      ) {
         throw error;
       }
       if (options.signal?.aborted === true) {
@@ -459,19 +481,25 @@ export class ApiClient {
 
     if (!response.ok) {
       const body = await parseBody(response);
-      const apiError = new ApiError({
-        status: response.status,
-        statusText: response.statusText,
-        body,
-        url,
-        method,
-        requestId: responseRequestId,
-        retryAfterSeconds: retryAfterFromHeaders(
-          response.status,
-          response.headers
-        ),
-      });
-      if (apiError.isUnauthorized) {
+      const apiError = apiErrorFromResponse(
+        {
+          status: response.status,
+          statusText: response.statusText,
+          body,
+          url,
+          method,
+          requestId: responseRequestId,
+          retryAfterSeconds: retryAfterFromHeaders(
+            response.status,
+            response.headers
+          ),
+        },
+        response.headers
+      );
+      if (
+        apiError.isUnauthorized &&
+        options.skipUnauthorizedHandling !== true
+      ) {
         this.options.onUnauthorized?.(apiError);
       }
       throw apiError;

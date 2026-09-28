@@ -604,6 +604,12 @@ export interface MutationWithRefetch<TArgs extends unknown[], TResult> {
   isMutating: boolean;
   /** The last failure, or null. Cleared when the next write starts. */
   error: unknown;
+  /**
+   * Returns the hook to its idle state: `error` null and `isMutating` false. A
+   * write already in flight still settles its own promise and still
+   * invalidates on success, but no longer writes to the hook's state.
+   */
+  reset: () => void;
 }
 
 /**
@@ -635,6 +641,7 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
   const [error, setError] = useState<unknown>(null);
 
   const live = useRef(true);
+  const generation = useRef(0);
   const writeRef = useRef(write);
   writeRef.current = write;
   const keysRef = useRef(keys);
@@ -648,6 +655,9 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
   }, []);
 
   const mutate = useCallback(async (...args: TArgs): Promise<TResult> => {
+    const started = generation.current;
+    const current = (): boolean =>
+      live.current && generation.current === started;
     setIsMutating(true);
     setError(null);
     try {
@@ -655,20 +665,26 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
       invalidateQueries(keysRef.current);
       return result;
     } catch (thrown) {
-      if (live.current) {
+      if (current()) {
         setError(thrown);
       }
       throw thrown;
     } finally {
-      if (live.current) {
+      if (current()) {
         setIsMutating(false);
       }
     }
   }, []);
 
+  const reset = useCallback((): void => {
+    generation.current += 1;
+    setError(null);
+    setIsMutating(false);
+  }, []);
+
   return useMemo(
-    () => ({ mutate, isMutating, error }),
-    [mutate, isMutating, error]
+    () => ({ mutate, isMutating, error, reset }),
+    [mutate, isMutating, error, reset]
   );
 }
 

@@ -75,6 +75,45 @@ on `@webbpulse/auth` and anything satisfying those two methods will do.
 has not adopted the auth client yet. With no `auth` configured the behaviour is
 exactly what it was before, `onUnauthorized` included.
 
+## Step-up challenges
+
+A route gated on a recent sign-in answers 401 with `error_code:
+"STEP_UP_REQUIRED"`, a `max_age` in seconds, and `WWW-Authenticate: Bearer
+error="insufficient_user_authentication", max_age=<n>`. The transport throws a
+`StepUpRequiredError`, a subclass of `ApiError`, rather than a plain 401:
+
+```ts
+import { isStepUpRequired } from '@webbpulse/api-client';
+
+try {
+  await client.delete(`/workspaces/${id}`);
+} catch (error) {
+  if (isStepUpRequired(error)) {
+    promptForPassword(error.maxAge);
+  }
+}
+```
+
+- **It never refreshes, replays or signs out.** A refresh keeps the token's
+  `auth_time`, so a replay would earn the same answer. `request` rethrows it
+  before the refresh path, `onUnauthorized` is not called, and
+  `isUnauthorized` reads false, so nothing that ends a session on a 401 reacts.
+- **The body decides first, the header second.** A cross-origin browser only
+  reads `WWW-Authenticate` when the server lists it in
+  `Access-Control-Expose-Headers`, so the envelope's `error_code` is the
+  primary signal and the header covers a body that carried none.
+- **`maxAge` is `number | undefined`**, from the body's `max_age` or else the
+  header's `max_age` parameter.
+- **Any other 401 is unchanged** and still takes the refresh and replay.
+- **`skipUnauthorizedHandling: true` on a `RequestOptions`** reads a 401 as a
+  refusal of what was sent: no refresh, no replay, no `onUnauthorized`. The
+  auth client sets it on the step-up route, so a mistyped password during a
+  step-up cannot sign the person out.
+
+`apiErrorFromResponse(init, headers)` is the classifier the transport uses, for
+a caller building errors from its own fetch. `@webbpulse/auth/react` has the
+headless prompt gate, `useStepUp`, that parks the call and replays it.
+
 ## The `{ data, error }` envelope
 
 The client throws, and that stays the default. A rejection is the contract both
@@ -355,11 +394,16 @@ comparison itself. An array of primitives is one array key, so `['jobs', 1]`
 invalidates that key rather than the two keys `jobs` and `1`; pass a list of
 keys as an array holding at least one array key, `[['jobs', 1], 'counts']`.
 
+`reset()` clears `error` and `isMutating` for a form that dismisses a failure or
+walks away from a write. A write still in flight at the reset settles for its
+caller as usual, but no longer writes to the hook's state.
+
 ## Exports
 
 `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the auth contract type
 `AuthTokenProvider`, the error types `ApiError`,
-`ApiNetworkError` and `ApiTimeoutError`, the message formatter
+`ApiNetworkError`, `ApiTimeoutError` and `StepUpRequiredError` with
+`isStepUpRequired`, `apiErrorFromResponse` and `STEP_UP_REQUIRED_ERROR_CODE`, the message formatter
 `formatApiErrorMessage`, the WebbPulse error envelope reader
 `getWebbPulseError` with its guard `isWebbPulseErrorBody` and the types
 `WebbPulseErrorBody` and `WebbPulseErrorInfo`, the rate limit helpers
