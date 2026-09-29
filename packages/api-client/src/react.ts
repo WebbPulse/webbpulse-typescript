@@ -256,9 +256,12 @@ export interface PolledQueryResult<T> {
   /** The last failure, or null. Cleared by the next success. */
   error: unknown;
   /**
-   * True until the first fetch settles, and true again from a `queryKey`
-   * change until the first fetch for the new key settles. Gate a skeleton on
-   * this.
+   * True while the query is enabled and no fetch for the current `queryKey` has
+   * settled yet, so only before the first data or error arrives. Background
+   * polls, hidden-tab polls and refetches never set it. A query enabled late
+   * reads true from the render that enables it, a disabled query reads false,
+   * and a `queryKey` change reads true again until the new key's first fetch
+   * settles. Gate a skeleton on this.
    */
   isLoading: boolean;
   /** True while any fetch is in flight, the first one included. */
@@ -379,7 +382,7 @@ export function usePolledQuery<T>(
 
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const [isLoading, setIsLoading] = useState(enabled);
+  const [settled, setSettled] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [staleAt, setStaleAt] = useState<number | null>(null);
@@ -566,7 +569,7 @@ export function usePolledQuery<T>(
           deadlineAt.current = undefined;
           lastProgressAt.current = Date.now();
           setIsFetching(false);
-          setIsLoading(false);
+          setSettled(true);
         }
       }
       if (owned && settings.current.enabled) {
@@ -652,8 +655,6 @@ export function usePolledQuery<T>(
   }, [clearTimer, release]);
 
   const activeKey = useRef(serializedKey);
-  const enabledRef = useRef(enabled);
-  enabledRef.current = enabled;
 
   useEffect(() => {
     if (activeKey.current === serializedKey) {
@@ -672,7 +673,7 @@ export function usePolledQuery<T>(
     setLastUpdatedAt(null);
     setStaleAt(null);
     setIsFetching(false);
-    setIsLoading(enabledRef.current);
+    setSettled(false);
   }, [serializedKey, clearTimer, release]);
 
   useEffect(() => {
@@ -798,6 +799,7 @@ export function usePolledQuery<T>(
   }, [staleAt]);
 
   const isStale = staleAt === null ? data !== null : now >= staleAt;
+  const isLoading = enabled && !settled;
 
   return useMemo(
     () => ({

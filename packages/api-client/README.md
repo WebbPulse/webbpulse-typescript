@@ -408,6 +408,11 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
   question, so page one's list under a page two heading would be wrong rather
   than merely stale. A caller that would rather hold the old page while the new
   one loads keeps its own copy across the change.
+- **`isLoading` means no data or error yet.** It reads true only while the query
+  is enabled and no fetch for the current key has settled, so background polls,
+  hidden-tab polls and refetches never raise it. A query enabled late, such as
+  one waiting on an admin flag, reads true from the render that enables it; a
+  disabled query reads false.
 
 `useMutationWithRefetch` wraps a write so the related queries refetch the moment
 it lands, rather than waiting out the rest of their interval:
