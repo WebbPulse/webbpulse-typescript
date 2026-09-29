@@ -1,5 +1,11 @@
 # @webbpulse/api-client
 
+## 0.17.0
+
+### Minor Changes
+
+- 59d361a: Idle backoff and ETag polling for `usePolledQuery`. Once the page has seen no pointer, key, wheel, touch or focus activity for `idleAfterMs` (default 2 minutes), each poll stretches the interval by `idleBackoffMultiplier` (default 2) up to `maxIdleIntervalMs` (default 5 minutes), and the first activity afterwards refetches once and returns to `intervalMs`; `idleAfterMs: 0` turns it off. `hiddenIntervalMs` keeps a hidden tab polling at a slow pace instead of pausing (default 0, which pauses). The fetcher context now carries `etag` and `headers` (`If-None-Match` once a validator is held); a fetcher resolving to `polledResponse(response)` has its ETag remembered per query key, and a 304 keeps the held `data` with its identity and writes no data or error state. The client resolves a 304 instead of throwing when the request sent `If-None-Match` or `If-Modified-Since`. Adds `PolledResponse`, `PolledQueryNotModifiedError`, `ConditionalResponse`, `IF_NONE_MATCH_HEADER`, the idle defaults as constants, and the shared activity tracker `subscribeToActivity` and `idleForMs`. Existing callers keep working unchanged, but pick up idle backoff at the defaults.
+
 ## 0.16.0
 
 ### Minor Changes
