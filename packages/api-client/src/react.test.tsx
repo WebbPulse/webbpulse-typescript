@@ -1,14 +1,20 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createApiClient } from './client.js';
 import {
   DEFAULT_MAX_BACKOFF_MS,
   invalidateQueries,
+  PolledQueryNotModifiedError,
   PolledQueryTimeoutError,
+  polledResponse,
+  subscribeToActivity,
   serializeQueryKey,
   useMutationWithRefetch,
   usePolledQuery,
+  type PolledQueryContext,
   type PolledQueryOptions,
+  type PolledResponse,
 } from './react.js';
 
 /** A fetcher resolving to successive values, one per call. */
@@ -842,6 +848,508 @@ describe('usePolledQuery stall recovery', () => {
     });
     await advance(60_000);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('usePolledQuery idle backoff', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setVisibility('visible');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** Advances to an absolute offset from the start of the test. */
+  function clock(): (at: number) => Promise<void> {
+    const start = Date.now();
+    return async (at: number) => {
+      await advance(start + at - Date.now());
+      await settle();
+    };
+  }
+
+  it('stretches the interval exponentially once idle, up to the cap', async () => {
+    const fetcher = sequence(['a']);
+    const to = clock();
+    render(fetcher, {
+      intervalMs: 1000,
+      idleAfterMs: 5000,
+      maxIdleIntervalMs: 8000,
+    });
+    await settle();
+
+    await to(5000);
+    expect(fetcher).toHaveBeenCalledTimes(6);
+    await to(6999);
+    expect(fetcher).toHaveBeenCalledTimes(6);
+    await to(7000);
+    expect(fetcher).toHaveBeenCalledTimes(7);
+    await to(10_999);
+    expect(fetcher).toHaveBeenCalledTimes(7);
+    await to(11_000);
+    expect(fetcher).toHaveBeenCalledTimes(8);
+    await to(19_000);
+    expect(fetcher).toHaveBeenCalledTimes(9);
+    await to(27_000);
+    expect(fetcher).toHaveBeenCalledTimes(10);
+  });
+
+  it('honours a custom multiplier', async () => {
+    const fetcher = sequence(['a']);
+    const to = clock();
+    render(fetcher, {
+      intervalMs: 1000,
+      idleAfterMs: 1000,
+      idleBackoffMultiplier: 3,
+      maxIdleIntervalMs: 100_000,
+    });
+    await settle();
+
+    await to(1000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await to(4000);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await to(12_999);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await to(13_000);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it('refetches once on activity and returns to the interval', async () => {
+    const fetcher = sequence(['a']);
+    const to = clock();
+    render(fetcher, {
+      intervalMs: 1000,
+      idleAfterMs: 5000,
+      maxIdleIntervalMs: 8000,
+    });
+    await settle();
+    await to(11_000);
+    expect(fetcher).toHaveBeenCalledTimes(8);
+
+    await to(12_000);
+    await act(async () => {
+      window.dispatchEvent(new Event('pointermove'));
+      window.dispatchEvent(new Event('keydown'));
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(9);
+
+    await to(12_999);
+    expect(fetcher).toHaveBeenCalledTimes(9);
+    await to(13_000);
+    expect(fetcher).toHaveBeenCalledTimes(10);
+    await to(14_000);
+    expect(fetcher).toHaveBeenCalledTimes(11);
+  });
+
+  it('does not refetch on activity before the query is idle', async () => {
+    const fetcher = sequence(['a']);
+    render(fetcher, { intervalMs: 1000, idleAfterMs: 5000 });
+    await settle();
+
+    await advance(500);
+    await act(async () => {
+      window.dispatchEvent(new Event('pointerdown'));
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('activity keeps the query at its interval', async () => {
+    const fetcher = sequence(['a']);
+    render(fetcher, { intervalMs: 1000, idleAfterMs: 3000 });
+    await settle();
+
+    for (let second = 1; second <= 10; second += 1) {
+      await advance(1000);
+      await settle();
+      window.dispatchEvent(new Event('wheel'));
+    }
+    expect(fetcher).toHaveBeenCalledTimes(11);
+  });
+
+  it('cuts an idle hour at the defaults from 120 polls to 18', async () => {
+    const fetcher = sequence(['a']);
+    render(fetcher);
+    await settle();
+
+    await advance(3_600_000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(18);
+  });
+
+  it('polls at the plain interval when idleAfterMs is 0', async () => {
+    const fetcher = sequence(['a']);
+    render(fetcher, { intervalMs: 60_000, idleAfterMs: 0 });
+    await settle();
+
+    await advance(600_000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(11);
+  });
+
+  it('never stretches below the interval when the cap is lower', async () => {
+    const fetcher = sequence(['a']);
+    const to = clock();
+    render(fetcher, {
+      intervalMs: 1000,
+      idleAfterMs: 1000,
+      maxIdleIntervalMs: 10,
+    });
+    await settle();
+
+    await to(10_000);
+    expect(fetcher).toHaveBeenCalledTimes(11);
+  });
+
+  it('does not let the watchdog cut an idle stretched wait short', async () => {
+    const fetcher = sequence(['a']);
+    const to = clock();
+    render(fetcher, {
+      intervalMs: 1000,
+      idleAfterMs: 2000,
+      maxIdleIntervalMs: 120_000,
+    });
+    await settle();
+
+    await to(247_999);
+    expect(fetcher).toHaveBeenCalledTimes(9);
+    await to(248_000);
+    expect(fetcher).toHaveBeenCalledTimes(10);
+    expect(
+      fetcher.mock.calls.every(
+        ([context]) => !(context as PolledQueryContext).signal.aborted
+      )
+    ).toBe(true);
+  });
+
+  it('shares one set of page listeners across subscribers', () => {
+    const add = vi.spyOn(window, 'addEventListener');
+    const remove = vi.spyOn(window, 'removeEventListener');
+    const first = subscribeToActivity(() => undefined);
+    const second = subscribeToActivity(() => undefined);
+    const attached = add.mock.calls.filter(([name]) => name === 'pointermove');
+    expect(attached).toHaveLength(1);
+
+    first();
+    first();
+    expect(
+      remove.mock.calls.filter(([name]) => name === 'pointermove')
+    ).toHaveLength(0);
+    second();
+    expect(
+      remove.mock.calls.filter(([name]) => name === 'pointermove')
+    ).toHaveLength(1);
+  });
+});
+
+describe('usePolledQuery hidden interval', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setVisibility('visible');
+  });
+
+  afterEach(() => {
+    setVisibility('visible');
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('polls at hiddenIntervalMs while hidden and refetches on return', async () => {
+    const fetcher = sequence(['a']);
+    render(fetcher, {
+      intervalMs: 1000,
+      hiddenIntervalMs: 10_000,
+      idleAfterMs: 0,
+    });
+    await settle();
+
+    setVisibility('hidden');
+    await advance(9999);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await advance(1);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await advance(10_000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      setVisibility('visible');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    await advance(1000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(5);
+  });
+
+  it('pauses while hidden by default', async () => {
+    const fetcher = sequence(['a']);
+    render(fetcher, { intervalMs: 1000 });
+    await settle();
+
+    setVisibility('hidden');
+    await advance(3_600_000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('usePolledQuery conditional polling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setVisibility('visible');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  type Rows = { rows: number[] };
+
+  /** A response as the API sends it, with an optional ETag. */
+  function response(
+    status: number,
+    data: Rows | undefined,
+    etag?: string
+  ): PolledResponse<Rows> {
+    const headers = new Headers({ 'cache-control': 'private, no-cache' });
+    if (etag !== undefined) {
+      headers.set('etag', etag);
+    }
+    return polledResponse({ status, data: data as Rows, headers });
+  }
+
+  /** A fetcher replaying responses and recording what each call was sent. */
+  function replay(results: (PolledResponse<Rows> | Rows)[]) {
+    let index = 0;
+    return vi.fn((_context: PolledQueryContext) => {
+      const result = results[Math.min(index, results.length - 1)]!;
+      index += 1;
+      return Promise.resolve(result);
+    });
+  }
+
+  it('sends the held ETag and keeps the data on a 304', async () => {
+    const first = { rows: [1] };
+    const fetcher = replay([
+      response(200, first, 'W/"v1"'),
+      response(304, undefined, 'W/"v1"'),
+    ]);
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 1000, idleAfterMs: 0 })
+    );
+    await settle();
+    expect(result.current.data).toBe(first);
+    expect(fetcher.mock.calls[0]![0].etag).toBeUndefined();
+    expect(fetcher.mock.calls[0]![0].headers).toEqual({});
+    const updatedAt = result.current.lastUpdatedAt;
+
+    await advance(1000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]![0].etag).toBe('W/"v1"');
+    expect(fetcher.mock.calls[1]![0].headers).toEqual({
+      'if-none-match': 'W/"v1"',
+    });
+    expect(result.current.data).toBe(first);
+    expect(result.current.error).toBeNull();
+    expect(result.current.lastUpdatedAt).toBeGreaterThan(updatedAt!);
+
+    await advance(1000);
+    await settle();
+    expect(fetcher.mock.calls[2]![0].etag).toBe('W/"v1"');
+  });
+
+  it('writes no data state on a 304', async () => {
+    const first = { rows: [1] };
+    const fetcher = replay([
+      response(200, first, 'W/"v1"'),
+      response(304, undefined, 'W/"v1"'),
+    ]);
+    const seen: (Rows | null)[] = [];
+    renderHook(() => {
+      const query = usePolledQuery(fetcher, {
+        intervalMs: 1000,
+        idleAfterMs: 0,
+      });
+      if (seen[seen.length - 1] !== query.data) {
+        seen.push(query.data);
+      }
+      return query;
+    });
+    await settle();
+    await advance(5000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(seen).toEqual([null, first]);
+    expect(seen[1]).toBe(first);
+  });
+
+  it('replaces the ETag on a 200 and drops it when none is sent', async () => {
+    const fetcher = replay([
+      response(200, { rows: [1] }, 'W/"v1"'),
+      response(200, { rows: [2] }, 'W/"v2"'),
+      response(200, { rows: [3] }),
+      response(200, { rows: [4] }, 'W/"v4"'),
+    ]);
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 1000, idleAfterMs: 0 })
+    );
+    await settle();
+    await advance(1000);
+    await settle();
+    expect(result.current.data).toEqual({ rows: [2] });
+    await advance(1000);
+    await settle();
+    await advance(1000);
+    await settle();
+    expect(fetcher.mock.calls.map(([context]) => context.etag)).toEqual([
+      undefined,
+      'W/"v1"',
+      'W/"v2"',
+      undefined,
+    ]);
+  });
+
+  it('drops the ETag when the fetcher returns a plain value', async () => {
+    const fetcher = replay([
+      response(200, { rows: [1] }, 'W/"v1"'),
+      { rows: [2] },
+    ]);
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 1000, idleAfterMs: 0 })
+    );
+    await settle();
+    await advance(1000);
+    await settle();
+    expect(result.current.data).toEqual({ rows: [2] });
+    await advance(1000);
+    await settle();
+    expect(fetcher.mock.calls[2]![0].etag).toBeUndefined();
+  });
+
+  it('forgets the ETag when the query key changes', async () => {
+    const fetcher = replay([response(200, { rows: [1] }, 'W/"v1"')]);
+    const { rerender } = renderHook(
+      ({ page }: { page: number }) =>
+        usePolledQuery(fetcher, {
+          intervalMs: 1000,
+          idleAfterMs: 0,
+          queryKey: ['rows', page],
+        }),
+      { initialProps: { page: 1 } }
+    );
+    await settle();
+    await advance(1000);
+    await settle();
+    expect(fetcher.mock.calls[1]![0].etag).toBe('W/"v1"');
+
+    rerender({ page: 2 });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls[2]![0].etag).toBeUndefined();
+  });
+
+  it('treats a 304 with no data held as a failure and reads in full next', async () => {
+    const fetcher = replay([
+      response(304, undefined, 'W/"v1"'),
+      response(200, { rows: [1] }, 'W/"v1"'),
+    ]);
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 1000, idleAfterMs: 0 })
+    );
+    await settle();
+    expect(result.current.error).toBeInstanceOf(PolledQueryNotModifiedError);
+    expect(result.current.data).toBeNull();
+
+    await advance(DEFAULT_MAX_BACKOFF_MS);
+    await settle();
+    expect(fetcher.mock.calls[1]![0].etag).toBeUndefined();
+    expect(result.current.data).toEqual({ rows: [1] });
+    expect(result.current.error).toBeNull();
+  });
+
+  it('clears an earlier error on a 304', async () => {
+    const first = { rows: [1] };
+    let call = 0;
+    const fetcher = vi.fn((_context: PolledQueryContext) => {
+      call += 1;
+      if (call === 1) {
+        return Promise.resolve(response(200, first, 'W/"v1"'));
+      }
+      if (call === 2) {
+        return Promise.reject(new Error('flaky'));
+      }
+      return Promise.resolve(response(304, undefined, 'W/"v1"'));
+    });
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 1000, idleAfterMs: 0 })
+    );
+    await settle();
+    await advance(1000);
+    await settle();
+    expect(result.current.error).toBeInstanceOf(Error);
+
+    await advance(DEFAULT_MAX_BACKOFF_MS);
+    await settle();
+    expect(fetcher.mock.calls[2]![0].etag).toBe('W/"v1"');
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toBe(first);
+  });
+
+  it('round trips through the client against the server contract', async () => {
+    const bodies = [
+      new Response(JSON.stringify({ rows: [1] }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          etag: 'W/"abc"',
+          'cache-control': 'private, no-cache',
+        },
+      }),
+      new Response(null, {
+        status: 304,
+        headers: { etag: 'W/"abc"', 'cache-control': 'private, no-cache' },
+      }),
+    ];
+    const fetchImpl = vi.fn(
+      (_url: string | URL | Request, _init?: RequestInit) =>
+        Promise.resolve(bodies.shift()!)
+    );
+    const client = createApiClient({
+      baseUrl: 'https://api.example.com',
+      fetch: fetchImpl,
+      retries: 0,
+    });
+    const { result } = renderHook(() =>
+      usePolledQuery(
+        ({ signal, headers }) =>
+          client.get<Rows>('/rows', { signal, headers }).then(polledResponse),
+        { intervalMs: 1000, idleAfterMs: 0 }
+      )
+    );
+    await settle();
+    const first: Rows | null = result.current.data;
+    expect(first).toEqual({ rows: [1] });
+
+    await advance(1000);
+    await settle();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const sent = fetchImpl.mock.calls[1]![1]!;
+    expect((sent.headers as Headers).get('if-none-match')).toBe('W/"abc"');
+    expect(result.current.data).toBe(first);
+    expect(result.current.error).toBeNull();
   });
 });
 

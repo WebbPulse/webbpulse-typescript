@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { idleForMs, subscribeToActivity } from './activity.js';
 import type { AuthTokenProvider } from './client.js';
 import {
   invalidateQueries,
@@ -24,6 +25,21 @@ export const DEFAULT_MAX_BACKOFF_MS = 15_000;
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000;
 
 /**
+ * Milliseconds without pointer, key, wheel, touch or focus activity after which
+ * polling starts to stretch, when `idleAfterMs` is not given.
+ */
+export const DEFAULT_IDLE_AFTER_MS = 120_000;
+
+/** Ceiling on the idle stretched interval when `maxIdleIntervalMs` is not given. */
+export const DEFAULT_MAX_IDLE_INTERVAL_MS = 300_000;
+
+/** Growth per idle poll when `idleBackoffMultiplier` is not given. */
+export const DEFAULT_IDLE_BACKOFF_MULTIPLIER = 2;
+
+/** Header carrying the validator of the data already held. */
+export const IF_NONE_MATCH_HEADER = 'if-none-match';
+
+/**
  * What a poll attempt rejects with when it outlives `attemptTimeoutMs`. It
  * lands in {@link PolledQueryResult.error} and counts as a failure for backoff.
  */
@@ -39,14 +55,100 @@ export class PolledQueryTimeoutError extends Error {
   }
 }
 
+/**
+ * What a poll attempt rejects with when the fetcher reports a 304 while the
+ * hook holds no data to keep. The held ETag is dropped, so the next poll reads
+ * in full.
+ */
+export class PolledQueryNotModifiedError extends Error {
+  constructor() {
+    super('Received 304 Not Modified with no data held for this query.');
+    this.name = 'PolledQueryNotModifiedError';
+    Object.setPrototypeOf(this, PolledQueryNotModifiedError.prototype);
+  }
+}
+
 /** What a fetcher receives. The signal aborts on unmount and on a supersede. */
 export interface PolledQueryContext {
   /** Abort signal for the request. Pass it straight to the client. */
   signal: AbortSignal;
+  /**
+   * The ETag of the data the hook holds for the current key, or undefined when
+   * it holds none. Only set once a fetcher has returned a
+   * {@link polledResponse} carrying one.
+   */
+  etag: string | undefined;
+  /**
+   * Conditional request headers to merge into the request: `If-None-Match`
+   * when an ETag is held, empty otherwise. Spread it into the client's
+   * `headers` option.
+   */
+  headers: Readonly<Record<string, string>>;
 }
 
-/** Reads the data. Receives a signal and should honour it. */
-export type PolledQueryFetcher<T> = (context: PolledQueryContext) => Promise<T>;
+/**
+ * The parts of a response {@link polledResponse} reads. The client's
+ * `ApiResponse` fits as it is.
+ */
+export interface ConditionalResponse<T> {
+  /** The parsed body. Ignored on a 304. */
+  data: T;
+  /** The HTTP status. 304 means the held data is still current. */
+  status: number;
+  /** The response headers. Only `ETag` is read. */
+  headers: Pick<Headers, 'get'>;
+}
+
+/**
+ * A fetcher result that carries the status and ETag alongside the data, which
+ * is what turns on conditional polling. Build it with {@link polledResponse}.
+ */
+export class PolledResponse<T> {
+  /** The parsed body, undefined on a 304. */
+  readonly data: T | undefined;
+  /** The HTTP status. */
+  readonly status: number;
+  /** The `ETag` response header, weak or strong, or undefined. */
+  readonly etag: string | undefined;
+
+  constructor(response: ConditionalResponse<T>) {
+    this.status = response.status;
+    this.data = response.status === 304 ? undefined : response.data;
+    const etag = response.headers.get('etag');
+    this.etag = etag === null || etag === '' ? undefined : etag;
+  }
+
+  /** Whether the server answered 304 Not Modified. */
+  get notModified(): boolean {
+    return this.status === 304;
+  }
+}
+
+/**
+ * Wraps a response so {@link usePolledQuery} remembers its ETag and keeps the
+ * held data on a 304. Pass it the client's response, having sent the context
+ * `headers` with the request:
+ *
+ * @example
+ * ```ts
+ * usePolledQuery(({ signal, headers }) =>
+ *   client.get<Job[]>('/jobs/', { signal, headers }).then(polledResponse)
+ * );
+ * ```
+ */
+export function polledResponse<T>(
+  response: ConditionalResponse<T>
+): PolledResponse<T> {
+  return new PolledResponse(response);
+}
+
+/**
+ * Reads the data. Receives a signal and should honour it. Resolves to the value
+ * itself, or to a {@link polledResponse} for conditional polling.
+ */
+export type PolledQueryFetcher<T> = (
+  context: PolledQueryContext
+) => Promise<T | PolledResponse<T>>;
 
 /** Options for {@link usePolledQuery}. */
 export interface PolledQueryOptions {
@@ -70,6 +172,30 @@ export interface PolledQueryOptions {
    */
   refetchOnVisible?: boolean;
   /**
+   * Milliseconds between polls while the document is hidden, in place of
+   * pausing. Only read while `refetchOnVisible` is true, and never faster than
+   * the interval the query would otherwise use. Defaults to 0, which pauses.
+   */
+  hiddenIntervalMs?: number;
+  /**
+   * Milliseconds without pointer, key, wheel, touch or focus activity on the
+   * page after which the interval starts to stretch by `idleBackoffMultiplier`
+   * per poll, up to `maxIdleIntervalMs`. The first activity afterwards refetches
+   * once and returns to `intervalMs`. Defaults to
+   * {@link DEFAULT_IDLE_AFTER_MS}. 0 disables idle backoff.
+   */
+  idleAfterMs?: number;
+  /**
+   * Factor the interval grows by on each poll taken while idle. Defaults to
+   * {@link DEFAULT_IDLE_BACKOFF_MULTIPLIER}.
+   */
+  idleBackoffMultiplier?: number;
+  /**
+   * Ceiling on the idle stretched interval. Never below `intervalMs`. Defaults
+   * to {@link DEFAULT_MAX_IDLE_INTERVAL_MS}.
+   */
+  maxIdleIntervalMs?: number;
+  /**
    * Ceiling on the error backoff. Defaults to {@link DEFAULT_MAX_BACKOFF_MS}.
    * The backoff never drops below `intervalMs`, so a failing query is never
    * polled faster than a healthy one.
@@ -89,7 +215,9 @@ export interface PolledQueryOptions {
    * while the document is visible, and checks again as soon as the document
    * returns to visible. Defaults to the longest healthy gap between attempts,
    * `max(intervalMs, maxBackoffMs)` plus the attempt deadline, so it fires only
-   * when the poll loop has stalled. 0 disables it.
+   * when the poll loop has stalled. A wait scheduled longer than
+   * `max(intervalMs, maxBackoffMs)`, such as an idle stretched one, extends it
+   * by the excess. 0 disables it.
    */
   stallTimeoutMs?: number;
   /**
@@ -182,6 +310,18 @@ function documentVisible(): boolean {
  * `stallTimeoutMs` while the document is visible, and checks the moment the
  * document returns to visible.
  *
+ * Idle tabs poll less. While the document is hidden polling pauses, or runs no
+ * faster than `hiddenIntervalMs` when that is set. Once the page has seen no
+ * pointer, key, wheel, touch or focus activity for `idleAfterMs`, each poll
+ * stretches the interval by `idleBackoffMultiplier` up to `maxIdleIntervalMs`,
+ * and the first activity afterwards refetches once and returns to `intervalMs`.
+ *
+ * Polling can be conditional. A fetcher that sends the context `headers` and
+ * resolves to {@link polledResponse} has its ETag remembered for the current
+ * key and sent back as `If-None-Match`. A 304 keeps the held `data`, with its
+ * identity, and writes no data or error state, so consumers memoised on `data`
+ * do no work. A fetcher that resolves to the value itself polls as before.
+ *
  * `queryKey` identifies the query, not just the invalidation channel. Changing
  * it starts a fresh query: the timer and any backoff reset, a fetch goes out
  * immediately, and the refetch subscription moves to the new key. A result
@@ -217,6 +357,10 @@ export function usePolledQuery<T>(
     enabled = true,
     refetchOnFocus = true,
     refetchOnVisible = true,
+    hiddenIntervalMs = 0,
+    idleAfterMs = DEFAULT_IDLE_AFTER_MS,
+    idleBackoffMultiplier = DEFAULT_IDLE_BACKOFF_MULTIPLIER,
+    maxIdleIntervalMs = DEFAULT_MAX_IDLE_INTERVAL_MS,
     maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
     staleTimeMs = intervalMs,
     attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS,
@@ -254,6 +398,9 @@ export function usePolledQuery<T>(
   const lastProgressAt = useRef(0);
   const failures = useRef(0);
   const waited = useRef(false);
+  const validator = useRef<string | undefined>(undefined);
+  const idlePolls = useRef(0);
+  const scheduledDelay = useRef(0);
 
   const clearTimer = useCallback((): void => {
     if (timer.current !== undefined) {
@@ -291,20 +438,19 @@ export function usePolledQuery<T>(
   }, [intervalMs, maxBackoffMs]);
 
   /** Everything the run loop needs, read through a ref to keep `run` stable. */
-  const settings = useRef({
+  const currentSettings = {
     enabled,
     intervalMs,
     staleTimeMs,
     refetchOnVisible,
     attemptTimeoutMs,
-  });
-  settings.current = {
-    enabled,
-    intervalMs,
-    staleTimeMs,
-    refetchOnVisible,
-    attemptTimeoutMs,
+    hiddenIntervalMs,
+    idleAfterMs,
+    idleBackoffMultiplier,
+    maxIdleIntervalMs,
   };
+  const settings = useRef(currentSettings);
+  settings.current = currentSettings;
 
   const schedule = useRef<() => void>(() => undefined);
 
@@ -330,6 +476,9 @@ export function usePolledQuery<T>(
     controller.current = abort;
     const generationAtStart = generation.current;
     const timeoutMs = settings.current.attemptTimeoutMs;
+    const etag = validator.current;
+    const headers: Readonly<Record<string, string>> =
+      etag === undefined ? {} : { [IF_NONE_MATCH_HEADER]: etag };
     const startedAt = Date.now();
     deadlineAt.current = timeoutMs > 0 ? startedAt + timeoutMs : undefined;
     lastProgressAt.current = startedAt;
@@ -340,14 +489,14 @@ export function usePolledQuery<T>(
       controller.current !== abort ||
       generation.current !== generationAtStart;
 
-    const work = async (): Promise<T> => {
+    const work = async (): Promise<T | PolledResponse<T>> => {
       const waitForToken = authRef.current?.waitForToken;
       if (waitForToken !== undefined && !waited.current) {
         waited.current = true;
         await waitForToken.call(authRef.current);
       }
       abort.signal.throwIfAborted();
-      return fetcherRef.current({ signal: abort.signal });
+      return fetcherRef.current({ signal: abort.signal, etag, headers });
     };
 
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -382,9 +531,22 @@ export function usePolledQuery<T>(
         if (superseded()) {
           return;
         }
+        if (value instanceof PolledResponse) {
+          if (value.notModified && etag === undefined) {
+            validator.current = undefined;
+            throw new PolledQueryNotModifiedError();
+          }
+          validator.current =
+            value.etag ?? (value.notModified ? etag : undefined);
+          if (!value.notModified) {
+            setData(value.data as T);
+          }
+        } else {
+          validator.current = undefined;
+          setData(value);
+        }
         failures.current = 0;
         const now = Date.now();
-        setData(value);
         setError(null);
         setLastUpdatedAt(now);
         setStaleAt(now + settings.current.staleTimeMs);
@@ -416,21 +578,53 @@ export function usePolledQuery<T>(
     return attempt;
   }, [release]);
 
+  /**
+   * The wait before the next poll: the error backoff, stretched while the page
+   * is idle and slowed to `hiddenIntervalMs` while the document is hidden.
+   * Counts the idle polls, which is what the stretch grows with.
+   */
+  const pollDelay = useCallback(
+    (hidden: boolean): number => {
+      const current = settings.current;
+      let delay = nextDelay();
+      if (current.idleAfterMs > 0 && idleForMs() >= current.idleAfterMs) {
+        idlePolls.current += 1;
+        const growth = Math.max(1, current.idleBackoffMultiplier);
+        const ceiling = Math.max(current.intervalMs, current.maxIdleIntervalMs);
+        delay = Math.max(
+          delay,
+          Math.min(current.intervalMs * growth ** idlePolls.current, ceiling)
+        );
+      } else {
+        idlePolls.current = 0;
+      }
+      if (hidden) {
+        delay = Math.max(delay, current.hiddenIntervalMs);
+      }
+      return delay;
+    },
+    [nextDelay]
+  );
+
   schedule.current = useCallback((): void => {
     clearTimer();
-    if (!settings.current.enabled) {
+    const current = settings.current;
+    if (!current.enabled) {
       return;
     }
-    if (settings.current.refetchOnVisible && !documentVisible()) {
+    const hidden = current.refetchOnVisible && !documentVisible();
+    if (hidden && current.hiddenIntervalMs <= 0) {
       return;
     }
+    const delay = pollDelay(hidden);
+    scheduledDelay.current = delay;
     timer.current = setTimeout(() => {
       timer.current = undefined;
       if (live.current && settings.current.enabled) {
         void run();
       }
-    }, nextDelay());
-  }, [clearTimer, nextDelay, run]);
+    }, delay);
+  }, [clearTimer, pollDelay, run]);
 
   const refetch = useCallback((): Promise<void> => {
     failures.current = 0;
@@ -471,6 +665,8 @@ export function usePolledQuery<T>(
     release();
     failures.current = 0;
     waited.current = false;
+    validator.current = undefined;
+    idlePolls.current = 0;
     setData(null);
     setError(null);
     setLastUpdatedAt(null);
@@ -515,6 +711,11 @@ export function usePolledQuery<T>(
       }
       if (documentVisible()) {
         void run();
+      } else if (
+        settings.current.hiddenIntervalMs > 0 &&
+        inFlight.current === undefined
+      ) {
+        schedule.current();
       } else {
         clearTimer();
       }
@@ -534,14 +735,34 @@ export function usePolledQuery<T>(
   }, [enabled, refetchOnFocus, refetchOnVisible, clearTimer, run]);
 
   useEffect(() => {
+    if (!enabled || idleAfterMs <= 0) {
+      return;
+    }
+    return subscribeToActivity(() => {
+      if (idlePolls.current === 0) {
+        return;
+      }
+      idlePolls.current = 0;
+      if (settings.current.refetchOnVisible && !documentVisible()) {
+        return;
+      }
+      clearTimer();
+      void run();
+    });
+  }, [enabled, idleAfterMs, clearTimer, run]);
+
+  useEffect(() => {
     if (!enabled || stallTimeoutMs <= 0) {
       return;
     }
+    const healthyGap = Math.max(intervalMs, maxBackoffMs);
     const check = (): void => {
       if (!documentVisible()) {
         return;
       }
-      if (Date.now() - lastProgressAt.current > stallTimeoutMs) {
+      const threshold =
+        stallTimeoutMs + Math.max(0, scheduledDelay.current - healthyGap);
+      if (Date.now() - lastProgressAt.current > threshold) {
         restart();
       }
     };
@@ -556,7 +777,7 @@ export function usePolledQuery<T>(
         document.removeEventListener('visibilitychange', check);
       }
     };
-  }, [enabled, stallTimeoutMs, restart]);
+  }, [enabled, stallTimeoutMs, intervalMs, maxBackoffMs, restart]);
 
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -688,6 +909,7 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
   );
 }
 
+export { idleForMs, subscribeToActivity } from './activity.js';
 export {
   invalidateQueries,
   serializeQueryKey,

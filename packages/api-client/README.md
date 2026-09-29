@@ -338,7 +338,44 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
 - **Focus and visibility.** `refetchOnFocus` refetches when the window regains
   focus and `refetchOnVisible` pauses the timer while the document is hidden and
   refetches on the way back. Both default to true: a background tab that polls is
-  a bill and a battery drain for data nobody is reading.
+  a bill and a battery drain for data nobody is reading. `hiddenIntervalMs`
+  keeps a hidden tab polling at that slower pace instead of pausing it (default
+  0, which pauses).
+- **Idle tabs back off.** Once the page has seen no pointer, key, wheel, touch
+  or focus activity for `idleAfterMs` (default 2 minutes), each poll stretches
+  the interval by `idleBackoffMultiplier` (default 2) up to `maxIdleIntervalMs`
+  (default 5 minutes, never below `intervalMs`). The first activity afterwards
+  refetches once and returns to `intervalMs`. At the defaults a visible but
+  untouched tab on a 30 second interval makes 18 requests an hour instead of
+  120, and `idleAfterMs: 0` turns it off. One set of page listeners is shared by
+  every query, and `subscribeToActivity` and `idleForMs` are exported for other
+  idle aware code. The watchdog allows for an idle stretched wait, so it never
+  cuts one short.
+- **Conditional polling with ETags.** The fetcher context carries `etag`, the
+  validator of the data held for the current key, and `headers`, which holds
+  `If-None-Match` once there is one. A fetcher that sends those headers and
+  resolves to `polledResponse(response)` has the response `ETag` remembered and
+  a 304 keeps the held `data`, with its identity, writing no data or error
+  state, so nothing memoised on `data` recomputes:
+
+  ```ts
+  usePolledQuery(
+    ({ signal, headers }) =>
+      jobs.get<Job[]>('/', { signal, headers }).then(polledResponse),
+    { queryKey: ['jobs'], auth }
+  );
+  ```
+
+  The client resolves a 304 rather than throwing when the request sent
+  `If-None-Match` or `If-Modified-Since`, with `status` 304 and `data`
+  undefined. Weak validators (`W/"..."`) are sent back as received. The ETag is
+  dropped on a key change, on a 200 without one, and when the fetcher returns a
+  plain value, which polls exactly as before. A 304 with no data held rejects
+  with `PolledQueryNotModifiedError` and the next poll reads in full. Across
+  origins the API must list `If-None-Match` in `Access-Control-Allow-Headers`
+  and `ETag` in `Access-Control-Expose-Headers`, or the browser hides the
+  validator.
+
 - **Requests are de-duplicated.** A focus event landing on top of an interval
   tick is handed the running promise rather than starting a second request, and
   `refetch()` while one is in flight returns that one, unless it is past its
@@ -416,7 +453,10 @@ caller as usual, but no longer writes to the hook's state.
 
 `@webbpulse/api-client/react` adds `usePolledQuery` and
 `useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS`,
-`DEFAULT_MAX_BACKOFF_MS` and `DEFAULT_ATTEMPT_TIMEOUT_MS`, the error
-`PolledQueryTimeoutError`, and the types `PolledQueryOptions`,
-`PolledQueryResult`, `PolledQueryFetcher`, `PolledQueryContext` and
-`MutationWithRefetch`.
+`DEFAULT_MAX_BACKOFF_MS`, `DEFAULT_ATTEMPT_TIMEOUT_MS`, `DEFAULT_IDLE_AFTER_MS`,
+`DEFAULT_MAX_IDLE_INTERVAL_MS`, `DEFAULT_IDLE_BACKOFF_MULTIPLIER` and
+`IF_NONE_MATCH_HEADER`, the errors `PolledQueryTimeoutError` and
+`PolledQueryNotModifiedError`, `polledResponse` with the class
+`PolledResponse`, the activity tracker `subscribeToActivity` and `idleForMs`,
+and the types `PolledQueryOptions`, `PolledQueryResult`, `PolledQueryFetcher`,
+`PolledQueryContext`, `ConditionalResponse` and `MutationWithRefetch`.
