@@ -1,5 +1,11 @@
 # @webbpulse/api-client
 
+## 0.17.1
+
+### Patch Changes
+
+- 89a95a2: `usePolledQuery` derives `isLoading` from whether the query is enabled and a fetch for the current key has settled. A query enabled after its first render now reads loading until its first data or error arrives instead of reporting false with no data, and a query disabled before its first fetch settled no longer stays loading. Background and hidden-tab polls still never raise it.
+
 ## 0.17.0
 
 ### Minor Changes
