@@ -76,7 +76,11 @@ export interface RequestOptions {
   skipUnauthorizedHandling?: boolean;
 }
 
-/** A response, plus the metadata a caller needs for logging and auth. */
+/**
+ * A response, plus the metadata a caller needs for logging and auth. A request
+ * sent with `If-None-Match` or `If-Modified-Since` resolves a 304 rather than
+ * throwing, with `status` 304 and `data` undefined.
+ */
 export interface ApiResponse<T> {
   data: T;
   status: number;
@@ -135,6 +139,9 @@ export interface ApiClientOptions {
   /** Injected for tests. Defaults to `globalThis.fetch`. */
   fetch?: typeof globalThis.fetch;
 }
+
+/** Request headers that make a 304 an answer rather than a failure. */
+const CONDITIONAL_HEADERS = ['if-none-match', 'if-modified-since'];
 
 /**
  * Header the API sets when it issues a replacement token mid session, for
@@ -477,6 +484,18 @@ export class ApiClient {
     const rotatedToken = response.headers.get(NEW_TOKEN_HEADER);
     if (rotatedToken !== null && rotatedToken !== '') {
       this.options.onTokenRefresh?.(rotatedToken);
+    }
+
+    if (
+      response.status === 304 &&
+      CONDITIONAL_HEADERS.some((name) => headers.has(name))
+    ) {
+      return {
+        data: undefined as T,
+        status: response.status,
+        headers: response.headers,
+        requestId: responseRequestId,
+      };
     }
 
     if (!response.ok) {

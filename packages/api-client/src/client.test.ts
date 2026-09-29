@@ -579,3 +579,40 @@ describe('http verbs', () => {
     expect(vi.mocked(fetchImpl).mock.calls[0]![1]!.method).toBe('DELETE');
   });
 });
+
+describe('conditional requests', () => {
+  /** A 304 as the API sends it: empty body, weak ETag, private no-cache. */
+  function notModified(): Response {
+    return new Response(null, {
+      status: 304,
+      headers: { etag: 'W/"v1"', 'cache-control': 'private, no-cache' },
+    });
+  }
+
+  it('resolves a 304 when the request sent If-None-Match', async () => {
+    const fetchImpl = stubFetch([notModified()]);
+    const result = await client(fetchImpl).get('/issues', {
+      headers: { 'If-None-Match': 'W/"v1"' },
+    });
+    expect(result.status).toBe(304);
+    expect(result.data).toBeUndefined();
+    expect(result.headers.get('etag')).toBe('W/"v1"');
+    const init = vi.mocked(fetchImpl).mock.calls[0]![1]!;
+    expect((init.headers as Headers).get('if-none-match')).toBe('W/"v1"');
+  });
+
+  it('resolves a 304 when the request sent If-Modified-Since', async () => {
+    const fetchImpl = stubFetch([notModified()]);
+    const result = await client(fetchImpl).get('/issues', {
+      headers: { 'if-modified-since': 'Mon, 28 Sep 2026 00:00:00 GMT' },
+    });
+    expect(result.status).toBe(304);
+  });
+
+  it('still throws a 304 on an unconditional request', async () => {
+    const fetchImpl = stubFetch([notModified()]);
+    await expect(client(fetchImpl).get('/issues')).rejects.toBeInstanceOf(
+      ApiError
+    );
+  });
+});
