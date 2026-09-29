@@ -1049,6 +1049,227 @@ describe('usePolledQuery idle backoff', () => {
   });
 });
 
+/** A fetcher whose calls each wait until the test releases them. */
+function gated<T>(): {
+  fetcher: ReturnType<typeof vi.fn>;
+  release: (value: T) => void;
+} {
+  const pending: ((value: T) => void)[] = [];
+  const fetcher = vi.fn(
+    () =>
+      new Promise<T>((resolve) => {
+        pending.push(resolve);
+      })
+  );
+  return {
+    fetcher,
+    release: (value: T) => {
+      pending.shift()?.(value);
+    },
+  };
+}
+
+/** Renders the hook and records `isLoading` and `data` on every render. */
+function renderRecorded<T, P>(
+  fetcher: (context: { signal: AbortSignal }) => Promise<T>,
+  toOptions: (props: P) => PolledQueryOptions,
+  initialProps: P
+) {
+  const renders: { isLoading: boolean; data: T | null }[] = [];
+  const hook = renderHook(
+    (props: P) => {
+      const result = usePolledQuery(fetcher, toOptions(props));
+      renders.push({ isLoading: result.isLoading, data: result.data });
+      return result;
+    },
+    { initialProps }
+  );
+  return { ...hook, renders };
+}
+
+/** Whether any render reported loading while it held data. */
+function loadingWithData(
+  renders: readonly { isLoading: boolean; data: unknown }[]
+): boolean {
+  return renders.some((entry) => entry.isLoading && entry.data !== null);
+}
+
+describe('usePolledQuery loading state', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setVisibility('visible');
+  });
+
+  afterEach(() => {
+    setVisibility('visible');
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('reads loading only until the first data lands, not across polls', async () => {
+    const { fetcher, release } = gated<string>();
+    const { result, renders } = renderRecorded<string, undefined>(
+      fetcher,
+      () => ({ intervalMs: 1000, idleAfterMs: 0 }),
+      undefined
+    );
+
+    expect(result.current.isLoading).toBe(true);
+    await settle();
+    expect(result.current.isLoading).toBe(true);
+
+    await act(async () => {
+      release('a');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('a');
+    expect(result.current.isLoading).toBe(false);
+
+    for (const value of ['b', 'c']) {
+      await advance(1000);
+      await settle();
+      expect(result.current.isFetching).toBe(true);
+      expect(result.current.isLoading).toBe(false);
+      await act(async () => {
+        release(value);
+        await Promise.resolve();
+      });
+      await settle();
+      expect(result.current.data).toBe(value);
+    }
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(loadingWithData(renders)).toBe(false);
+  });
+
+  it('stays settled while a hidden tab polls and on the way back', async () => {
+    const fetcher = sequence(['a', 'b', 'c', 'd']);
+    const { result, renders } = renderRecorded<string, undefined>(
+      fetcher,
+      () => ({ intervalMs: 1000, hiddenIntervalMs: 5000, idleAfterMs: 0 }),
+      undefined
+    );
+    await settle();
+    expect(result.current.isLoading).toBe(false);
+
+    setVisibility('hidden');
+    await advance(5000);
+    await settle();
+    await advance(5000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(result.current.isLoading).toBe(false);
+
+    await act(async () => {
+      setVisibility('visible');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(result.current.data).toBe('d');
+    expect(result.current.isLoading).toBe(false);
+    expect(loadingWithData(renders)).toBe(false);
+  });
+
+  it('loads when mounted in a hidden tab that pauses polling', async () => {
+    setVisibility('hidden');
+    const { fetcher, release } = gated<string>();
+    const { result } = render(fetcher, { intervalMs: 1000 });
+
+    expect(result.current.isLoading).toBe(true);
+    await act(async () => {
+      release('a');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('a');
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it('reads loading once a query enabled late is waiting on its first data', async () => {
+    const { fetcher, release } = gated<string>();
+    const { result, rerender, renders } = renderRecorded<string, boolean>(
+      fetcher,
+      (enabled: boolean) => ({ intervalMs: 1000, enabled }),
+      false
+    );
+    await settle();
+    expect(result.current.isLoading).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    rerender(true);
+    expect(result.current.isLoading).toBe(true);
+    await settle();
+    expect(result.current.data).toBeNull();
+    expect(result.current.isLoading).toBe(true);
+
+    await act(async () => {
+      release('a');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('a');
+    expect(result.current.isLoading).toBe(false);
+    expect(loadingWithData(renders)).toBe(false);
+  });
+
+  it('does not stay loading when disabled before the first data lands', async () => {
+    const { fetcher, release } = gated<string>();
+    const { result, rerender } = renderRecorded<string, boolean>(
+      fetcher,
+      (enabled: boolean) => ({ intervalMs: 1000, enabled }),
+      true
+    );
+    await settle();
+    expect(result.current.isLoading).toBe(true);
+
+    rerender(false);
+    await settle();
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.isFetching).toBe(false);
+
+    rerender(true);
+    await settle();
+    expect(result.current.isLoading).toBe(true);
+    release('stale');
+    await act(async () => {
+      release('a');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('a');
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it('keeps the data and stays settled across a disable and re-enable', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const { result, rerender, renders } = renderRecorded<string, boolean>(
+      fetcher,
+      (enabled: boolean) => ({ intervalMs: 1000, enabled }),
+      true
+    );
+    await settle();
+    expect(result.current.data).toBe('a');
+
+    rerender(false);
+    await settle();
+    rerender(true);
+    await settle();
+    expect(result.current.data).toBe('b');
+    expect(result.current.isLoading).toBe(false);
+    expect(loadingWithData(renders)).toBe(false);
+  });
+
+  it('stops loading when the first fetch fails', async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error('down'));
+    const { result } = render(fetcher, { intervalMs: 1000 });
+    await settle();
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBeInstanceOf(Error);
+    expect(result.current.isLoading).toBe(false);
+  });
+});
+
 describe('usePolledQuery hidden interval', () => {
   beforeEach(() => {
     vi.useFakeTimers();
