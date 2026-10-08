@@ -2,7 +2,7 @@ import { ApiError, StepUpRequiredError } from '@webbpulse/api-client';
 import { useMutationWithRefetch } from '@webbpulse/api-client/react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { AuthState } from './auth-client.js';
 import { StepUpCancelledError } from './errors.js';
@@ -38,8 +38,8 @@ function challenge(maxAge?: number): StepUpRequiredError {
 
 interface StubClient {
   client: AnyAuthClient;
-  stepUp: ReturnType<typeof vi.fn>;
-  stepUpWithPasskey: ReturnType<typeof vi.fn>;
+  stepUp: Mock;
+  stepUpWithPasskey: Mock;
 }
 
 function stubClient(

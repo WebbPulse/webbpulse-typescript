@@ -1,5 +1,5 @@
 import { ApiError } from '@webbpulse/api-client';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
 import {
@@ -40,7 +40,7 @@ function envelope(
 /** A fetch stub routed by URL suffix, longest match first. */
 function routedFetch(routes: {
   [pathSuffix: string]: (call: number, init: RequestInit) => Response | Error;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   const counts = new Map<string, number>();
   return vi.fn((url: string | URL, init: RequestInit = {}) => {
     const href = typeof url === 'string' ? url : url.href;
@@ -63,7 +63,7 @@ function routedFetch(routes: {
   });
 }
 
-function authWith(fetchMock: ReturnType<typeof vi.fn>): AuthClient {
+function authWith(fetchMock: Mock): AuthClient {
   return createAuthClient({
     baseUrl: 'https://api.example.test',
     disableProactiveRefresh: true,
@@ -72,10 +72,7 @@ function authWith(fetchMock: ReturnType<typeof vi.fn>): AuthClient {
 }
 
 /** The body a route was called with, parsed. */
-function bodyOf(
-  fetchMock: ReturnType<typeof vi.fn>,
-  suffix: string
-): Record<string, unknown> {
+function bodyOf(fetchMock: Mock, suffix: string): Record<string, unknown> {
   const call = fetchMock.mock.calls.find((c) => String(c[0]).includes(suffix));
   return JSON.parse((call?.[1] as RequestInit).body as string) as Record<
     string,

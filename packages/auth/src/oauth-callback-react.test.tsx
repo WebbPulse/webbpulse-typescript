@@ -1,13 +1,21 @@
 import { render, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
 
 import type { OAuthCallbackResult } from './oauth.js';
 import { useOAuthCallback, type OAuthCallbackHandler } from './react.js';
 
 const navigate = globalThis.history.replaceState.bind(globalThis.history);
 
-let replaceState: ReturnType<typeof vi.fn>;
+let replaceState: Mock;
 
 function landOn(search: string): void {
   navigate(null, '', `/login${search}`);

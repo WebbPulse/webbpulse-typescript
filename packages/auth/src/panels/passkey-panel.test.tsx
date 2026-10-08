@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { AuthClient } from '../auth-client.js';
 import type {
@@ -13,10 +13,10 @@ import type {
 import { usePasskeyPanel, type PasskeyPanelOptions } from './passkey-panel.js';
 
 interface PasskeyStub {
-  listPasskeys: ReturnType<typeof vi.fn>;
-  registerPasskey: ReturnType<typeof vi.fn>;
-  renamePasskey: ReturnType<typeof vi.fn>;
-  deletePasskey: ReturnType<typeof vi.fn>;
+  listPasskeys: Mock;
+  registerPasskey: Mock;
+  renamePasskey: Mock;
+  deletePasskey: Mock;
 }
 
 /** Builds one passkey document with the fields the panel reads. */

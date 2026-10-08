@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
 import {
@@ -49,7 +49,7 @@ function envelope(
 /** A fetch stub routed by URL suffix, longest match first. */
 function routedFetch(routes: {
   [pathSuffix: string]: (call: number, init: RequestInit) => Response | Error;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   const counts = new Map<string, number>();
   return vi.fn((url: string | URL, init: RequestInit = {}) => {
     const href = typeof url === 'string' ? url : url.href;
@@ -73,7 +73,7 @@ function routedFetch(routes: {
 }
 
 function authWith(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   navigate?: (url: string) => void
 ): AuthClient {
   return createAuthClient({
@@ -85,10 +85,7 @@ function authWith(
 }
 
 /** The request a route was called with. */
-function callTo(
-  fetchMock: ReturnType<typeof vi.fn>,
-  suffix: string
-): RequestInit {
+function callTo(fetchMock: Mock, suffix: string): RequestInit {
   const call = fetchMock.mock.calls.find((c) => String(c[0]).includes(suffix));
   if (call === undefined) {
     throw new Error(`${suffix} was never called`);
@@ -96,7 +93,7 @@ function callTo(
   return call[1] as RequestInit;
 }
 
-function urlOf(fetchMock: ReturnType<typeof vi.fn>, suffix: string): string {
+function urlOf(fetchMock: Mock, suffix: string): string {
   const call = fetchMock.mock.calls.find((c) => String(c[0]).includes(suffix));
   if (call === undefined) {
     throw new Error(`${suffix} was never called`);
@@ -105,7 +102,7 @@ function urlOf(fetchMock: ReturnType<typeof vi.fn>, suffix: string): string {
 }
 
 function headerOf(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   suffix: string,
   name: string
 ): string | null {
@@ -141,7 +138,7 @@ const LINKS_BODY = {
 /** Signs a client in so the three authorized OAuth routes have a bearer token. */
 async function signedIn(
   routes: Parameters<typeof routedFetch>[0]
-): Promise<{ auth: AuthClient; fetchMock: ReturnType<typeof vi.fn> }> {
+): Promise<{ auth: AuthClient; fetchMock: Mock }> {
   const fetchMock = routedFetch({
     '/api/auth/login': () => jsonResponse(LOGIN_TOKENS),
     ...routes,

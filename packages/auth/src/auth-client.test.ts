@@ -1,5 +1,5 @@
 import { ApiError, createApiClient } from '@webbpulse/api-client';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { AuthClient, createAuthClient, type AuthState } from './auth-client.js';
 import { AuthSessionEndedError } from './errors.js';
@@ -39,7 +39,7 @@ function envelope(status: number, code: string, message = 'Denied.'): Response {
  */
 function routedFetch(routes: {
   [pathSuffix: string]: (call: number, init: RequestInit) => Response | Error;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   const counts = new Map<string, number>();
   return vi.fn((url: string | URL, init: RequestInit = {}) => {
     const href = typeof url === 'string' ? url : url.href;
@@ -64,7 +64,7 @@ function routedFetch(routes: {
 
 /** An auth client over a stubbed fetch, with timers off unless asked for. */
 function authWith(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   options: Partial<Parameters<typeof createAuthClient<User>>[0]> = {}
 ): AuthClient<User> {
   return createAuthClient<User>({
@@ -77,7 +77,7 @@ function authWith(
 
 /** The fetch mock's calls whose URL contains `pathSuffix`. */
 function callsTo(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   pathSuffix: string
 ): [string | URL, RequestInit][] {
   return (fetchMock.mock.calls as [string | URL, RequestInit][]).filter(
@@ -86,10 +86,7 @@ function callsTo(
 }
 
 /** The Authorization header the first request to `pathSuffix` carried. */
-function bearerFor(
-  fetchMock: ReturnType<typeof vi.fn>,
-  pathSuffix: string
-): string | null {
+function bearerFor(fetchMock: Mock, pathSuffix: string): string | null {
   const call = callsTo(fetchMock, pathSuffix)[0];
   if (call === undefined) {
     throw new Error(`No request was made to ${pathSuffix}.`);
@@ -1272,7 +1269,7 @@ describe('AuthClient subscriptions', () => {
  * window is the race: the token field is null throughout it.
  */
 function bootRace(options: { refreshCalls?: () => Response | Error } = {}): {
-  fetchMock: ReturnType<typeof vi.fn>;
+  fetchMock: Mock;
   releaseRefresh: (response: Response | Error) => void;
   refreshCallCount: () => number;
 } {
@@ -1307,7 +1304,7 @@ function bootRace(options: { refreshCalls?: () => Response | Error } = {}): {
 /** A domain client sharing one auth client, the way a consumer wires it. */
 function domainClientFor(
   auth: AuthClient<User>,
-  fetchMock: ReturnType<typeof vi.fn>
+  fetchMock: Mock
 ): ReturnType<typeof createApiClient> {
   return createApiClient({
     baseUrl: 'https://api.example.test',

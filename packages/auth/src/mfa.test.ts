@@ -1,5 +1,5 @@
 import { createApiClient } from '@webbpulse/api-client';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
 import {
@@ -66,7 +66,7 @@ function lockout(retryAfter: string): Response {
 /** A fetch stub routed by URL suffix, longest match first. */
 function routedFetch(routes: {
   [pathSuffix: string]: (call: number, init: RequestInit) => Response | Error;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   const counts = new Map<string, number>();
   return vi.fn((url: string | URL, init: RequestInit = {}) => {
     const href = typeof url === 'string' ? url : url.href;
@@ -89,7 +89,7 @@ function routedFetch(routes: {
   });
 }
 
-function authWith(fetchMock: ReturnType<typeof vi.fn>): AuthClient {
+function authWith(fetchMock: Mock): AuthClient {
   return createAuthClient({
     baseUrl: 'https://api.example.test',
     disableProactiveRefresh: true,
@@ -98,10 +98,7 @@ function authWith(fetchMock: ReturnType<typeof vi.fn>): AuthClient {
 }
 
 /** The request a route was called with. */
-function callTo(
-  fetchMock: ReturnType<typeof vi.fn>,
-  suffix: string
-): RequestInit {
+function callTo(fetchMock: Mock, suffix: string): RequestInit {
   const call = fetchMock.mock.calls.find((c) => String(c[0]).includes(suffix));
   if (call === undefined) {
     throw new Error(`${suffix} was never called`);
@@ -109,10 +106,7 @@ function callTo(
   return call[1] as RequestInit;
 }
 
-function bodyOf(
-  fetchMock: ReturnType<typeof vi.fn>,
-  suffix: string
-): Record<string, unknown> {
+function bodyOf(fetchMock: Mock, suffix: string): Record<string, unknown> {
   return JSON.parse(callTo(fetchMock, suffix).body as string) as Record<
     string,
     unknown
@@ -120,7 +114,7 @@ function bodyOf(
 }
 
 function headerOf(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   suffix: string,
   name: string
 ): string | null {
@@ -159,7 +153,7 @@ const RECOVERY_CODES = [
 /** Signs a client in so the authorized MFA routes have a bearer token. */
 async function signedIn(
   routes: Parameters<typeof routedFetch>[0]
-): Promise<{ auth: AuthClient; fetchMock: ReturnType<typeof vi.fn> }> {
+): Promise<{ auth: AuthClient; fetchMock: Mock }> {
   const fetchMock = routedFetch({
     '/api/auth/login': () => jsonResponse(LOGIN_TOKENS),
     ...routes,
@@ -698,9 +692,9 @@ describe('a 401 from the step-up route', () => {
    */
   async function steppingUpWith(stepUpResponse: () => Response): Promise<{
     auth: AuthClient;
-    fetchMock: ReturnType<typeof vi.fn>;
-    onUnauthorized: ReturnType<typeof vi.fn>;
-    refresh: ReturnType<typeof vi.fn>;
+    fetchMock: Mock;
+    onUnauthorized: Mock;
+    refresh: Mock;
   }> {
     const fetchMock = routedFetch({
       '/api/auth/login': () => jsonResponse(LOGIN_TOKENS),

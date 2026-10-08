@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
 import { AuthSessionEndedError } from './errors.js';
@@ -55,7 +55,7 @@ function serverErrorResponse(): Response {
 
 function clientWith(responses: (call: number) => Response): {
   client: AuthClient<User>;
-  fetchMock: ReturnType<typeof vi.fn>;
+  fetchMock: Mock;
 } {
   let calls = 0;
   const fetchMock = vi.fn(() => {

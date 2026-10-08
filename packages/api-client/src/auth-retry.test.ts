@@ -4,7 +4,7 @@
  * count the rotations a burst of concurrent 401s produces.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import {
   createApiClient,
@@ -71,7 +71,7 @@ function stubAuth(options: {
 }
 
 function clientWith(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   extra: Partial<ApiClientOptions> = {}
 ): ReturnType<typeof createApiClient> {
   return createApiClient({
@@ -83,15 +83,12 @@ function clientWith(
 }
 
 /** URL of the nth fetch call. */
-function urlOn(fetchMock: ReturnType<typeof vi.fn>, n: number): string {
+function urlOn(fetchMock: Mock, n: number): string {
   return String(fetchMock.mock.calls[n]?.[0]);
 }
 
 /** Bearer token on the nth fetch call, or null when none was sent. */
-function bearerOn(
-  fetchMock: ReturnType<typeof vi.fn>,
-  n: number
-): string | null {
+function bearerOn(fetchMock: Mock, n: number): string | null {
   const init = fetchMock.mock.calls[n]?.[1] as RequestInit | undefined;
   if (init === undefined) {
     return null;

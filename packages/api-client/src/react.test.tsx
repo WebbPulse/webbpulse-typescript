@@ -1,5 +1,13 @@
 import { act, renderHook } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
 
 import { createApiClient } from './client.js';
 import {
@@ -18,7 +26,7 @@ import {
 } from './react.js';
 
 /** A fetcher resolving to successive values, one per call. */
-function sequence<T>(values: T[]): ReturnType<typeof vi.fn> {
+function sequence<T>(values: T[]): Mock {
   let index = 0;
   return vi.fn(() => {
     const value = values[Math.min(index, values.length - 1)];
@@ -1051,7 +1059,7 @@ describe('usePolledQuery idle backoff', () => {
 
 /** A fetcher whose calls each wait until the test releases them. */
 function gated<T>(): {
-  fetcher: ReturnType<typeof vi.fn>;
+  fetcher: Mock;
   release: (value: T) => void;
 } {
   const pending: ((value: T) => void)[] = [];
