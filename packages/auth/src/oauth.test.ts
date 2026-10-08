@@ -780,9 +780,9 @@ describe('stripOAuthParams', () => {
   });
 
   it('removes a ticket from both the query and the fragment', () => {
-    expect(
-      stripOAuthParams('/login?mfa_ticket=q&next=%2Fa#mfa_ticket=f')
-    ).toBe('/login?next=%2Fa');
+    expect(stripOAuthParams('/login?mfa_ticket=q&next=%2Fa#mfa_ticket=f')).toBe(
+      '/login?next=%2Fa'
+    );
   });
 
   it('leaves a fragment without a ticket byte for byte', () => {

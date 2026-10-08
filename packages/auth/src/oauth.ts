@@ -456,9 +456,7 @@ function stripFragmentTicket(fragment: string): string {
   }
   return fragment
     .split('&')
-    .filter(
-      (piece) => !new URLSearchParams(piece).has(OAUTH_MFA_TICKET_PARAM)
-    )
+    .filter((piece) => !new URLSearchParams(piece).has(OAUTH_MFA_TICKET_PARAM))
     .join('&');
 }
 
