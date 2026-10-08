@@ -1,6 +1,6 @@
 import { act, render, screen } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { AuthClient } from '../auth-client.js';
 import type {
@@ -12,10 +12,10 @@ import type {
 import { useTotpPanel, type TotpPanelOptions } from './totp-panel.js';
 
 interface TotpStub {
-  enrolTotp: ReturnType<typeof vi.fn>;
-  activateTotp: ReturnType<typeof vi.fn>;
-  disableTotp: ReturnType<typeof vi.fn>;
-  regenerateRecoveryCodes: ReturnType<typeof vi.fn>;
+  enrolTotp: Mock;
+  activateTotp: Mock;
+  disableTotp: Mock;
+  regenerateRecoveryCodes: Mock;
 }
 
 const SECRET = 'JBSWY3DPEHPK3PXP';

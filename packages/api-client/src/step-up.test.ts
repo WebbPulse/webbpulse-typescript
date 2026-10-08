@@ -3,7 +3,7 @@
  * saying the session is gone, and so must bypass the refresh and replay.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createApiClient, type AuthTokenProvider } from './client.js';
 import {
@@ -53,7 +53,7 @@ function expiredResponse(): Response {
 }
 
 function stubAuth(): AuthTokenProvider & {
-  refreshSpy: ReturnType<typeof vi.fn>;
+  refreshSpy: Mock;
 } {
   const refreshSpy = vi.fn(() => Promise.resolve('token-2'));
   return {

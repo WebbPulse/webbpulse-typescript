@@ -1,5 +1,5 @@
 import { createApiClient, type ApiClient } from '@webbpulse/api-client';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { SessionManager, type SessionState } from './session.js';
 
 interface User {
@@ -19,7 +19,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 /** Builds a client over a queued fetch stub, plus the stub for assertions. */
 function clientWith(results: (Response | Error)[]): {
   client: ApiClient;
-  fetchMock: ReturnType<typeof vi.fn>;
+  fetchMock: Mock;
 } {
   let index = 0;
   const fetchMock = vi.fn(() => {

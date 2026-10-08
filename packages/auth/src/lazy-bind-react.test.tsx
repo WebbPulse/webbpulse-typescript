@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { AuthState } from './auth-client.js';
 import { AuthProvider, useAuth, type AnyAuthClient } from './react.js';
@@ -19,7 +19,7 @@ const ALICE: User = { id: 'u_1', email: 'alice@example.test' };
 function minimalStub(overrides: Record<string, unknown> = {}): {
   client: AnyAuthClient;
   setState: (next: Partial<AuthState<User>>) => void;
-  logout: ReturnType<typeof vi.fn>;
+  logout: Mock;
 } {
   let state: AuthState<User> = {
     status: 'authenticated',

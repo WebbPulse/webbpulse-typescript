@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
 import { AuthSessionEndedError } from './errors.js';
@@ -63,7 +63,7 @@ function envelope(
 /** A fetch stub routed by URL suffix, longest match first. */
 function routedFetch(routes: {
   [pathSuffix: string]: (call: number, init: RequestInit) => Response | Error;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   const counts = new Map<string, number>();
   return vi.fn((url: string | URL, init: RequestInit = {}) => {
     const href = typeof url === 'string' ? url : url.href;
@@ -83,7 +83,7 @@ function routedFetch(routes: {
 }
 
 function authWith(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   options: Partial<Parameters<typeof createAuthClient<User>>[0]> = {}
 ): AuthClient<User> {
   return createAuthClient<User>({
@@ -100,7 +100,7 @@ function stubWebAuthn(
     create?: (options: unknown) => Promise<unknown>;
     get?: (options: unknown) => Promise<unknown>;
   } = {}
-): { create: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn> } {
+): { create: Mock; get: Mock } {
   return {
     create: vi.fn(
       overrides.create ??
@@ -116,7 +116,7 @@ function stubWebAuthn(
 /** The seven routes, wired to sensible defaults a test can override. */
 function passkeyRoutes(overrides: {
   [suffix: string]: (call: number, init: RequestInit) => Response | Error;
-}): ReturnType<typeof vi.fn> {
+}): Mock {
   return routedFetch({
     '/api/auth/login': () =>
       jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE }),
@@ -126,7 +126,7 @@ function passkeyRoutes(overrides: {
 
 /** A client already holding an access token, for the authorized routes. */
 async function signedIn(
-  fetchMock: ReturnType<typeof vi.fn>,
+  fetchMock: Mock,
   options: Partial<Parameters<typeof createAuthClient<User>>[0]> = {}
 ): Promise<AuthClient<User>> {
   const auth = authWith(fetchMock, options);
@@ -1321,7 +1321,7 @@ describe('AuthClient.stepUpWithPasskey', () => {
     overrides: {
       [suffix: string]: (call: number, init: RequestInit) => Response | Error;
     } = {}
-  ): ReturnType<typeof vi.fn> {
+  ): Mock {
     return passkeyRoutes({
       '/api/auth/step-up/passkey/options': () =>
         jsonResponse({

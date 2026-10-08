@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { AuthClient } from '../auth-client.js';
 import type {
@@ -16,9 +16,9 @@ import {
 } from './connected-accounts-panel.js';
 
 interface OAuthStub {
-  listOAuthLinks: ReturnType<typeof vi.fn>;
-  linkOAuthProvider: ReturnType<typeof vi.fn>;
-  unlinkOAuthProvider: ReturnType<typeof vi.fn>;
+  listOAuthLinks: Mock;
+  linkOAuthProvider: Mock;
+  unlinkOAuthProvider: Mock;
 }
 
 const PROVIDERS: readonly ProviderOption[] = [
