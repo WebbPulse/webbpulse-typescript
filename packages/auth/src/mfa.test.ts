@@ -2,7 +2,16 @@ import { createApiClient } from '@webbpulse/api-client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
-import { TOTP_FACTOR, classifyMfaError } from './mfa.js';
+import {
+  TOTP_FACTOR,
+  classifyMfaError,
+  type RecoveryCodesOutcome,
+  type StepUpOutcome,
+  type TotpDisableOutcome,
+} from './mfa.js';
+
+/** What any of the three code-verifying MFA calls resolves to. */
+type MfaOutcome = StepUpOutcome | TotpDisableOutcome | RecoveryCodesOutcome;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -28,6 +37,29 @@ function envelope(
       ...(details === undefined ? {} : { details }),
     },
     status
+  );
+}
+
+/**
+ * The 429 a second-factor lockout answers with: the hint in `Retry-After` and
+ * none in the body.
+ */
+function lockout(retryAfter: string): Response {
+  return new Response(
+    JSON.stringify({
+      success: false,
+      status: 429,
+      message: 'Too many failed attempts.',
+      request_id: 'req_test',
+      error_code: 'TOO_MANY_ATTEMPTS',
+    }),
+    {
+      status: 429,
+      headers: {
+        'content-type': 'application/json',
+        'retry-after': retryAfter,
+      },
+    }
   );
 }
 
@@ -565,6 +597,34 @@ function fakeJwt(claims: Record<string, unknown>): string {
       .replace(/=+$/, '');
   return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(claims)}.sig`;
 }
+
+describe('a second-factor lockout', () => {
+  const calls: Record<string, (auth: AuthClient) => Promise<MfaOutcome>> = {
+    '/api/auth/step-up': (auth) => auth.stepUp({ code: '123456' }),
+    '/api/auth/totp/disable': (auth) => auth.disableTotp({ code: '123456' }),
+    '/api/auth/recovery-codes': (auth) =>
+      auth.regenerateRecoveryCodes({ code: '123456' }),
+  };
+
+  it.each(Object.keys(calls))(
+    'reads the wait off Retry-After on %s',
+    async (path) => {
+      const { auth } = await signedIn({ [path]: () => lockout('240') });
+      const call = calls[path];
+      if (call === undefined) {
+        throw new Error(`no call for ${path}`);
+      }
+
+      const outcome = await call(auth);
+
+      if (outcome.ok || outcome.reason !== 'rate-limited') {
+        throw new Error('expected a rate limit');
+      }
+      expect(outcome.retryAfter).toBe(240);
+      expect(outcome.code).toBe('TOO_MANY_ATTEMPTS');
+    }
+  );
+});
 
 describe('stepUp with a password', () => {
   it('sends the password and adopts the fresher token', async () => {
