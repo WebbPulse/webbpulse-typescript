@@ -173,7 +173,7 @@ export function classifyPasswordStepUpError(
     return {
       ...base,
       reason: 'rate-limited',
-      retryAfter: retryAfterOf(error) ?? error.retryAfterSeconds,
+      retryAfter: retryAfterOf(error),
     };
   }
   return null;
@@ -202,10 +202,13 @@ export type MfaRefusal =
   | MfaUnavailable;
 
 /**
- * Reads a retry hint in seconds off a 429 body. Delegates to the link flows'
- * parse, and exists only so this module does not import them for one helper.
+ * Reads a retry hint in seconds off a 429: the `Retry-After` header first,
+ * which a second-factor lockout sends alone, then the body's `retry_after`.
  */
 function retryAfterOf(error: ApiError): number | undefined {
+  if (error.retryAfterSeconds !== undefined) {
+    return error.retryAfterSeconds;
+  }
   const { details } = getWebbPulseError(error);
   if (details === undefined || Array.isArray(details)) {
     return undefined;

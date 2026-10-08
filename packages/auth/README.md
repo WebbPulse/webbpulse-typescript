@@ -204,6 +204,9 @@ URI to a generator such as `@webbpulse/qrcode`.
 Refusal reasons: `invalid-code`, `invalid-password`, `already-enabled`, `no-pending-enrolment`,
 `rate-limited`, `unavailable`. These return outcomes rather than throwing, and
 reject only for a network failure, a 500, or a 401 the client could not repair.
+`rate-limited` carries `retryAfter` in seconds, read from `Retry-After` first
+and the body's `retry_after` second. A second-factor lockout (`code`
+`TOO_MANY_ATTEMPTS`) sends the header only.
 
 `paths`: `totpEnrol`, `totpActivate`, `totpDisable`, `recoveryCodes`, `stepUp`,
 `stepUpPasskeyOptions`.
