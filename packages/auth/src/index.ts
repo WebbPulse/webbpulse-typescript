@@ -74,6 +74,7 @@ export {
   stripOAuthParams,
   type OAuthAlreadyLinked,
   type OAuthCallbackFailed,
+  type OAuthCallbackHref,
   type OAuthCallbackResult,
   type OAuthLastSignInMethod,
   type OAuthLink,
