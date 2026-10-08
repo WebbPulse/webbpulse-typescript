@@ -48,6 +48,18 @@ export interface LoadAppConfigOptions {
    * Defaults to `VITE_BACKEND`.
    */
   backendTargetKey?: string;
+  /**
+   * Further variable names read, in order, when `VITE_API_BASE_URL` is unset
+   * or blank, for a deployment that writes the base URL under another name
+   * such as `VITE_API_URL`. A failure reports the name that was read.
+   */
+  apiBaseUrlAliases?: readonly string[];
+  /**
+   * Prefixes `https://` onto an API base URL or backend target written as a
+   * bare host, such as `api.example.com`, which some deploys emit. Off by
+   * default, so a bare host stays a validation error.
+   */
+  assumeHttps?: boolean;
 }
 
 /**
@@ -97,6 +109,39 @@ function readBackendTarget(
   return { key: `${switchKey}=${selected}`, url: url.trim() };
 }
 
+/** Whether `value` is a string with something other than whitespace in it. */
+function isFilled(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/**
+ * Prefixes `https://` onto a bare host, leaving a root relative path and a
+ * value that already names a scheme alone.
+ */
+function withHttps(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith('/') || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+}
+
+/**
+ * The environment with the API base URL read under its first filled name, and
+ * with bare hosts given a scheme when asked, plus the name that was read.
+ */
+function normaliseBaseUrlEnv(
+  env: ViteEnv,
+  options: LoadAppConfigOptions
+): { env: ViteEnv; key: string } {
+  const keys = ['VITE_API_BASE_URL', ...(options.apiBaseUrlAliases ?? [])];
+  const key = keys.find((name) => isFilled(env[name])) ?? 'VITE_API_BASE_URL';
+  const value = env[key];
+  if (options.assumeHttps !== true || !isFilled(value)) {
+    return { env, key };
+  }
+  return { env: { ...env, [key]: withHttps(value) }, key };
+}
+
 /** Strips every trailing slash, collapsing a bare "/" to itself. */
 function stripTrailingSlashes(value: string): string {
   const stripped = value.replace(/\/+$/, '');
@@ -141,7 +186,11 @@ export function loadAppConfig(
   env: ViteEnv,
   options: LoadAppConfigOptions = {}
 ): AppConfig {
-  const reader = new ConfigReader(env);
+  const { env: normalisedEnv, key: baseUrlKey } = normaliseBaseUrlEnv(
+    env,
+    options
+  );
+  const reader = new ConfigReader(normalisedEnv);
 
   const inferred = environmentFromMode(
     typeof env.MODE === 'string' ? env.MODE : undefined
@@ -152,7 +201,7 @@ export function loadAppConfig(
     inferred ?? 'local'
   );
 
-  const backendTarget =
+  const rawBackendTarget =
     env.DEV === true && options.backendTargets !== undefined
       ? readBackendTarget(
           env,
@@ -160,10 +209,14 @@ export function loadAppConfig(
           options.backendTargetKey ?? 'VITE_BACKEND'
         )
       : undefined;
+  const backendTarget =
+    rawBackendTarget !== undefined && options.assumeHttps === true
+      ? { ...rawBackendTarget, url: withHttps(rawBackendTarget.url) }
+      : rawBackendTarget;
 
   const resolvedBaseUrl =
     backendTarget === undefined
-      ? reader.url('VITE_API_BASE_URL', {
+      ? reader.url(baseUrlKey, {
           ...(options.defaultApiBaseUrl === undefined
             ? {}
             : { fallback: options.defaultApiBaseUrl }),

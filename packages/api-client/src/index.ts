@@ -22,6 +22,7 @@ export {
   StepUpRequiredError,
   apiErrorFromResponse,
   formatApiErrorMessage,
+  getErrorCode,
   getWebbPulseError,
   isStepUpRequired,
   isWebbPulseErrorBody,

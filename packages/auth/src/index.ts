@@ -139,6 +139,13 @@ export {
   type PasskeysUnavailable,
 } from './passkeys.js';
 export {
+  identityReturnUrl,
+  isSafeReturnPath,
+  safeReturnPath,
+  type IdentityReturnUrlOptions,
+  type SafeReturnPathOptions,
+} from './return-path.js';
+export {
   AUTH_ERROR_CODES,
   AuthSessionEndedError,
   StepUpCancelledError,
