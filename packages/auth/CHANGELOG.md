@@ -1,5 +1,11 @@
 # @webbpulse/auth
 
+## 0.19.3
+
+### Patch Changes
+
+- 849e059: MFA route `rate-limited` outcomes read `retryAfter` from the `Retry-After` header first, then the body. A second-factor lockout (`TOO_MANY_ATTEMPTS`) sends only the header, so `stepUp({ code })`, `disableTotp` and `regenerateRecoveryCodes` used to report no wait.
+
 ## 0.19.2
 
 ### Patch Changes
