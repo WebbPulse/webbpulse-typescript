@@ -681,6 +681,51 @@ describe('readOAuthCallback', () => {
     expect(result).toEqual({ kind: 'mfa-required', ticket: 't' });
   });
 
+  it('reads an MFA ticket from the fragment', () => {
+    expect(
+      readOAuthCallback('https://app.test/login#mfa_ticket=tkt-1')
+    ).toEqual({ kind: 'mfa-required', ticket: 'tkt-1' });
+  });
+
+  it('reads a fragment ticket after an existing fragment parameter', () => {
+    expect(
+      readOAuthCallback('https://app.test/login?a=1#tab=x&mfa_ticket=t%2B')
+    ).toEqual({ kind: 'mfa-required', ticket: 't+' });
+  });
+
+  it('prefers the fragment ticket over a query ticket', () => {
+    expect(
+      readOAuthCallback('https://app.test/login?mfa_ticket=old#mfa_ticket=new')
+    ).toEqual({ kind: 'mfa-required', ticket: 'new' });
+  });
+
+  it('falls back to the query when the fragment ticket is empty', () => {
+    expect(
+      readOAuthCallback('https://app.test/login?mfa_ticket=q#mfa_ticket=')
+    ).toEqual({ kind: 'mfa-required', ticket: 'q' });
+  });
+
+  it('puts a query error ahead of a fragment ticket', () => {
+    expect(
+      readOAuthCallback(
+        'https://app.test/login?oauth_error=OAUTH_CANCELLED#mfa_ticket=t'
+      )?.kind
+    ).toBe('error');
+  });
+
+  it('accepts a URL or a Location-like object', () => {
+    expect(
+      readOAuthCallback(new URL('https://app.test/login#mfa_ticket=t'))
+    ).toEqual({ kind: 'mfa-required', ticket: 't' });
+    expect(
+      readOAuthCallback({ href: 'https://app.test/login#mfa_ticket=t' })
+    ).toEqual({ kind: 'mfa-required', ticket: 't' });
+  });
+
+  it('ignores a fragment that is not a parameter list', () => {
+    expect(readOAuthCallback('https://app.test/x#section')).toBeNull();
+  });
+
   it('ignores an empty error or ticket value', () => {
     expect(
       readOAuthCallback('https://app.test/x?oauth_error=&oauth=1')
@@ -720,6 +765,39 @@ describe('stripOAuthParams', () => {
     expect(stripOAuthParams('https://app.test/x?oauth=1#section')).toBe(
       'https://app.test/x#section'
     );
+  });
+
+  it('removes a fragment ticket and drops the empty hash', () => {
+    expect(stripOAuthParams('https://app.test/login#mfa_ticket=t')).toBe(
+      'https://app.test/login'
+    );
+  });
+
+  it('removes a fragment ticket and keeps the other fragment content', () => {
+    expect(
+      stripOAuthParams('https://app.test/login?tab=a#view=b&mfa_ticket=t&c')
+    ).toBe('https://app.test/login?tab=a#view=b&c');
+  });
+
+  it('removes a ticket from both the query and the fragment', () => {
+    expect(
+      stripOAuthParams('/login?mfa_ticket=q&next=%2Fa#mfa_ticket=f')
+    ).toBe('/login?next=%2Fa');
+  });
+
+  it('leaves a fragment without a ticket byte for byte', () => {
+    expect(stripOAuthParams('https://app.test/x?oauth=1#/route?a=1')).toBe(
+      'https://app.test/x#/route?a=1'
+    );
+  });
+
+  it('accepts a URL or a Location-like object', () => {
+    expect(
+      stripOAuthParams(new URL('https://app.test/x?oauth=1#mfa_ticket=t'))
+    ).toBe('https://app.test/x');
+    expect(
+      stripOAuthParams({ href: 'https://app.test/x#a=1&mfa_ticket=t' })
+    ).toBe('https://app.test/x#a=1');
   });
 
   it('returns a URL with nothing to strip unchanged in meaning', () => {

@@ -298,14 +298,19 @@ and script cannot follow a cross-origin redirect. `startOAuth` is the same URL
 plus the navigation, returning void because the page is leaving.
 
 The callback runs on the API and redirects back with the refresh cookie already
-set: there is no code to exchange. One query parameter says what happened.
+set: there is no code to exchange. One parameter says what happened.
 
 | Parameter             | Meaning                         | What to do                            |
 | --------------------- | ------------------------------- | ------------------------------------- |
 | `?oauth=1`            | signed in, refresh cookie set   | `await auth.initialize()`             |
-| `?mfa_ticket=<t>`     | the account has a second factor | `auth.completeTotp({ ticket, code })` |
+| `#mfa_ticket=<t>`     | the account has a second factor | `auth.completeTotp({ ticket, code })` |
 | `?oauth_linked=1`     | a provider was attached         | reload the links list                 |
 | `?oauth_error=<CODE>` | refused, or the user cancelled  | render the code                       |
+
+The MFA ticket rides in the URL fragment from webbpulse 0.80.0, so it never
+reaches a server log, a proxy or a `Referer` header; older servers put it in the
+query, and both are read, fragment first. Whatever reads the callback must see
+the hash: pass `location.href`, `location` or a `URL`, never `location.search`.
 
 `useOAuthCallback` does the read, the StrictMode guard and the
 `history.replaceState` cleanup in one:
@@ -331,9 +336,10 @@ useOAuthCallback(async (result) => {
 });
 ```
 
-Outside React, use `readOAuthCallback(href)`, which returns null on an ordinary
-visit, then `stripOAuthParams` with `history.replaceState`. Precedence is fixed:
-error, ticket, link, sign-in.
+Outside React, use `readOAuthCallback(window.location.href)`, which returns null
+on an ordinary visit, then `stripOAuthParams` with `history.replaceState`, which
+clears the callback query parameters and the fragment ticket, dropping a `#` left
+empty. Precedence is fixed: error, ticket, link, sign-in.
 
 ```ts
 const { links } = await auth.listOAuthLinks();

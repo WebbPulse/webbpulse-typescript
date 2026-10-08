@@ -3,7 +3,8 @@
  * with Google and GitHub, and the settings-page management of the links it
  * creates. The start route is a browser navigation rather than a `fetch`, and
  * the callback returns the session in the ordinary refresh cookie plus one
- * query parameter that {@link readOAuthCallback} narrows.
+ * parameter that {@link readOAuthCallback} narrows: a query parameter, or the
+ * MFA ticket in the URL fragment.
  */
 
 import { ApiError, getWebbPulseError } from '@webbpulse/api-client';
@@ -35,7 +36,9 @@ export const OAUTH_LINKED_PARAM = 'oauth_linked';
 
 /**
  * The parameter carrying an MFA ticket when the account has a second factor.
- * The same ticket the password path receives, posted to the same route.
+ * The same ticket the password path receives, posted to the same route. From
+ * webbpulse 0.80.0 it arrives in the URL fragment, which no server or `Referer`
+ * sees; older servers put it in the query, and both are read.
  */
 export const OAUTH_MFA_TICKET_PARAM = 'mfa_ticket';
 
@@ -46,7 +49,11 @@ export const OAUTH_MFA_TICKET_PARAM = 'mfa_ticket';
  */
 export const OAUTH_ERROR_PARAM = 'oauth_error';
 
-/** Every parameter the callback redirect can add, for {@link stripOAuthParams}. */
+/**
+ * The parameters the callback redirect can add to the query, for
+ * {@link stripOAuthParams}. The fragment carries only
+ * {@link OAUTH_MFA_TICKET_PARAM}.
+ */
 export const OAUTH_CALLBACK_PARAMS = [
   OAUTH_RESULT_PARAM,
   OAUTH_LINKED_PARAM,
@@ -121,6 +128,13 @@ export interface OAuthCallbackFailed {
  */
 export type OAuthCallbackResult =
   OAuthSignedIn | OAuthMfaRequired | OAuthLinked | OAuthCallbackFailed;
+
+/**
+ * A callback URL: a full or relative href string, or anything with an `href`,
+ * such as `window.location` or a `URL`. It must include the hash, so
+ * `location.search` alone loses the MFA ticket.
+ */
+export type OAuthCallbackHref = string | { readonly href: string };
 
 /** One provider attached to the signed-in account. */
 export interface OAuthLink {
@@ -342,10 +356,11 @@ function classify(
 }
 
 /**
- * Reads the callback outcome off a URL, or returns null. Pass `location.href` on
- * the page the callback redirected to. Precedence when more than one parameter
- * is present is error, ticket, link, sign-in, so a stale parameter cannot
- * outrank a live refusal.
+ * Reads the callback outcome off a URL, or returns null. Pass `location.href` or
+ * `location` on the page the callback redirected to, never `location.search`:
+ * the MFA ticket is read from the fragment first, then the query. Precedence
+ * when more than one parameter is present is error, ticket, link, sign-in, so a
+ * stale parameter cannot outrank a live refusal.
  *
  * @example
  * ```ts
@@ -368,12 +383,13 @@ function classify(
  * ```
  */
 export function readOAuthCallback(
-  href: string | null | undefined
+  href: OAuthCallbackHref | null | undefined
 ): OAuthCallbackResult | null {
-  const params = searchParamsOf(href);
-  if (params === null) {
+  const parsed = parseHref(hrefOf(href));
+  if (parsed === null) {
     return null;
   }
+  const params = parsed.searchParams;
 
   const error = params.get(OAUTH_ERROR_PARAM);
   if (error !== null && error !== '') {
@@ -384,7 +400,12 @@ export function readOAuthCallback(
     };
   }
 
-  const ticket = params.get(OAUTH_MFA_TICKET_PARAM);
+  const fragment = new URLSearchParams(parsed.hash.slice(1));
+  const fragmentTicket = fragment.get(OAUTH_MFA_TICKET_PARAM);
+  const ticket =
+    fragmentTicket !== null && fragmentTicket !== ''
+      ? fragmentTicket
+      : params.get(OAUTH_MFA_TICKET_PARAM);
   if (ticket !== null && ticket !== '') {
     return { kind: 'mfa-required', ticket };
   }
@@ -401,25 +422,44 @@ export function readOAuthCallback(
 }
 
 /**
- * Removes every callback parameter from a URL, leaving the rest untouched. Feed
+ * Removes every callback parameter from a URL's query and the MFA ticket from
+ * its fragment, leaving the rest untouched and dropping a `#` left empty. Feed
  * the result to `history.replaceState`, so a live MFA ticket does not sit in the
- * browser history and a reload does not re-run the landing logic. Returns the
- * input unchanged when it does not parse.
+ * browser history and a reload does not re-run the landing logic. Accepts the
+ * same input as {@link readOAuthCallback}; a relative string stays relative.
+ * Returns the input href unchanged when it does not parse.
  */
-export function stripOAuthParams(href: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(href, 'http://localhost');
-  } catch {
-    return href;
+export function stripOAuthParams(href: OAuthCallbackHref): string {
+  const raw = hrefOf(href) ?? '';
+  const parsed = parseHref(raw);
+  if (parsed === null) {
+    return raw;
   }
   for (const param of OAUTH_CALLBACK_PARAMS) {
     parsed.searchParams.delete(param);
   }
+  const fragment = stripFragmentTicket(parsed.hash.slice(1));
   const relative =
-    !/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(href) && !href.startsWith('//');
-  const rebuilt = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    !/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw) && !raw.startsWith('//');
+  const hash = fragment === '' ? '' : `#${fragment}`;
+  const rebuilt = `${parsed.pathname}${parsed.search}${hash}`;
   return relative ? rebuilt : `${parsed.origin}${rebuilt}`;
+}
+
+/**
+ * Drops each `mfa_ticket` pair from a fragment, keeping every other piece
+ * byte for byte, so a fragment that is not a parameter list survives intact.
+ */
+function stripFragmentTicket(fragment: string): string {
+  if (fragment === '') {
+    return '';
+  }
+  return fragment
+    .split('&')
+    .filter(
+      (piece) => !new URLSearchParams(piece).has(OAUTH_MFA_TICKET_PARAM)
+    )
+    .join('&');
 }
 
 /**
@@ -497,15 +537,30 @@ export function parseOAuthLinks(body: unknown): OAuthLink[] {
   return links;
 }
 
-/** Parses a URL's query string, tolerating a relative href and a bad one. */
-function searchParamsOf(
-  href: string | null | undefined
-): URLSearchParams | null {
+/** The href string of an {@link OAuthCallbackHref}, or undefined without one. */
+function hrefOf(
+  href: OAuthCallbackHref | null | undefined
+): string | undefined {
+  if (typeof href === 'string') {
+    return href;
+  }
+  if (
+    typeof href === 'object' &&
+    href !== null &&
+    typeof href.href === 'string'
+  ) {
+    return href.href;
+  }
+  return undefined;
+}
+
+/** Parses a URL, tolerating a relative href and a bad one. */
+function parseHref(href: string | undefined): URL | null {
   if (typeof href !== 'string' || href === '') {
     return null;
   }
   try {
-    return new URL(href, 'http://localhost').searchParams;
+    return new URL(href, 'http://localhost');
   } catch {
     return null;
   }

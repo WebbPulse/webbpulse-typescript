@@ -70,6 +70,25 @@ describe('useOAuthCallback', () => {
     });
   });
 
+  it('reports an MFA challenge carried in the fragment', async () => {
+    const onCallback = vi.fn();
+    landOn('?next=%2Fgarage#mfa_ticket=t_456');
+
+    mount(onCallback);
+
+    await waitFor(() => {
+      expect(onCallback).toHaveBeenCalledWith({
+        kind: 'mfa-required',
+        ticket: 't_456',
+      });
+    });
+    expect(replaceState).toHaveBeenCalledWith(
+      null,
+      '',
+      `${globalThis.location.origin}/login?next=%2Fgarage`
+    );
+  });
+
   it('reports a provider that was linked', async () => {
     const onCallback = vi.fn();
     landOn('?oauth_linked=1');
