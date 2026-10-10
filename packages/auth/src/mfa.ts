@@ -17,6 +17,13 @@ import { type AuthErrorCode, getAuthErrorCode } from './errors.js';
 export const TOTP_FACTOR = 'totp';
 
 /**
+ * The factor name the server lists in a login challenge when the account can
+ * finish with a passkey. Finish with `completeMfaWithPasskey` when `factors`
+ * includes it.
+ */
+export const PASSKEY_FACTOR = 'passkey';
+
+/**
  * The fields every MFA refusal carries. `reason` is added by each member below
  * rather than declared here as a union, so `Extract` narrows to one member.
  */

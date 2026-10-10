@@ -55,6 +55,7 @@ import {
   type PasskeyClassifyOptions,
   type PasskeyDeleteOutcome,
   type PasskeyListOutcome,
+  type PasskeyMfaOutcome,
   type PasskeyPaths,
   type PasskeyRefusal,
   type PasskeyRegistrationOutcome,
@@ -207,6 +208,8 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   recoveryCodes: '/api/auth/recovery-codes',
   stepUp: '/api/auth/step-up',
   stepUpPasskeyOptions: '/api/auth/step-up/passkey/options',
+  loginMfaPasskeyOptions: '/api/auth/login/mfa/passkey/options',
+  loginMfaPasskeyVerify: '/api/auth/login/mfa/passkey/verify',
 };
 
 /** Construction options. */
@@ -395,6 +398,24 @@ const PASSKEY_STEP_UP_REASONS: ReadonlySet<
   'cancelled',
   'unsupported',
   'no-passkeys',
+] as const);
+
+const PASSKEY_MFA_REASONS: ReadonlySet<
+  | 'rejected'
+  | 'ticket-invalid'
+  | 'unavailable'
+  | 'no-passkeys'
+  | 'rate-limited'
+  | 'cancelled'
+  | 'unsupported'
+> = new Set([
+  'rejected',
+  'ticket-invalid',
+  'unavailable',
+  'no-passkeys',
+  'rate-limited',
+  'cancelled',
+  'unsupported',
 ] as const);
 
 const PASSKEY_LIST_REASONS: ReadonlySet<'unavailable'> = new Set([
@@ -932,6 +953,70 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
+   * Completes an MFA login with a passkey instead of a code, for a challenge
+   * whose `factors` include {@link PASSKEY_FACTOR}. The options leg takes the
+   * ticket without spending it, so a dismissed prompt leaves `pendingMfa` in
+   * place for a retry or a fall back to `completeTotp`. The verify leg spends
+   * the ticket whatever the answer, then stores the session exactly as
+   * `completeTotp` does. A ticket that has expired or was spent answers
+   * `ticket-invalid`, and the remedy is to sign in again.
+   *
+   * @example
+   * ```ts
+   * const outcome = await auth.completeMfaWithPasskey({ ticket });
+   * if (outcome.ok) {
+   *   navigate('/');
+   * } else if (outcome.reason === 'no-passkeys') {
+   *   setPrompt('code');
+   * } else if (outcome.reason !== 'cancelled') {
+   *   setBanner(outcome.message);
+   * }
+   * ```
+   */
+  async completeMfaWithPasskey(input: {
+    ticket: string;
+    signal?: AbortSignal;
+  }): Promise<PasskeyMfaOutcome> {
+    try {
+      const webAuthn = this.requireWebAuthn();
+      const challenge = await this.passkeyChallenge(
+        this.paths.loginMfaPasskeyOptions,
+        { mfa_ticket: input.ticket },
+        { skipUnauthorizedHandling: true }
+      );
+      const request: Record<string, unknown> = {
+        publicKey: parseRequestOptions(challenge.publicKey),
+      };
+      if (input.signal !== undefined) {
+        request['signal'] = input.signal;
+      }
+      const assertion = await webAuthn.get(request);
+      const outcome = await this.runTokenCall(
+        this.paths.loginMfaPasskeyVerify,
+        {
+          mfa_ticket: input.ticket,
+          challenge_id: challenge.challengeId,
+          credential: credentialToJSON(assertion),
+        },
+        { skipUnauthorizedHandling: true }
+      );
+      if (outcome.mfaRequired) {
+        throw new Error(
+          'The login MFA passkey response asked for another factor.'
+        );
+      }
+      return {
+        ok: true,
+        kind: 'signed-in',
+        user: outcome.user,
+        expiresIn: outcome.expiresIn,
+      };
+    } catch (error) {
+      return this.settlePasskeyRefusal(error, PASSKEY_MFA_REASONS);
+    }
+  }
+
+  /**
    * Every passkey on the signed-in account. The public key is not in the
    * response: a settings page has no use for it.
    */
@@ -999,7 +1084,10 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   private async passkeyChallenge(
     path: string,
     body: Record<string, unknown>,
-    init: { headers?: Record<string, string> } = {}
+    init: {
+      headers?: Record<string, string>;
+      skipUnauthorizedHandling?: boolean;
+    } = {}
   ): Promise<PasskeyChallenge> {
     const response = await this.client.post<unknown>(path, body, {
       retries: 0,
@@ -1669,12 +1757,14 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    */
   private async runTokenCall(
     path: string,
-    body: unknown
+    body: unknown,
+    init: { skipUnauthorizedHandling?: boolean } = {}
   ): Promise<LoginOutcome<TUser>> {
     this.setState({ status: 'loading', error: null, pendingMfa: null });
     try {
       const response = await this.client.post<TokenResponseBody>(path, body, {
         retries: 0,
+        ...init,
       });
       const data = response.data;
 

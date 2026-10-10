@@ -150,7 +150,9 @@ cached per client instance, so it is stable in a dependency array.
 
 ```ts
 const outcome = await auth.login({ email, password });
-if (outcome.mfaRequired) {
+if (outcome.mfaRequired && outcome.factors.includes(PASSKEY_FACTOR)) {
+  await auth.completeMfaWithPasskey({ ticket: outcome.ticket });
+} else if (outcome.mfaRequired) {
   await auth.completeTotp({ ticket: outcome.ticket, code });
 }
 
@@ -179,6 +181,14 @@ URI to a generator such as `@webbpulse/qrcode`.
   replaces every code, so it cannot recover a lost printout. Say so on screen.
 - **`invalid-code` is one refusal covering six causes**, so the second login leg
   cannot reveal which accounts have TOTP. Render `outcome.message`.
+- **`completeMfaWithPasskey({ ticket })` answers the challenge with a passkey**
+  when `factors` includes `PASSKEY_FACTOR`. The options leg takes the ticket
+  without spending it, so a dismissed prompt leaves `state.pendingMfa` in place
+  for a retry or for `completeTotp`. The verify leg spends the ticket whatever
+  the answer and stores the session exactly as `completeTotp` does. It settles
+  through the passkey refusals: `rejected`, `ticket-invalid` (the ticket expired
+  or was spent; sign in again), `unavailable` (`PASSKEY_FACTOR_DISABLED`),
+  `no-passkeys`, `rate-limited`, `cancelled` and `unsupported`.
 - **`stepUp` is not a second login.** No refresh family starts and the cookie is
   untouched. The new token carries a fresh `auth_time` and a widened `amr`, and
   is adopted into the store, so it is not in the outcome.
@@ -209,7 +219,7 @@ and the body's `retry_after` second. A second-factor lockout (`code`
 `TOO_MANY_ATTEMPTS`) sends the header only.
 
 `paths`: `totpEnrol`, `totpActivate`, `totpDisable`, `recoveryCodes`, `stepUp`,
-`stepUpPasskeyOptions`.
+`stepUpPasskeyOptions`, `loginMfaPasskeyOptions`, `loginMfaPasskeyVerify`.
 
 ## Step-up prompts
 
@@ -451,7 +461,7 @@ a conditional sign-in can pass `mediation` and `signal`.
 
 `paths`: `passkeyRegisterOptions`, `passkeyRegisterVerify`,
 `passkeyLoginOptions`, `passkeyLoginVerify`, `passkeys`,
-`stepUpPasskeyOptions`.
+`stepUpPasskeyOptions`, `loginMfaPasskeyOptions`, `loginMfaPasskeyVerify`.
 
 ## Errors
 
@@ -729,7 +739,7 @@ email flows, and reports refusals as outcomes rather than throwing.
   `isAuthErrorCode`, `describeAuthError`.
 - Link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`, `LINK_TOKEN_PARAM`,
   `readLinkToken`, `retryAfterSeconds`, `classifyLinkError`.
-- MFA: `TOTP_FACTOR`, `classifyMfaError`, `classifyPasswordStepUpError`.
+- MFA: `TOTP_FACTOR`, `PASSKEY_FACTOR`, `classifyMfaError`, `classifyPasswordStepUpError`.
 - OAuth: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`, `readOAuthCallback`,
   `stripOAuthParams`, `parseOAuthLinks`, `describeOAuthCallbackError`,
   `classifyOAuthError`, and the `OAUTH_*` parameter constants.

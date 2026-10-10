@@ -467,6 +467,7 @@ describe('classifyPasskeyError', () => {
     'cancelled',
     'unsupported',
     'no-passkeys',
+    'ticket-invalid',
   ] as const);
 
   /**
@@ -551,8 +552,12 @@ describe('classifyPasskeyError', () => {
     }
   });
 
-  it('folds both disabled codes into one unavailable outcome', async () => {
-    for (const code of ['PASSKEYS_DISABLED', 'PASSKEY_LOGIN_DISABLED']) {
+  it('folds every disabled code into one unavailable outcome', async () => {
+    for (const code of [
+      'PASSKEYS_DISABLED',
+      'PASSKEY_LOGIN_DISABLED',
+      'PASSKEY_FACTOR_DISABLED',
+    ]) {
       const error = await apiErrorFor(envelope(403, code));
       expect(classifyPasskeyError(error, ALL)).toMatchObject({
         reason: 'unavailable',
@@ -567,6 +572,7 @@ describe('classifyPasskeyError', () => {
       ['PASSKEY_NOT_FOUND', 'not-found'],
       ['PASSKEY_NAME_REQUIRED', 'name-required'],
       ['PASSKEY_NONE_REGISTERED', 'no-passkeys'],
+      ['MFA_TICKET_INVALID', 'ticket-invalid'],
     ];
     for (const [code, reason] of cases) {
       const error = await apiErrorFor(envelope(409, code));
@@ -1536,6 +1542,307 @@ describe('AuthClient.stepUpWithPasskey', () => {
     });
 
     expect(await auth.stepUpWithPasskey()).toMatchObject({ ok: true });
+  });
+});
+
+describe('AuthClient.completeMfaWithPasskey', () => {
+  /** A password login that stops at an MFA challenge offering a passkey. */
+  function mfaRoutes(
+    overrides: {
+      [suffix: string]: (call: number, init: RequestInit) => Response | Error;
+    } = {}
+  ): Mock {
+    return routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({
+          mfa_required: true,
+          mfa_ticket: 'tkt',
+          factors: ['totp', 'passkey'],
+        }),
+      '/api/auth/login/mfa/passkey/options': () =>
+        jsonResponse({
+          challenge_id: 'ch_1',
+          publicKey: { userVerification: 'required' },
+        }),
+      '/api/auth/login/mfa/passkey/verify': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE }),
+      ...overrides,
+    });
+  }
+
+  /** A client holding a pending MFA challenge from a password login. */
+  async function challenged(
+    fetchMock: Mock,
+    options: Partial<Parameters<typeof createAuthClient<User>>[0]> = {}
+  ): Promise<AuthClient<User>> {
+    const auth = authWith(fetchMock, options);
+    await auth.login({ email: ALICE.email, password: 'pw' });
+    return auth;
+  }
+
+  it('stores the session the way completeTotp does', async () => {
+    const auth = await challenged(mfaRoutes(), { webAuthn: stubWebAuthn() });
+
+    const outcome = await auth.completeMfaWithPasskey({ ticket: 'tkt' });
+
+    expect(outcome).toEqual({
+      ok: true,
+      kind: 'signed-in',
+      user: ALICE,
+      expiresIn: 600,
+    });
+    expect(auth.getAccessToken()).toBe('a1');
+    expect(auth.getState()).toMatchObject({
+      status: 'authenticated',
+      user: ALICE,
+      pendingMfa: null,
+      error: null,
+    });
+  });
+
+  it('sends the ticket on the options leg', async () => {
+    const fetchMock = mfaRoutes();
+    const auth = await challenged(fetchMock, { webAuthn: stubWebAuthn() });
+
+    await auth.completeMfaWithPasskey({ ticket: 'tkt' });
+
+    const call = fetchMock.mock.calls.find((entry) =>
+      String(entry[0]).includes('/login/mfa/passkey/options')
+    );
+    expect(JSON.parse((call?.[1] as RequestInit).body as string)).toEqual({
+      mfa_ticket: 'tkt',
+    });
+  });
+
+  it('verifies with the ticket, the challenge id and the assertion', async () => {
+    const fetchMock = mfaRoutes();
+    const auth = await challenged(fetchMock, { webAuthn: stubWebAuthn() });
+
+    await auth.completeMfaWithPasskey({ ticket: 'tkt' });
+
+    const call = fetchMock.mock.calls.find((entry) =>
+      String(entry[0]).includes('/login/mfa/passkey/verify')
+    );
+    expect(JSON.parse((call?.[1] as RequestInit).body as string)).toEqual({
+      mfa_ticket: 'tkt',
+      challenge_id: 'ch_1',
+      credential: { id: 'cred_1', type: 'public-key' },
+    });
+  });
+
+  it('hands the authenticator the options and the signal', async () => {
+    const webAuthn = stubWebAuthn();
+    const auth = await challenged(mfaRoutes(), { webAuthn });
+    const controller = new AbortController();
+
+    await auth.completeMfaWithPasskey({
+      ticket: 'tkt',
+      signal: controller.signal,
+    });
+
+    expect(webAuthn.get).toHaveBeenCalledWith({
+      publicKey: { userVerification: 'required' },
+      signal: controller.signal,
+    });
+  });
+
+  it('keeps the pending challenge when the prompt is dismissed', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () =>
+        Promise.reject(
+          Object.assign(new Error('dismissed'), { name: 'NotAllowedError' })
+        ),
+    });
+    const auth = await challenged(mfaRoutes(), { webAuthn });
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toMatchObject({
+      ok: false,
+      reason: 'cancelled',
+    });
+    expect(auth.getState().pendingMfa).toEqual({
+      ticket: 'tkt',
+      factors: ['totp', 'passkey'],
+    });
+    expect(auth.getState().error).toBeNull();
+    expect(auth.getAccessToken()).toBeNull();
+  });
+
+  it('reports a browser that will not run the ceremony as unsupported', async () => {
+    const webAuthn = stubWebAuthn({
+      get: () =>
+        Promise.reject(
+          new DOMException('not supported here', 'NotSupportedError')
+        ),
+    });
+    const auth = await challenged(mfaRoutes(), { webAuthn });
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toMatchObject({
+      ok: false,
+      reason: 'unsupported',
+    });
+  });
+
+  it('reports a spent or expired ticket as ticket-invalid', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/options': () =>
+          envelope(
+            401,
+            'MFA_TICKET_INVALID',
+            'That sign-in attempt has expired. Start again.'
+          ),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toEqual({
+      ok: false,
+      reason: 'ticket-invalid',
+      code: 'MFA_TICKET_INVALID',
+      message: 'That sign-in attempt has expired. Start again.',
+    });
+    expect(auth.getState().status).toBe('anonymous');
+  });
+
+  it('reports an assertion the server would not take as rejected', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/verify': () =>
+          envelope(401, 'PASSKEY_REJECTED'),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toMatchObject({
+      ok: false,
+      reason: 'rejected',
+      code: 'PASSKEY_REJECTED',
+    });
+    expect(auth.getAccessToken()).toBeNull();
+    expect(auth.getState().status).toBe('anonymous');
+    expect(auth.getState().error).toBeNull();
+  });
+
+  it('reports the passkey factor being switched off as unavailable', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/options': () =>
+          envelope(
+            403,
+            'PASSKEY_FACTOR_DISABLED',
+            'Passkeys cannot complete this sign-in.'
+          ),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toEqual({
+      ok: false,
+      reason: 'unavailable',
+      code: 'PASSKEY_FACTOR_DISABLED',
+      message: 'Passkeys cannot complete this sign-in.',
+    });
+  });
+
+  it('reports an account with no passkey as no-passkeys', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/options': () =>
+          envelope(404, 'PASSKEY_NONE_REGISTERED', 'No passkey.'),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toMatchObject({
+      ok: false,
+      reason: 'no-passkeys',
+    });
+  });
+
+  it('reports a rate limit with the retry hint', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/verify': () =>
+          envelope(429, undefined, 'Too many attempts.', { retryAfter: '60' }),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toMatchObject({
+      ok: false,
+      reason: 'rate-limited',
+      retryAfter: 60,
+    });
+  });
+
+  it('throws for an error it does not model', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/options': () => new Error('offline'),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    await expect(
+      auth.completeMfaWithPasskey({ ticket: 'tkt' })
+    ).rejects.toThrow();
+  });
+
+  it('throws when the verify leg asks for another factor', async () => {
+    const auth = await challenged(
+      mfaRoutes({
+        '/api/auth/login/mfa/passkey/verify': () =>
+          jsonResponse({
+            mfa_required: true,
+            mfa_ticket: 'tkt2',
+            factors: ['totp'],
+          }),
+      }),
+      { webAuthn: stubWebAuthn() }
+    );
+
+    await expect(
+      auth.completeMfaWithPasskey({ ticket: 'tkt' })
+    ).rejects.toThrow(/another factor/);
+  });
+
+  it('does not retry either leg', async () => {
+    const fetchMock = mfaRoutes({
+      '/api/auth/login/mfa/passkey/verify': () =>
+        envelope(503, undefined, 'Unavailable.'),
+    });
+    const auth = await challenged(fetchMock, { webAuthn: stubWebAuthn() });
+
+    await expect(
+      auth.completeMfaWithPasskey({ ticket: 'tkt' })
+    ).rejects.toThrow();
+
+    const legs = fetchMock.mock.calls.filter((entry) =>
+      String(entry[0]).includes('/login/mfa/passkey/')
+    );
+    expect(legs).toHaveLength(2);
+  });
+
+  it('uses the overridden routes', async () => {
+    const fetchMock = mfaRoutes({
+      '/identity/mfa-pk/options': () =>
+        jsonResponse({ challenge_id: 'ch_1', publicKey: {} }),
+      '/identity/mfa-pk/verify': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = await challenged(fetchMock, {
+      webAuthn: stubWebAuthn(),
+      paths: {
+        loginMfaPasskeyOptions: '/identity/mfa-pk/options',
+        loginMfaPasskeyVerify: '/identity/mfa-pk/verify',
+      },
+    });
+
+    expect(await auth.completeMfaWithPasskey({ ticket: 'tkt' })).toMatchObject({
+      ok: true,
+      kind: 'signed-in',
+    });
+    expect(auth.getAccessToken()).toBe('a1');
   });
 });
 

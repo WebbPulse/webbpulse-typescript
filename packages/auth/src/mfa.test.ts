@@ -3,6 +3,7 @@ import { describe, expect, it, vi, type Mock } from 'vitest';
 
 import { createAuthClient, type AuthClient } from './auth-client.js';
 import {
+  PASSKEY_FACTOR,
   TOTP_FACTOR,
   classifyMfaError,
   type RecoveryCodesOutcome,
@@ -200,6 +201,7 @@ describe('the login challenge', () => {
 
   it('names the factor the backend names', () => {
     expect(TOTP_FACTOR).toBe('totp');
+    expect(PASSKEY_FACTOR).toBe('passkey');
   });
 
   it('is completed with the field name the route reads', async () => {

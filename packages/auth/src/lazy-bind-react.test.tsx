@@ -124,6 +124,7 @@ describe('useAuth lazy method binding', () => {
     expect(keys).toContain('logout');
     expect(keys).toContain('renamePasskey');
     expect(keys).toContain('getAccessToken');
+    expect(keys).toContain('completeMfaWithPasskey');
   });
 
   it('keeps each method referentially stable across re-renders and state changes', async () => {
@@ -237,5 +238,52 @@ describe('useAuth lazy method binding', () => {
     });
 
     expect(stub.logout.mock.instances[0]).toBe(stub.client);
+  });
+
+  it('forwards completeMfaWithPasskey with the pending ticket', async () => {
+    const completeMfaWithPasskey = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        kind: 'signed-in',
+        user: ALICE,
+        expiresIn: 600,
+      })
+    );
+    const stub = minimalStub({ completeMfaWithPasskey });
+    stub.setState({
+      status: 'anonymous',
+      user: null,
+      hasAccessToken: false,
+      pendingMfa: { ticket: 'tkt', factors: ['totp', 'passkey'] },
+    });
+    function UsePasskey(): React.ReactNode {
+      const { pendingMfa, completeMfaWithPasskey: complete } = useAuth<User>();
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            if (pendingMfa !== null) {
+              void complete({ ticket: pendingMfa.ticket });
+            }
+          }}
+        >
+          passkey
+        </button>
+      );
+    }
+
+    render(
+      <AuthProvider client={stub.client}>
+        <UsePasskey />
+      </AuthProvider>
+    );
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'passkey' }).click();
+      await Promise.resolve();
+    });
+
+    expect(completeMfaWithPasskey).toHaveBeenCalledWith({ ticket: 'tkt' });
+    expect(completeMfaWithPasskey.mock.instances[0]).toBe(stub.client);
   });
 });

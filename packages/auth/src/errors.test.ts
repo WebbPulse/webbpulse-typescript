@@ -106,7 +106,13 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the code a step-up gated route emits', () => {
-    expect([...AUTH_ERROR_CODES].slice(49)).toEqual(['STEP_UP_REQUIRED']);
+    expect([...AUTH_ERROR_CODES].slice(49, 50)).toEqual(['STEP_UP_REQUIRED']);
+  });
+
+  it('adds the code the login MFA passkey routes emit', () => {
+    expect([...AUTH_ERROR_CODES].slice(50)).toEqual([
+      'PASSKEY_FACTOR_DISABLED',
+    ]);
   });
 });
 
