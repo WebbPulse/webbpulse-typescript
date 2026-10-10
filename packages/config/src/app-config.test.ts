@@ -347,3 +347,103 @@ describe('loadAppConfig apiPathPrefix', () => {
     expect(config.appName).toBe('Portfolio');
   });
 });
+
+describe('loadAppConfig apiBaseUrlAliases and assumeHttps', () => {
+  it('reads an alias when VITE_API_BASE_URL is unset', () => {
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_URL: 'https://api.test' },
+      { apiBaseUrlAliases: ['VITE_API_URL'] }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test');
+  });
+
+  it('reads an alias when VITE_API_BASE_URL is blank', () => {
+    const config = loadAppConfig(
+      {
+        MODE: 'production',
+        VITE_API_BASE_URL: '  ',
+        VITE_API_URL: 'https://api.test',
+      },
+      { apiBaseUrlAliases: ['VITE_API_URL'] }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test');
+  });
+
+  it('prefers VITE_API_BASE_URL over an alias', () => {
+    const config = loadAppConfig(
+      {
+        MODE: 'production',
+        VITE_API_BASE_URL: 'https://primary.test',
+        VITE_API_URL: 'https://alias.test',
+      },
+      { apiBaseUrlAliases: ['VITE_API_URL'] }
+    );
+    expect(config.apiBaseUrl).toBe('https://primary.test');
+  });
+
+  it('falls back to the default when every name is blank', () => {
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_URL: '' },
+      { apiBaseUrlAliases: ['VITE_API_URL'], defaultApiBaseUrl: '/api' }
+    );
+    expect(config.apiBaseUrl).toBe('/api');
+  });
+
+  it('reports the alias it read when the value is malformed', () => {
+    let caught: unknown;
+    try {
+      loadAppConfig(
+        { MODE: 'production', VITE_API_URL: 'api.test' },
+        { apiBaseUrlAliases: ['VITE_API_URL'] }
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigError);
+    expect((caught as ConfigError).issues.join('\n')).toContain('VITE_API_URL');
+  });
+
+  it('adds https to a bare host when asked', () => {
+    const config = loadAppConfig(
+      { MODE: 'production', VITE_API_URL: 'api.test' },
+      {
+        apiBaseUrlAliases: ['VITE_API_URL'],
+        assumeHttps: true,
+        apiPathPrefix: '/api',
+      }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.test/api');
+  });
+
+  it('leaves a URL with a scheme and a root relative path alone', () => {
+    expect(
+      loadAppConfig(
+        { MODE: 'production', VITE_API_BASE_URL: 'http://localhost:8000' },
+        { assumeHttps: true }
+      ).apiBaseUrl
+    ).toBe('http://localhost:8000');
+    expect(
+      loadAppConfig(
+        { MODE: 'production', VITE_API_BASE_URL: '/api' },
+        { assumeHttps: true }
+      ).apiBaseUrl
+    ).toBe('/api');
+  });
+
+  it('adds https to a bare host backend target when asked', () => {
+    const config = loadAppConfig(
+      { MODE: 'development', DEV: true, VITE_BACKEND: 'staging' },
+      {
+        backendTargets: { staging: 'api.staging.test' },
+        assumeHttps: true,
+      }
+    );
+    expect(config.apiBaseUrl).toBe('https://api.staging.test');
+  });
+
+  it('leaves a bare host as a validation error by default', () => {
+    expect(() =>
+      loadAppConfig({ MODE: 'production', VITE_API_BASE_URL: 'api.test' })
+    ).toThrow(ConfigError);
+  });
+});

@@ -4,6 +4,7 @@ import {
   ApiNetworkError,
   ApiTimeoutError,
   formatApiErrorMessage,
+  getErrorCode,
   getWebbPulseError,
   isWebbPulseErrorBody,
   parseRetryAfter,
@@ -383,5 +384,27 @@ describe('ApiError.retryAfterSeconds', () => {
 
   it('is undefined when the field was not supplied', () => {
     expect(apiError(envelope()).retryAfterSeconds).toBeUndefined();
+  });
+});
+
+describe('getErrorCode', () => {
+  it('reads the envelope code off an ApiError', () => {
+    expect(getErrorCode(apiError(envelope({ error_code: 'NOT_FOUND' })))).toBe(
+      'NOT_FOUND'
+    );
+  });
+
+  it('is undefined for an envelope without a code', () => {
+    expect(getErrorCode(apiError(envelope()))).toBeUndefined();
+  });
+
+  it('is undefined for a body that is not the envelope', () => {
+    expect(getErrorCode(apiError({ detail: 'boom' }))).toBeUndefined();
+  });
+
+  it('is undefined for anything that is not an ApiError', () => {
+    expect(getErrorCode(new Error('boom'))).toBeUndefined();
+    expect(getErrorCode({ error_code: 'NOT_FOUND' })).toBeUndefined();
+    expect(getErrorCode(null)).toBeUndefined();
   });
 });

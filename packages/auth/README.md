@@ -483,6 +483,26 @@ The refresh cannot recurse: `/api/auth/refresh` is called with retries disabled,
 and the 401 retry in `@webbpulse/api-client` calls `requestOnce` at most twice,
 with `skipAuthRetry` on the replay.
 
+## Return destinations after sign-in
+
+`safeReturnPath(value, fallback?, options?)` reads a `returnTo` parameter into
+an in-app path, or `fallback` (default `/`). It accepts only a root relative
+path and refuses protocol relative `//host`, any backslash, control characters,
+schemes such as `javascript:`, the same tricks behind percent encoding, and
+malformed encoding. `excludePaths` refuses named pathnames, such as the sign-in
+page itself. `isSafeReturnPath(value, options?)` is the same check as a type
+guard.
+
+```ts
+const returnTo = safeReturnPath(searchParams.get('returnTo'), '/workspaces');
+```
+
+`identityReturnUrl(value, { identityOrigin, path, pageOrigin? })` accepts an
+absolute URL back to one identity route, such as the MCP authorize endpoint or
+the device approval page, or returns `null`. The origin must match exactly
+(an empty or root relative `identityOrigin` means the page's origin), the
+pathname must equal `path`, and credentials and fragments are refused.
+
 ## The identity client singleton
 
 `@webbpulse/auth/browser` builds the lazy singleton every product wraps around
@@ -703,6 +723,8 @@ email flows, and reports refusals as outcomes rather than throwing.
 
 - Client: `AuthClient`, `createAuthClient`, and the deprecated
   `SessionManager`.
+- Return destinations: `safeReturnPath`, `isSafeReturnPath`,
+  `identityReturnUrl`.
 - Errors: `AUTH_ERROR_CODES`, `AuthSessionEndedError`, `StepUpCancelledError`, `getAuthErrorCode`,
   `isAuthErrorCode`, `describeAuthError`.
 - Link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`, `LINK_TOKEN_PARAM`,

@@ -204,6 +204,10 @@ entirely unless the service opted into them, which is why both are optional
 here: an absent key and an explicit `null` are different answers and the backend
 only ever produces the former.
 
+`getErrorCode(error)` takes the `unknown` a `catch` binds and returns the
+envelope's `error_code`, or `undefined` for anything that is not an `ApiError`
+or carried no code, for branching on one failure without narrowing first.
+
 `getWebbPulseError(error)` is the accessor, and it always returns a value:
 
 ```ts
@@ -447,7 +451,7 @@ caller as usual, but no longer writes to the hook's state.
 `ApiNetworkError`, `ApiTimeoutError` and `StepUpRequiredError` with
 `isStepUpRequired`, `apiErrorFromResponse` and `STEP_UP_REQUIRED_ERROR_CODE`, the message formatter
 `formatApiErrorMessage`, the WebbPulse error envelope reader
-`getWebbPulseError` with its guard `isWebbPulseErrorBody` and the types
+`getWebbPulseError` and `getErrorCode` with the guard `isWebbPulseErrorBody` and the types
 `WebbPulseErrorBody` and `WebbPulseErrorInfo`, the rate limit helpers
 `parseRetryAfter` and `retryAfterFromHeaders`, the URL helpers `joinUrl` and
 `serializeQuery`, the opt in envelope layer `toEnvelope`,

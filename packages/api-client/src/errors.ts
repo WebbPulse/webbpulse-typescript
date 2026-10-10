@@ -278,6 +278,17 @@ export function getWebbPulseError(error: ApiError): WebbPulseErrorInfo {
   };
 }
 
+/**
+ * The envelope `error_code` a thrown value carried, for branching on one
+ * failure. `undefined` for anything that is not an `ApiError` or whose body
+ * carried no code, so it takes the `unknown` a `catch` binds directly.
+ */
+export function getErrorCode(error: unknown): string | undefined {
+  return error instanceof ApiError
+    ? getWebbPulseError(error).errorCode
+    : undefined;
+}
+
 /** The envelope `error_code` a route answers with when it needs a recent sign-in. */
 export const STEP_UP_REQUIRED_ERROR_CODE = 'STEP_UP_REQUIRED';
 

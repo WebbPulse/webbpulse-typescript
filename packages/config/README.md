@@ -92,6 +92,26 @@ both spellings are in deploy configuration right now.
 Both options default to absent, and a call that passes neither behaves exactly
 as it did in 0.2.0.
 
+### `apiBaseUrlAliases` and `assumeHttps`
+
+`apiBaseUrlAliases` names further variables read, in order, when
+`VITE_API_BASE_URL` is unset or blank, for a deploy that writes `VITE_API_URL`.
+`VITE_API_BASE_URL` still wins when it is filled, and a validation failure names
+the variable that was read.
+
+`assumeHttps: true` prefixes `https://` onto a base URL or backend target
+written as a bare host, which some deploys emit. A value with a scheme and a
+root relative path are left alone. Both default to off.
+
+```ts
+loadAppConfig(import.meta.env, {
+  apiBaseUrlAliases: ['VITE_API_URL'],
+  assumeHttps: true,
+  defaultApiBaseUrl: '/api',
+  apiPathPrefix: '/api',
+});
+```
+
 ## Exports
 
 `loadAppConfig`, `ConfigReader`, `ConfigError`, `ENVIRONMENT_NAMES` and the
