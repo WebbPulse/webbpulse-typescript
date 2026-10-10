@@ -20,6 +20,22 @@ import {
   type EmailVerificationOutcome,
   type PasswordResetOutcome,
 } from './email-flows.js';
+import {
+  DESKTOP_HANDOFF_CHALLENGE_METHOD,
+  type DesktopHandoffExchangeOutcome,
+  type DesktopHandoffMintOutcome,
+  type DesktopHandoffPaths,
+  classifyDesktopHandoffError,
+  desktopHandoffCallbackUrl,
+  desktopHandoffRefusal,
+  isDesktopHandoffChallenge,
+  isDesktopHandoffVerifier,
+  isHandoffSchemeAllowed,
+  normaliseHandoffAllowlist,
+  normaliseHandoffScheme,
+  readDesktopHandoffCallback,
+  readDesktopHandoffRequest,
+} from './desktop-handoff.js';
 import { AuthSessionEndedError, getAuthErrorCode } from './errors.js';
 import {
   classifyOAuthError,
@@ -169,7 +185,12 @@ export type { WebAuthnAdapter } from './passkeys.js';
 
 /** Where the identity routes live, relative to the base URL. */
 export interface AuthPaths
-  extends EmailFlowPaths, MfaPaths, OAuthPaths, PasskeyPaths {
+  extends
+    EmailFlowPaths,
+    MfaPaths,
+    OAuthPaths,
+    PasskeyPaths,
+    DesktopHandoffPaths {
   /** Defaults to `/api/auth/login`. */
   login?: string;
   /** Defaults to `/api/auth/login/totp`. */
@@ -210,6 +231,8 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   stepUpPasskeyOptions: '/api/auth/step-up/passkey/options',
   loginMfaPasskeyOptions: '/api/auth/login/mfa/passkey/options',
   loginMfaPasskeyVerify: '/api/auth/login/mfa/passkey/verify',
+  desktopHandoff: '/api/auth/desktop-handoff',
+  desktopHandoffExchange: '/api/auth/desktop-handoff/exchange',
 };
 
 /** Construction options. */
@@ -268,6 +291,12 @@ export interface AuthClientOptions<TUser = unknown> {
   clearTimeoutImpl?: (handle: unknown) => void;
   /** Full page navigation for the OAuth redirect. Defaults to `location.assign`. */
   navigate?: (url: string) => void;
+  /**
+   * Custom URL schemes a desktop handoff may target, such as `['myapp']`. Set it
+   * per environment to match the server's `IDENTITY_DESKTOP_HANDOFF_SCHEMES`.
+   * Empty or omitted allows none. A web scheme or a malformed entry throws.
+   */
+  desktopHandoffSchemes?: readonly string[];
 }
 
 /** Shape of a token response, as the identity service writes it. */
@@ -426,6 +455,30 @@ const RENAME_REASONS: ReadonlySet<
   'not-found' | 'name-required' | 'unavailable'
 > = new Set(['not-found', 'name-required', 'unavailable'] as const);
 
+const HANDOFF_MINT_REASONS: ReadonlySet<
+  | 'scheme-not-allowed'
+  | 'invalid-request'
+  | 'not-authenticated'
+  | 'unavailable'
+  | 'rate-limited'
+> = new Set([
+  'scheme-not-allowed',
+  'invalid-request',
+  'not-authenticated',
+  'unavailable',
+  'rate-limited',
+] as const);
+
+const HANDOFF_EXCHANGE_REASONS: ReadonlySet<
+  'scheme-not-allowed' | 'invalid' | 'refused' | 'unavailable' | 'rate-limited'
+> = new Set([
+  'scheme-not-allowed',
+  'invalid',
+  'refused',
+  'unavailable',
+  'rate-limited',
+] as const);
+
 const DELETE_REASONS: ReadonlySet<
   'not-found' | 'last-credential' | 'unavailable'
 > = new Set(['not-found', 'last-credential', 'unavailable'] as const);
@@ -493,6 +546,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   private readonly client: ApiClient;
   private readonly options: AuthClientOptions<TUser>;
   private readonly paths: Required<AuthPaths>;
+  private readonly handoffSchemes: readonly string[];
   private readonly listeners = new Set<(state: AuthState<TUser>) => void>();
 
   /** The single in-flight refresh. Null when no refresh is running. */
@@ -515,6 +569,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   constructor(options: AuthClientOptions<TUser>) {
     this.options = options;
     this.paths = { ...DEFAULT_PATHS, ...options.paths };
+    this.handoffSchemes = normaliseHandoffAllowlist(
+      options.desktopHandoffSchemes ?? []
+    );
 
     if (options.client !== undefined) {
       this.client = options.client;
@@ -1718,6 +1775,167 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       throw error;
     }
     return refused;
+  }
+
+  /**
+   * Browser side of a desktop handoff: mints a single-use code for the signed-in
+   * session, bound to the desktop app's challenge and scheme, and returns the
+   * `<scheme>://auth/handoff?code=...` URL to open the app with. The code lives
+   * about a minute, so open the URL straight away. Without a session it answers
+   * `not-authenticated` without a request.
+   */
+  async mintDesktopHandoff(input: {
+    codeChallenge: string;
+    scheme: string;
+  }): Promise<DesktopHandoffMintOutcome> {
+    if (!isHandoffSchemeAllowed(input.scheme, this.handoffSchemes)) {
+      return desktopHandoffRefusal(
+        'scheme-not-allowed',
+        'This app is not allowed to receive a sign-in handoff.'
+      );
+    }
+    if (!isDesktopHandoffChallenge(input.codeChallenge)) {
+      return desktopHandoffRefusal(
+        'invalid-request',
+        'The sign-in link from the app is malformed. Start again from the app.'
+      );
+    }
+    if (this.accessToken === null) {
+      return desktopHandoffRefusal('not-authenticated', 'Sign in first.');
+    }
+    const scheme = normaliseHandoffScheme(input.scheme);
+    try {
+      const response = await this.client.post<{
+        code?: unknown;
+        expires_in?: unknown;
+      }>(
+        this.paths.desktopHandoff,
+        {
+          code_challenge: input.codeChallenge,
+          code_challenge_method: DESKTOP_HANDOFF_CHALLENGE_METHOD,
+          scheme,
+        },
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      const { code, expires_in: expiresIn } = response.data;
+      if (typeof code !== 'string' || code === '') {
+        throw new Error('The handoff response carried no code.');
+      }
+      return {
+        ok: true,
+        code,
+        expiresIn: typeof expiresIn === 'number' ? expiresIn : 0,
+        callbackUrl: desktopHandoffCallbackUrl(
+          scheme,
+          code,
+          this.handoffSchemes
+        ),
+      };
+    } catch (error) {
+      return this.settleRefusal(
+        error,
+        classifyDesktopHandoffError(error, HANDOFF_MINT_REASONS)
+      );
+    }
+  }
+
+  /**
+   * {@link mintDesktopHandoff} for the handoff page itself: reads the challenge
+   * and scheme off the launch URL, defaulting to `location.href`, and mints.
+   */
+  async handOffToDesktop(
+    input: { url?: string } = {}
+  ): Promise<DesktopHandoffMintOutcome> {
+    const href =
+      input.url ??
+      (globalThis as { location?: { href?: string } }).location?.href ??
+      '';
+    const request = readDesktopHandoffRequest(href, this.handoffSchemes);
+    if (request === null) {
+      return desktopHandoffRefusal(
+        'invalid-request',
+        'The sign-in link from the app is malformed or names an app that is not allowed. Start again from the app.'
+      );
+    }
+    return this.mintDesktopHandoff({
+      codeChallenge: request.challenge,
+      scheme: request.scheme,
+    });
+  }
+
+  /**
+   * Desktop side of a handoff: redeems a code with the verifier the app kept,
+   * and adopts the session it returns exactly as a sign-in would. Any failure
+   * spends the code, so a refusal means starting again from the browser.
+   */
+  async exchangeDesktopHandoff(input: {
+    code: string;
+    codeVerifier: string;
+    scheme: string;
+  }): Promise<DesktopHandoffExchangeOutcome<TUser>> {
+    if (!isHandoffSchemeAllowed(input.scheme, this.handoffSchemes)) {
+      return desktopHandoffRefusal(
+        'scheme-not-allowed',
+        'This app is not allowed to receive a sign-in handoff.'
+      );
+    }
+    if (!isDesktopHandoffVerifier(input.codeVerifier)) {
+      return desktopHandoffRefusal(
+        'invalid',
+        'This sign-in handoff is invalid or has expired. Start again from the app.'
+      );
+    }
+    this.setState({ status: 'loading', error: null, pendingMfa: null });
+    try {
+      const response = await this.client.post<TokenResponseBody>(
+        this.paths.desktopHandoffExchange,
+        {
+          code: input.code,
+          code_verifier: input.codeVerifier,
+          scheme: normaliseHandoffScheme(input.scheme),
+        },
+        { retries: 0, skipUnauthorizedHandling: true }
+      );
+      const data = response.data;
+      const token = data.access_token;
+      if (typeof token !== 'string' || token === '') {
+        throw new Error('The handoff exchange response carried no token.');
+      }
+      const expiresIn =
+        typeof data.expires_in === 'number' ? data.expires_in : undefined;
+      this.adoptToken(token, expiresIn);
+      const user = await this.settleAuthenticated(
+        data.user as TUser | undefined
+      );
+      return { ok: true, user, expiresIn };
+    } catch (error) {
+      return this.settleRefusal(
+        error,
+        classifyDesktopHandoffError(error, HANDOFF_EXCHANGE_REASONS)
+      );
+    }
+  }
+
+  /**
+   * {@link exchangeDesktopHandoff} from the callback URL the operating system
+   * delivered, which names the scheme and carries the code.
+   */
+  async completeDesktopHandoff(input: {
+    url: string;
+    codeVerifier: string;
+  }): Promise<DesktopHandoffExchangeOutcome<TUser>> {
+    const callback = readDesktopHandoffCallback(input.url, this.handoffSchemes);
+    if (callback === null) {
+      return desktopHandoffRefusal(
+        'invalid',
+        'This sign-in handoff is invalid or has expired. Start again from the app.'
+      );
+    }
+    return this.exchangeDesktopHandoff({
+      code: callback.code,
+      codeVerifier: input.codeVerifier,
+      scheme: callback.scheme,
+    });
   }
 
   private authorizationHeader(): Record<string, string> {
