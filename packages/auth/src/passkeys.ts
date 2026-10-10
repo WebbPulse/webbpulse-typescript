@@ -81,8 +81,9 @@ export interface PasskeyNameRequired extends PasskeyRefusalFields {
 }
 
 /**
- * Passkeys this deployment cannot use: either the capability is off altogether
- * or passwordless sign-in alone is, with `code` telling the two apart. A page
+ * Passkeys this deployment cannot use: the capability is off altogether,
+ * passwordless sign-in alone is, or passkeys cannot answer a login MFA
+ * challenge, with `code` telling them apart. A page
  * should hide the affected control rather than render a failure.
  */
 export interface PasskeysUnavailable extends PasskeyRefusalFields {
@@ -124,12 +125,20 @@ export interface PasskeysNotSupported {
 }
 
 /**
- * A step-up on an account with no passkey enrolled. The remedy is to enrol one,
- * or to step up with a code instead, so a product should offer that path rather
- * than treat it as a failure.
+ * A step-up or a login MFA challenge on an account with no passkey enrolled.
+ * The remedy is to enrol one, or to answer with a code instead, so a product
+ * should offer that path rather than treat it as a failure.
  */
 export interface PasskeyNoneRegistered extends PasskeyRefusalFields {
   reason: 'no-passkeys';
+}
+
+/**
+ * An MFA ticket the server would not spend: expired, already used, or never
+ * issued. The remedy is to sign in again from the first leg.
+ */
+export interface PasskeyMfaTicketInvalid extends PasskeyRefusalFields {
+  reason: 'ticket-invalid';
 }
 
 /** Every refusal the routes and the browser can produce. */
@@ -143,7 +152,8 @@ export type PasskeyRefusal =
   | PasskeyRateLimited
   | PasskeyCancelled
   | PasskeysNotSupported
-  | PasskeyNoneRegistered;
+  | PasskeyNoneRegistered
+  | PasskeyMfaTicketInvalid;
 
 /** A passkey that was enrolled. */
 export interface PasskeyRegistered {
@@ -195,6 +205,21 @@ export type PasskeySignInOutcome =
   | PasskeyMfaRequired
   | PasskeyRejected
   | PasskeysUnavailable
+  | PasskeyRateLimited
+  | PasskeyCancelled
+  | PasskeysNotSupported;
+
+/**
+ * What {@link AuthClient.completeMfaWithPasskey} resolves to. A success is
+ * always `signed-in`, since a passkey answering the challenge is the second
+ * factor itself.
+ */
+export type PasskeyMfaOutcome =
+  | PasskeySignedIn
+  | PasskeyRejected
+  | PasskeyMfaTicketInvalid
+  | PasskeysUnavailable
+  | PasskeyNoneRegistered
   | PasskeyRateLimited
   | PasskeyCancelled
   | PasskeysNotSupported;
@@ -270,6 +295,17 @@ export interface PasskeyPaths {
    */
   stepUpPasskeyOptions?: string;
   /**
+   * Defaults to `/api/auth/login/mfa/passkey/options`. The options leg of a
+   * login MFA challenge answered with a passkey, which takes the MFA ticket and
+   * does not spend it.
+   */
+  loginMfaPasskeyOptions?: string;
+  /**
+   * Defaults to `/api/auth/login/mfa/passkey/verify`. Spends the MFA ticket
+   * against the assertion and issues the session.
+   */
+  loginMfaPasskeyVerify?: string;
+  /**
    * Defaults to `/api/auth/passkeys`: the collection for the list, and the base
    * the rename and the delete append a credential id to.
    */
@@ -277,7 +313,7 @@ export interface PasskeyPaths {
 }
 
 /**
- * What the two options routes answer. `publicKey` is WebAuthn JSON passed to the
+ * What the options routes answer. `publicKey` is WebAuthn JSON passed to the
  * browser untouched; `challengeId` never reaches the browser and goes back on
  * the verify leg.
  */
@@ -706,13 +742,18 @@ function classify(
     return { ...base, reason: 'name-required' };
   }
   if (
-    (rawCode === 'PASSKEYS_DISABLED' || rawCode === 'PASSKEY_LOGIN_DISABLED') &&
+    (rawCode === 'PASSKEYS_DISABLED' ||
+      rawCode === 'PASSKEY_LOGIN_DISABLED' ||
+      rawCode === 'PASSKEY_FACTOR_DISABLED') &&
     expected.has('unavailable')
   ) {
     return { ...base, reason: 'unavailable' };
   }
   if (rawCode === 'PASSKEY_NONE_REGISTERED' && expected.has('no-passkeys')) {
     return { ...base, reason: 'no-passkeys' };
+  }
+  if (rawCode === 'MFA_TICKET_INVALID' && expected.has('ticket-invalid')) {
+    return { ...base, reason: 'ticket-invalid' };
   }
   if (
     (rawCode === 'PASSKEY_REJECTED' ||

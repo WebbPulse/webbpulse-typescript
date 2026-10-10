@@ -62,6 +62,7 @@ export const AUTH_ERROR_CODES = [
   'LAST_CREDENTIAL',
   'CREDENTIAL_REQUIRED',
   'STEP_UP_REQUIRED',
+  'PASSKEY_FACTOR_DISABLED',
 ] as const;
 
 /** One of the codes in {@link AUTH_ERROR_CODES}. */

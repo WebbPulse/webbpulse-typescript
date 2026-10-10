@@ -347,6 +347,11 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
    * finished with `completeTotp`.
    */
   signInWithPasskey: AuthClient<TUser>['signInWithPasskey'];
+  /**
+   * Answers a pending MFA challenge with a passkey instead of a code, for a
+   * challenge whose `factors` include `PASSKEY_FACTOR`.
+   */
+  completeMfaWithPasskey: AuthClient<TUser>['completeMfaWithPasskey'];
   registerPasskey: AuthClient<TUser>['registerPasskey'];
   listPasskeys: AuthClient<TUser>['listPasskeys'];
   renamePasskey: AuthClient<TUser>['renamePasskey'];
@@ -390,6 +395,7 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
 const AUTH_METHOD_NAMES = [
   'login',
   'completeTotp',
+  'completeMfaWithPasskey',
   'signInWithPasskey',
   'registerPasskey',
   'listPasskeys',

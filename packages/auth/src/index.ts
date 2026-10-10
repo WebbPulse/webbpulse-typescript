@@ -36,6 +36,7 @@ export {
   type RateLimited,
 } from './email-flows.js';
 export {
+  PASSKEY_FACTOR,
   TOTP_FACTOR,
   classifyMfaError,
   classifyPasswordStepUpError,
@@ -118,7 +119,9 @@ export {
   type PasskeyDeleted,
   type PasskeyLastCredential,
   type PasskeyListOutcome,
+  type PasskeyMfaOutcome,
   type PasskeyMfaRequired,
+  type PasskeyMfaTicketInvalid,
   type PasskeyNameRequired,
   type PasskeyNoneRegistered,
   type PasskeyNotFound,
