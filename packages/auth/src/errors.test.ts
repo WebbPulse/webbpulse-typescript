@@ -110,8 +110,17 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the code the login MFA passkey routes emit', () => {
-    expect([...AUTH_ERROR_CODES].slice(50)).toEqual([
+    expect([...AUTH_ERROR_CODES].slice(50, 51)).toEqual([
       'PASSKEY_FACTOR_DISABLED',
+    ]);
+  });
+
+  it('adds the codes the desktop handoff routes emit', () => {
+    expect([...AUTH_ERROR_CODES].slice(51)).toEqual([
+      'HANDOFF_SCHEME_NOT_ALLOWED',
+      'HANDOFF_INVALID_REQUEST',
+      'HANDOFF_INVALID',
+      'HANDOFF_DISABLED',
     ]);
   });
 });

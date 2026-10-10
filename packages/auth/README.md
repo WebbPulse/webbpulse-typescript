@@ -463,6 +463,56 @@ a conditional sign-in can pass `mediation` and `signal`.
 `passkeyLoginOptions`, `passkeyLoginVerify`, `passkeys`,
 `stepUpPasskeyOptions`, `loginMfaPasskeyOptions`, `loginMfaPasskeyVerify`.
 
+## Desktop session handoff
+
+A desktop app signs in by borrowing the browser's session. It never collects a
+password itself. The server side is webbpulse's `IDENTITY_DESKTOP_HANDOFF_SCHEMES`
+and `/api/auth/desktop-handoff` routes. Set `desktopHandoffSchemes` on both
+clients to the same per-environment list, such as `['myapp']` in production and
+`['myapp-staging']` in staging. An empty list allows nothing, and a web scheme
+such as `https` throws at construction.
+
+The desktop app starts the handoff:
+
+```ts
+const pkce = await createDesktopHandoffPkce();
+shell.openExternal(
+  desktopHandoffLaunchUrl({
+    origin: webOrigin,
+    challenge: pkce.challenge,
+    scheme: 'myapp',
+    allowedSchemes,
+  })
+);
+```
+
+The web app's handoff page, `DESKTOP_HANDOFF_PAGE_PATH` (`/desktop-handoff`) by
+default, hands the session over:
+
+```ts
+const outcome = await auth.handOffToDesktop();
+if (outcome.ok) location.assign(outcome.callbackUrl);
+```
+
+The desktop app finishes when the OS delivers `myapp://auth/handoff?code=...`:
+
+```ts
+const result = await auth.completeDesktopHandoff({
+  url,
+  codeVerifier: pkce.verifier,
+});
+```
+
+Keep the verifier in memory and never put it in a URL. The code lives about a
+minute and is spent by any exchange attempt. A spent, expired or mismatched
+code resolves to `invalid`, and the fix is to start again from the app. Mint refusals are
+`scheme-not-allowed`, `invalid-request`, `not-authenticated` (send the person to
+sign in first), `unavailable` and `rate-limited`. Exchange refusals are
+`scheme-not-allowed`, `invalid`, `refused` (the account may not sign in, or the
+request was cross-site), `unavailable` and `rate-limited`.
+`readDesktopHandoffRequest` and `readDesktopHandoffCallback` are the URL readers
+those methods use.
+
 ## Errors
 
 `getAuthErrorCode(error)` returns one of `AUTH_ERROR_CODES` or `undefined`, so a
@@ -740,6 +790,13 @@ email flows, and reports refusals as outcomes rather than throwing.
 - Link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`, `LINK_TOKEN_PARAM`,
   `readLinkToken`, `retryAfterSeconds`, `classifyLinkError`.
 - MFA: `TOTP_FACTOR`, `PASSKEY_FACTOR`, `classifyMfaError`, `classifyPasswordStepUpError`.
+- Desktop handoff: `createDesktopHandoffPkce`, `desktopHandoffChallenge`,
+  `desktopHandoffLaunchUrl`, `readDesktopHandoffRequest`,
+  `desktopHandoffCallbackUrl`, `readDesktopHandoffCallback`,
+  `normaliseHandoffScheme`, `normaliseHandoffAllowlist`,
+  `isHandoffSchemeAllowed`, `isDesktopHandoffChallenge`,
+  `isDesktopHandoffVerifier`, `classifyDesktopHandoffError`, and the
+  `DESKTOP_HANDOFF_*` constants.
 - OAuth: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`, `readOAuthCallback`,
   `stripOAuthParams`, `parseOAuthLinks`, `describeOAuthCallbackError`,
   `classifyOAuthError`, and the `OAUTH_*` parameter constants.
