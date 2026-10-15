@@ -1,5 +1,12 @@
 # @webbpulse/auth
 
+## 0.23.1
+
+### Patch Changes
+
+- Updated dependencies [24b06e3]
+  - @webbpulse/api-client@0.19.0
+
 ## 0.23.0
 
 ### Minor Changes
