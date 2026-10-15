@@ -11,11 +11,14 @@ import {
 
 import { createApiClient } from './client.js';
 import {
+  clearPolledQueryCache,
+  DEFAULT_CACHE_TIME_MS,
   DEFAULT_MAX_BACKOFF_MS,
   invalidateQueries,
   PolledQueryNotModifiedError,
   PolledQueryTimeoutError,
   polledResponse,
+  prefetchPolledQuery,
   subscribeToActivity,
   serializeQueryKey,
   useMutationWithRefetch,
@@ -68,7 +71,7 @@ async function advance(ms: number): Promise<void> {
  */
 async function settle(): Promise<void> {
   await act(async () => {
-    for (let i = 0; i < 8; i += 1) {
+    for (let i = 0; i < 20; i += 1) {
       await Promise.resolve();
     }
   });
@@ -87,6 +90,7 @@ describe('usePolledQuery', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {
@@ -562,6 +566,7 @@ describe('usePolledQuery stall recovery', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {
@@ -863,6 +868,7 @@ describe('usePolledQuery idle backoff', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {
@@ -1106,6 +1112,7 @@ describe('usePolledQuery loading state', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {
@@ -1282,6 +1289,7 @@ describe('usePolledQuery hidden interval', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {
@@ -1337,6 +1345,7 @@ describe('usePolledQuery conditional polling', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {
@@ -1582,10 +1591,236 @@ describe('usePolledQuery conditional polling', () => {
   });
 });
 
+describe('usePolledQuery shared cache', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setVisibility('visible');
+    clearPolledQueryCache();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  type Rows = { rows: number[] };
+
+  /** A response as the API sends it, with an optional ETag. */
+  function response(
+    status: number,
+    data: Rows | undefined,
+    etag?: string
+  ): PolledResponse<Rows> {
+    const headers = new Headers();
+    if (etag !== undefined) {
+      headers.set('etag', etag);
+    }
+    return polledResponse({ status, data: data as Rows, headers });
+  }
+
+  it('paints a second mount on the key from the cache without a read', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const first = render(fetcher, { intervalMs: 60_000, queryKey: 'shared' });
+    await settle();
+    expect(first.result.current.data).toBe('a');
+
+    const second = render(fetcher, { intervalMs: 60_000, queryKey: 'shared' });
+    expect(second.result.current.data).toBe('a');
+    expect(second.result.current.isLoading).toBe(false);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows cached data on remount and revalidates once it is stale', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const options = {
+      intervalMs: 60_000,
+      staleTimeMs: 1000,
+      queryKey: 'stale',
+    };
+    const first = render(fetcher, options);
+    await settle();
+    first.unmount();
+
+    await advance(2000);
+    const second = render(fetcher, options);
+    expect(second.result.current.data).toBe('a');
+    expect(second.result.current.isLoading).toBe(false);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(second.result.current.data).toBe('b');
+  });
+
+  it('shares one read and one poll across mounts on a key', async () => {
+    const { fetcher, release } = gated<string>();
+    const options = { intervalMs: 1000, idleAfterMs: 0, queryKey: 'together' };
+    const first = render(fetcher, options);
+    const second = render(fetcher, options);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release('x');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(first.result.current.data).toBe('x');
+    expect(second.result.current.data).toBe('x');
+
+    await advance(1000);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      release('y');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(first.result.current.data).toBe('y');
+    expect(second.result.current.data).toBe('y');
+  });
+
+  it('revalidates a remount with the cached ETag and keeps the data on a 304', async () => {
+    const rows = { rows: [1] };
+    const fetcher = vi
+      .fn((_context: PolledQueryContext) =>
+        Promise.resolve(response(304, undefined, 'W/"v1"'))
+      )
+      .mockResolvedValueOnce(response(200, rows, 'W/"v1"'));
+    const options = {
+      intervalMs: 60_000,
+      staleTimeMs: 1000,
+      queryKey: ['rows', 1],
+    };
+    const first = renderHook(() => usePolledQuery(fetcher, options));
+    await settle();
+    expect(first.result.current.data).toBe(rows);
+    first.unmount();
+
+    await advance(2000);
+    const second = renderHook(() => usePolledQuery(fetcher, options));
+    expect(second.result.current.data).toBe(rows);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]![0].headers).toEqual({
+      'if-none-match': 'W/"v1"',
+    });
+    expect(second.result.current.data).toBe(rows);
+    expect(second.result.current.error).toBeNull();
+  });
+
+  it('reads a fresh entry again once its key is invalidated', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const options = { intervalMs: 60_000, queryKey: 'marked' };
+    const first = render(fetcher, options);
+    await settle();
+    first.unmount();
+
+    invalidateQueries('marked');
+    const second = render(fetcher, options);
+    expect(second.result.current.data).toBe('a');
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(second.result.current.data).toBe('b');
+  });
+
+  it('starts empty again after clearPolledQueryCache', async () => {
+    const fetcher = sequence(['a', 'b']);
+    const options = { intervalMs: 60_000, queryKey: 'cleared' };
+    const first = render(fetcher, options);
+    await settle();
+    first.unmount();
+
+    clearPolledQueryCache();
+    const second = render(fetcher, options);
+    expect(second.result.current.data).toBeNull();
+    expect(second.result.current.isLoading).toBe(true);
+    await settle();
+    expect(second.result.current.data).toBe('b');
+  });
+
+  it('prefetches into the cache and skips a fresh entry', async () => {
+    const fetcher = sequence(['warm', 'later']);
+    await act(async () => {
+      await prefetchPolledQuery(['issue', 7], fetcher);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await prefetchPolledQuery(['issue', 7], fetcher);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    const { result } = render(fetcher, {
+      intervalMs: 60_000,
+      queryKey: ['issue', 7],
+    });
+    expect(result.current.data).toBe('warm');
+    expect(result.current.isLoading).toBe(false);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('never rejects a failed prefetch', async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error('down'));
+    await act(async () => {
+      await expect(
+        prefetchPolledQuery('broken', fetcher)
+      ).resolves.toBeUndefined();
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('evicts an entry nothing has held for cacheTimeMs', async () => {
+    expect(DEFAULT_CACHE_TIME_MS).toBe(300_000);
+    const fetcher = sequence(['a', 'b']);
+    const options = {
+      intervalMs: 600_000,
+      cacheTimeMs: 1000,
+      queryKey: 'evicted',
+    };
+    const first = render(fetcher, options);
+    await settle();
+    first.unmount();
+
+    await advance(500);
+    const kept = render(fetcher, options);
+    expect(kept.result.current.data).toBe('a');
+    kept.unmount();
+
+    await advance(1000);
+    const second = render(fetcher, options);
+    expect(second.result.current.data).toBeNull();
+    expect(second.result.current.isLoading).toBe(true);
+    await settle();
+    expect(second.result.current.data).toBe('b');
+  });
+
+  it('paints a cached key on a key change and resets an uncached one', async () => {
+    const fetcher = sequence(['page-one', 'page-two']);
+    const { result, rerender } = renderWithProps<string, number>(
+      fetcher,
+      (page: number) => ({ intervalMs: 60_000, queryKey: ['pages', page] }),
+      1
+    );
+    await settle();
+
+    rerender(2);
+    expect(result.current.data).toBeNull();
+    await settle();
+    expect(result.current.data).toBe('page-two');
+
+    rerender(1);
+    await settle();
+    expect(result.current.data).toBe('page-one');
+    expect(result.current.isLoading).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('useMutationWithRefetch', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     setVisibility('visible');
+    clearPolledQueryCache();
   });
 
   afterEach(() => {

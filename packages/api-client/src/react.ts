@@ -10,6 +10,7 @@ import { idleForMs, subscribeToActivity } from './activity.js';
 import type { AuthTokenProvider } from './client.js';
 import {
   invalidateQueries,
+  observeInvalidations,
   serializeQueryKey,
   subscribeToRefetch,
   type QueryKey,
@@ -35,6 +36,12 @@ export const DEFAULT_MAX_IDLE_INTERVAL_MS = 300_000;
 
 /** Growth per idle poll when `idleBackoffMultiplier` is not given. */
 export const DEFAULT_IDLE_BACKOFF_MULTIPLIER = 2;
+
+/**
+ * Milliseconds a cache entry survives once no mounted query holds it, when
+ * `cacheTimeMs` is not given.
+ */
+export const DEFAULT_CACHE_TIME_MS = 300_000;
 
 /** Header carrying the validator of the data already held. */
 export const IF_NONE_MATCH_HEADER = 'if-none-match';
@@ -243,14 +250,40 @@ export interface PolledQueryOptions {
    * rendering a 401.
    */
   auth?: Pick<AuthTokenProvider, 'waitForToken'>;
+  /**
+   * Milliseconds the shared cache keeps this key's entry once no mounted query
+   * holds it. Defaults to {@link DEFAULT_CACHE_TIME_MS}. Only keyed queries are
+   * cached.
+   */
+  cacheTimeMs?: number;
+}
+
+/** Options for {@link prefetchPolledQuery}. */
+export interface PrefetchPolledQueryOptions {
+  /**
+   * Age below which a cached entry is fresh enough to skip the read. Defaults
+   * to {@link DEFAULT_POLL_INTERVAL_MS}.
+   */
+  staleTimeMs?: number;
+  /**
+   * Deadline on the read. Defaults to {@link DEFAULT_ATTEMPT_TIMEOUT_MS}. 0
+   * disables it.
+   */
+  attemptTimeoutMs?: number;
+  /**
+   * How long the entry survives with no mounted query holding it. Defaults to
+   * {@link DEFAULT_CACHE_TIME_MS}.
+   */
+  cacheTimeMs?: number;
 }
 
 /** What {@link usePolledQuery} returns. */
 export interface PolledQueryResult<T> {
   /**
-   * The last successful value, or null before the first one lands. Resets to
-   * null when `queryKey` changes, so a stale page is never shown under a new
-   * key.
+   * The last successful value, or null before the first one lands. A keyed
+   * query starts from the shared cache when it holds the key, and otherwise
+   * resets to null when `queryKey` changes, so a stale page is never shown
+   * under a new key.
    */
   data: T | null;
   /** The last failure, or null. Cleared by the next success. */
@@ -274,13 +307,398 @@ export interface PolledQueryResult<T> {
    * Fetches now, resetting the interval and any backoff. De-duplicated against
    * an in-flight fetch: calling it while one is running returns that one rather
    * than starting a second, unless that one is past its deadline, in which case
-   * it is aborted and a new attempt starts.
+   * it is aborted and a new attempt starts. A read another query on the same key
+   * has in flight is joined the same way. Otherwise the key's cache entry is
+   * marked for a read, so a later mount does not paint it as fresh.
    */
   refetch: () => Promise<void>;
 }
 
 /** Fractional jitter applied to a backoff delay, as a proportion of it. */
 const BACKOFF_JITTER = 0.5;
+
+/** What one shared read settled with. */
+type RequestOutcome =
+  | { ok: true; notModified: boolean; data: unknown; fetchedAt: number }
+  | { ok: false; error: unknown };
+
+/** One network read, shared by every query on the key that joins it. */
+interface SharedRequest {
+  readonly promise: Promise<RequestOutcome>;
+  readonly controller: AbortController;
+  readonly deadlineAt: number | undefined;
+  waiters: number;
+  settled: boolean;
+}
+
+/** Hears every outcome a cache entry's reads settle with. */
+type EntryListener = (outcome: RequestOutcome, request: SharedRequest) => void;
+
+/**
+ * What the cache holds for one key: the data, its ETag, when it was read, and
+ * the read in flight. A query with no key gets a private entry of its own.
+ */
+interface CacheEntry {
+  readonly key: string | undefined;
+  data: unknown;
+  hasData: boolean;
+  etag: string | undefined;
+  fetchedAt: number | null;
+  invalidated: boolean;
+  version: number;
+  generation: number;
+  request: SharedRequest | undefined;
+  readonly listeners: Set<EntryListener>;
+  holders: number;
+  evictTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+const cache = new Map<string, CacheEntry>();
+
+let stopObserving: (() => void) | undefined;
+
+/** Builds an empty entry. */
+function createEntry(key: string | undefined): CacheEntry {
+  return {
+    key,
+    data: undefined,
+    hasData: false,
+    etag: undefined,
+    fetchedAt: null,
+    invalidated: false,
+    version: 0,
+    generation: 0,
+    request: undefined,
+    listeners: new Set(),
+    holders: 0,
+    evictTimer: undefined,
+  };
+}
+
+/** Marks an entry as needing a read whatever its age. */
+function markInvalidated(entry: CacheEntry): void {
+  entry.invalidated = true;
+  entry.version += 1;
+}
+
+/** Starts marking cached entries on {@link invalidateQueries}, once. */
+function observeOnce(): void {
+  stopObserving ??= observeInvalidations((key) => {
+    const entry = cache.get(key);
+    if (entry !== undefined) {
+      markInvalidated(entry);
+    }
+  });
+}
+
+/** Cancels a pending eviction. */
+function clearEviction(entry: CacheEntry): void {
+  if (entry.evictTimer !== undefined) {
+    clearTimeout(entry.evictTimer);
+    entry.evictTimer = undefined;
+  }
+}
+
+/** Takes a hold on the key's entry, creating it when absent. */
+function acquireEntry(key: string): CacheEntry {
+  observeOnce();
+  let entry = cache.get(key);
+  if (entry === undefined) {
+    entry = createEntry(key);
+    cache.set(key, entry);
+  }
+  entry.holders += 1;
+  clearEviction(entry);
+  return entry;
+}
+
+/** Drops a hold, scheduling eviction once nothing holds the entry. */
+function releaseEntry(entry: CacheEntry, cacheTimeMs: number): void {
+  entry.holders = Math.max(0, entry.holders - 1);
+  if (entry.holders === 0) {
+    scheduleEviction(entry, cacheTimeMs);
+  }
+}
+
+/** Evicts an unheld entry after `cacheTimeMs`, waiting out a read in flight. */
+function scheduleEviction(entry: CacheEntry, cacheTimeMs: number): void {
+  clearEviction(entry);
+  const key = entry.key;
+  if (key === undefined || !Number.isFinite(cacheTimeMs)) {
+    return;
+  }
+  entry.evictTimer = setTimeout(
+    () => {
+      entry.evictTimer = undefined;
+      if (entry.holders > 0 || cache.get(key) !== entry) {
+        return;
+      }
+      if (entry.request !== undefined) {
+        scheduleEviction(entry, cacheTimeMs);
+        return;
+      }
+      cache.delete(key);
+    },
+    Math.max(0, cacheTimeMs)
+  );
+}
+
+/** Whether the entry holds data read within `staleTimeMs` and not invalidated. */
+function isFresh(entry: CacheEntry, staleTimeMs: number, now: number): boolean {
+  return (
+    entry.hasData &&
+    !entry.invalidated &&
+    entry.fetchedAt !== null &&
+    now - entry.fetchedAt < staleTimeMs
+  );
+}
+
+/** The error an aborted signal rejects with. */
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('Poll attempt aborted.');
+}
+
+/** Tells every listener of the entry how a read settled. */
+function notify(
+  entry: CacheEntry,
+  outcome: RequestOutcome,
+  request: SharedRequest
+): void {
+  for (const listener of [...entry.listeners]) {
+    listener(outcome, request);
+  }
+}
+
+/**
+ * Joins the entry's read in flight, or starts one with `fetcher` and the held
+ * ETag. A read past its deadline is never joined: it is left to the queries
+ * already waiting on it and a new one starts.
+ */
+function joinRequest(
+  entry: CacheEntry,
+  fetcher: PolledQueryFetcher<unknown>,
+  timeoutMs: number
+): SharedRequest {
+  const now = Date.now();
+  const running = entry.request;
+  if (
+    running !== undefined &&
+    (running.deadlineAt === undefined || now < running.deadlineAt)
+  ) {
+    running.waiters += 1;
+    return running;
+  }
+  const controller = new AbortController();
+  const etag = entry.etag;
+  const headers: Readonly<Record<string, string>> =
+    etag === undefined ? {} : { [IF_NONE_MATCH_HEADER]: etag };
+  const generation = entry.generation;
+  const version = entry.version;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener(
+      'abort',
+      () => {
+        reject(abortError(controller.signal));
+      },
+      { once: true }
+    );
+  });
+  aborted.catch(() => undefined);
+  const read = (async (): Promise<unknown> =>
+    fetcher({ signal: controller.signal, etag, headers }))();
+  const request: SharedRequest = {
+    controller,
+    deadlineAt: timeoutMs > 0 ? now + timeoutMs : undefined,
+    waiters: 1,
+    settled: false,
+    promise: Promise.race([read, aborted]).then(
+      (value) =>
+        settleRequest(entry, request, generation, version, etag, value),
+      (thrown: unknown) => failRequest(entry, request, generation, thrown)
+    ),
+  };
+  entry.request = request;
+  return request;
+}
+
+/**
+ * Writes a read's value into the entry, unless the cache was cleared while it
+ * ran, and tells the entry's listeners.
+ */
+function settleRequest(
+  entry: CacheEntry,
+  request: SharedRequest,
+  generation: number,
+  version: number,
+  sentEtag: string | undefined,
+  value: unknown
+): RequestOutcome {
+  request.settled = true;
+  if (entry.request === request) {
+    entry.request = undefined;
+  }
+  const current = entry.generation === generation;
+  const fetchedAt = Date.now();
+  let outcome: RequestOutcome;
+  if (value instanceof PolledResponse) {
+    if (value.notModified && sentEtag === undefined) {
+      if (current) {
+        entry.etag = undefined;
+      }
+      outcome = { ok: false, error: new PolledQueryNotModifiedError() };
+    } else if (value.notModified) {
+      if (current) {
+        entry.etag = value.etag ?? sentEtag;
+      }
+      outcome = {
+        ok: true,
+        notModified: true,
+        data: current ? entry.data : undefined,
+        fetchedAt,
+      };
+    } else {
+      if (current) {
+        entry.etag = value.etag;
+        entry.data = value.data;
+        entry.hasData = true;
+      }
+      outcome = { ok: true, notModified: false, data: value.data, fetchedAt };
+    }
+  } else {
+    if (current) {
+      entry.etag = undefined;
+      entry.data = value;
+      entry.hasData = true;
+    }
+    outcome = { ok: true, notModified: false, data: value, fetchedAt };
+  }
+  if (current) {
+    if (outcome.ok) {
+      entry.fetchedAt = fetchedAt;
+      if (entry.version === version) {
+        entry.invalidated = false;
+      }
+    }
+    notify(entry, outcome, request);
+  }
+  return outcome;
+}
+
+/** Settles a failed read, telling the listeners unless it was abandoned. */
+function failRequest(
+  entry: CacheEntry,
+  request: SharedRequest,
+  generation: number,
+  thrown: unknown
+): RequestOutcome {
+  request.settled = true;
+  if (entry.request === request) {
+    entry.request = undefined;
+  }
+  const outcome: RequestOutcome = { ok: false, error: thrown };
+  if (!request.controller.signal.aborted && entry.generation === generation) {
+    notify(entry, outcome, request);
+  }
+  return outcome;
+}
+
+/** Stops waiting on a read, aborting it once nothing waits on it. */
+function leaveRequest(
+  entry: CacheEntry,
+  request: SharedRequest,
+  reason: unknown
+): void {
+  if (request.settled) {
+    return;
+  }
+  request.waiters -= 1;
+  if (request.waiters > 0) {
+    return;
+  }
+  if (entry.request === request) {
+    entry.request = undefined;
+  }
+  request.controller.abort(reason);
+}
+
+/**
+ * Empties the shared {@link usePolledQuery} cache: every key's data and ETag
+ * are dropped and reads in flight no longer write into it. Call it on sign-out
+ * and on any switch that changes what an unscoped key means, such as a
+ * workspace switch. Mounted queries keep what they show and read afresh on
+ * their next poll; invalidate their keys to read now.
+ */
+export function clearPolledQueryCache(): void {
+  for (const [key, entry] of cache) {
+    entry.generation += 1;
+    entry.version += 1;
+    entry.data = undefined;
+    entry.hasData = false;
+    entry.etag = undefined;
+    entry.fetchedAt = null;
+    entry.invalidated = false;
+    entry.request = undefined;
+    if (entry.holders === 0) {
+      clearEviction(entry);
+      cache.delete(key);
+    }
+  }
+}
+
+/**
+ * Warms the shared cache for `key`, for example on hover, so a query mounted
+ * on it afterwards paints at once. Skips the read when the entry is fresher
+ * than `staleTimeMs`, and joins a read already in flight. Resolves once the
+ * read settles or times out, and never rejects: a failed prefetch leaves the
+ * query to read for itself.
+ *
+ * @example
+ * ```ts
+ * onMouseEnter={() =>
+ *   void prefetchPolledQuery(['issue', id], ({ signal, headers }) =>
+ *     client.get<Issue>(`/issues/${id}`, { signal, headers }).then(polledResponse)
+ *   )
+ * }
+ * ```
+ */
+export function prefetchPolledQuery<T>(
+  key: QueryKey,
+  fetcher: PolledQueryFetcher<T>,
+  options: PrefetchPolledQueryOptions = {}
+): Promise<void> {
+  const {
+    staleTimeMs = DEFAULT_POLL_INTERVAL_MS,
+    attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS,
+    cacheTimeMs = DEFAULT_CACHE_TIME_MS,
+  } = options;
+  const entry = acquireEntry(serializeQueryKey(key));
+  if (isFresh(entry, staleTimeMs, Date.now())) {
+    releaseEntry(entry, cacheTimeMs);
+    return Promise.resolve();
+  }
+  const request = joinRequest(entry, fetcher, attemptTimeoutMs);
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    if (attemptTimeoutMs > 0) {
+      deadlineTimer = setTimeout(() => {
+        leaveRequest(
+          entry,
+          request,
+          new PolledQueryTimeoutError(attemptTimeoutMs)
+        );
+        resolve();
+      }, attemptTimeoutMs);
+    }
+  });
+  return Promise.race([request.promise.then(() => undefined), deadline]).then(
+    () => {
+      clearTimeout(deadlineTimer);
+      releaseEntry(entry, cacheTimeMs);
+    }
+  );
+}
 
 /** Whether the document is currently visible. True outside a browser. */
 function documentVisible(): boolean {
@@ -293,9 +711,22 @@ function documentVisible(): boolean {
 /**
  * Polls a fetcher on an interval and keeps the result in state.
  *
- * Dependency free: no react-query, no cache and no shared store beyond the
- * refetch keys, because the applications need a handful of live panels rather
- * than a query layer.
+ * Dependency free: no react-query. Keyed queries share a module scoped
+ * stale-while-revalidate cache, so a remount or a second component on the same
+ * key paints from what was last read instead of starting empty.
+ *
+ * The cache holds, per serialised `queryKey`, the data, its ETag and when it
+ * was read. A query mounting on a key the cache holds, or changing to one,
+ * takes the data at once with `isLoading` false, and reads again only when the
+ * entry is older than `staleTimeMs` or was invalidated. Queries sharing a key
+ * share one read: whichever polls first starts it, the others join it, and
+ * every one of them takes the result and restarts its timer from it, so the
+ * key is polled once per interval of its fastest subscriber. The held ETag goes
+ * out as `If-None-Match`, so a remount revalidates with a 304. `refetch` and
+ * {@link invalidateQueries} mark the entry for a read, {@link prefetchPolledQuery}
+ * warms it, {@link clearPolledQueryCache} empties it, and an entry no mounted
+ * query has held for `cacheTimeMs` is evicted. A query with no key keeps a
+ * private entry and behaves exactly as before.
  *
  * The timer is a chained `setTimeout` rather than `setInterval`, measured from
  * the end of one fetch to the start of the next, so a fetch slower than the
@@ -327,18 +758,16 @@ function documentVisible(): boolean {
  *
  * `queryKey` identifies the query, not just the invalidation channel. Changing
  * it starts a fresh query: the timer and any backoff reset, a fetch goes out
- * immediately, and the refetch subscription moves to the new key. A result
- * still in flight for the previous key is dropped rather than landing under the
- * new one. Keys are compared by a stable serialisation, so an array assembled
- * inline on every render, `['jobs', page, status]`, restarts nothing while its
- * segments hold. A caller whose key never changes sees the behaviour it always
- * had.
+ * immediately unless the cache holds the new key fresh, and the refetch
+ * subscription moves to the new key. A result still in flight for the previous
+ * key is dropped rather than landing under the new one. Keys are compared by a
+ * stable serialisation, so an array assembled inline on every render,
+ * `['jobs', page, status]`, restarts nothing while its segments hold.
  *
- * On a key change `data` resets to null and `isLoading` reads true again,
- * unlike a failed poll, which keeps the last value. The old key's rows are a
- * different question's answer, so showing page one's list under a page two
- * heading would be wrong rather than merely stale; a caller that prefers to
- * hold the previous page keeps its own copy of `data` across the change.
+ * On a change to a key the cache does not hold, `data` resets to null and
+ * `isLoading` reads true again, unlike a failed poll, which keeps the last
+ * value. The old key's rows are a different question's answer, so showing page
+ * one's list under a page two heading would be wrong rather than merely stale.
  *
  * @example
  * ```ts
@@ -367,6 +796,7 @@ export function usePolledQuery<T>(
     maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
     staleTimeMs = intervalMs,
     attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS,
+    cacheTimeMs = DEFAULT_CACHE_TIME_MS,
     queryKey,
     auth,
   } = options;
@@ -380,12 +810,33 @@ export function usePolledQuery<T>(
     [queryKey]
   );
 
-  const [data, setData] = useState<T | null>(null);
+  const [initial] = useState(() => {
+    const entry =
+      serializedKey === undefined ? undefined : cache.get(serializedKey);
+    if (entry === undefined || !entry.hasData || entry.fetchedAt === null) {
+      return undefined;
+    }
+    return {
+      data: entry.data as T,
+      fetchedAt: entry.fetchedAt,
+      staleAt: entry.invalidated
+        ? entry.fetchedAt
+        : entry.fetchedAt + staleTimeMs,
+    };
+  });
+
+  const [data, setData] = useState<T | null>(
+    initial === undefined ? null : initial.data
+  );
   const [error, setError] = useState<unknown>(null);
-  const [settled, setSettled] = useState(false);
+  const [settled, setSettled] = useState(initial !== undefined);
   const [isFetching, setIsFetching] = useState(false);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
-  const [staleAt, setStaleAt] = useState<number | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(
+    initial === undefined ? null : initial.fetchedAt
+  );
+  const [staleAt, setStaleAt] = useState<number | null>(
+    initial === undefined ? null : initial.staleAt
+  );
 
   const live = useRef(true);
   const generation = useRef(0);
@@ -393,17 +844,35 @@ export function usePolledQuery<T>(
   fetcherRef.current = fetcher;
   const authRef = useRef(auth);
   authRef.current = auth;
+  const dataRef = useRef<T | null>(data);
 
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const controller = useRef<AbortController | undefined>(undefined);
   const inFlight = useRef<Promise<void> | undefined>(undefined);
+  const joined = useRef<SharedRequest | undefined>(undefined);
+  const entryRef = useRef<CacheEntry | undefined>(undefined);
+  const privateEntry = useRef<CacheEntry | undefined>(undefined);
   const deadlineAt = useRef<number | undefined>(undefined);
   const lastProgressAt = useRef(0);
   const failures = useRef(0);
   const waited = useRef(false);
-  const validator = useRef<string | undefined>(undefined);
   const idlePolls = useRef(0);
   const scheduledDelay = useRef(0);
+
+  /** Sets `data`, keeping the ref the 304 path compares against in step. */
+  const writeData = useCallback((value: T | null): void => {
+    dataRef.current = value;
+    setData(value);
+  }, []);
+
+  /** The entry this query reads through: the key's, or its private one. */
+  const entryFor = useCallback((): CacheEntry => {
+    if (entryRef.current !== undefined) {
+      return entryRef.current;
+    }
+    privateEntry.current ??= createEntry(undefined);
+    return privateEntry.current;
+  }, []);
 
   const clearTimer = useCallback((): void => {
     if (timer.current !== undefined) {
@@ -421,6 +890,7 @@ export function usePolledQuery<T>(
     controller.current = undefined;
     inFlight.current = undefined;
     deadlineAt.current = undefined;
+    joined.current = undefined;
     current?.abort();
   }, []);
 
@@ -451,18 +921,36 @@ export function usePolledQuery<T>(
     idleAfterMs,
     idleBackoffMultiplier,
     maxIdleIntervalMs,
+    cacheTimeMs,
   };
   const settings = useRef(currentSettings);
   settings.current = currentSettings;
 
-  const schedule = useRef<() => void>(() => undefined);
+  const schedule = useRef<(delayMs?: number) => void>(() => undefined);
+
+  /** Writes a successful read into state; a 304 keeps the held data. */
+  const applySuccess = useCallback(
+    (outcome: Extract<RequestOutcome, { ok: true }>): void => {
+      if (!outcome.notModified) {
+        writeData(outcome.data as T);
+      } else if (dataRef.current === null && outcome.data !== undefined) {
+        writeData(outcome.data as T);
+      }
+      failures.current = 0;
+      setError(null);
+      setLastUpdatedAt(outcome.fetchedAt);
+      setStaleAt(outcome.fetchedAt + settings.current.staleTimeMs);
+    },
+    [writeData]
+  );
 
   /**
    * One attempt. De-duplication is the `inFlight` promise: a concurrent caller
    * is handed the running one, so a focus event landing on top of an interval
-   * tick does not double the request. An attempt past its deadline is never
-   * handed out; it is released and a new one starts, which also covers a
-   * background tab whose deadline timer was throttled.
+   * tick does not double the request. Across queries on one key it is the
+   * cache entry's shared read, which this attempt joins. An attempt past its
+   * deadline is never handed out; it is released and a new one starts, which
+   * also covers a background tab whose deadline timer was throttled.
    *
    * The deadline races the whole attempt, token wait and fetcher alike, so a
    * hung token refresh or body read cannot hold the loop even when the fetcher
@@ -475,31 +963,32 @@ export function usePolledQuery<T>(
       }
       release();
     }
+    const entry = entryFor();
     const abort = new AbortController();
     controller.current = abort;
     const generationAtStart = generation.current;
     const timeoutMs = settings.current.attemptTimeoutMs;
-    const etag = validator.current;
-    const headers: Readonly<Record<string, string>> =
-      etag === undefined ? {} : { [IF_NONE_MATCH_HEADER]: etag };
     const startedAt = Date.now();
     deadlineAt.current = timeoutMs > 0 ? startedAt + timeoutMs : undefined;
     lastProgressAt.current = startedAt;
     setIsFetching(true);
+    let shared: SharedRequest | undefined;
 
     const superseded = (): boolean =>
       !live.current ||
       controller.current !== abort ||
       generation.current !== generationAtStart;
 
-    const work = async (): Promise<T | PolledResponse<T>> => {
+    const work = async (): Promise<RequestOutcome> => {
       const waitForToken = authRef.current?.waitForToken;
       if (waitForToken !== undefined && !waited.current) {
         waited.current = true;
         await waitForToken.call(authRef.current);
       }
       abort.signal.throwIfAborted();
-      return fetcherRef.current({ signal: abort.signal, etag, headers });
+      shared = joinRequest(entry, fetcherRef.current, timeoutMs);
+      joined.current = shared;
+      return shared.promise;
     };
 
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -507,11 +996,10 @@ export function usePolledQuery<T>(
     const cutoff = new Promise<never>((_resolve, reject) => {
       const onAbort = (): void => {
         clearTimeout(deadlineTimer);
-        reject(
-          abort.signal.reason instanceof Error
-            ? abort.signal.reason
-            : new Error('Poll attempt aborted.')
-        );
+        if (shared !== undefined) {
+          leaveRequest(entry, shared, abort.signal.reason);
+        }
+        reject(abortError(abort.signal));
       };
       abort.signal.addEventListener('abort', onAbort, { once: true });
       stopListening = () => {
@@ -530,29 +1018,14 @@ export function usePolledQuery<T>(
     const attempt = (async (): Promise<void> => {
       let owned = false;
       try {
-        const value = await Promise.race([pending, cutoff]);
+        const outcome = await Promise.race([pending, cutoff]);
         if (superseded()) {
           return;
         }
-        if (value instanceof PolledResponse) {
-          if (value.notModified && etag === undefined) {
-            validator.current = undefined;
-            throw new PolledQueryNotModifiedError();
-          }
-          validator.current =
-            value.etag ?? (value.notModified ? etag : undefined);
-          if (!value.notModified) {
-            setData(value.data as T);
-          }
-        } else {
-          validator.current = undefined;
-          setData(value);
+        if (!outcome.ok) {
+          throw outcome.error;
         }
-        failures.current = 0;
-        const now = Date.now();
-        setError(null);
-        setLastUpdatedAt(now);
-        setStaleAt(now + settings.current.staleTimeMs);
+        applySuccess(outcome);
       } catch (thrown) {
         if (superseded()) {
           return;
@@ -567,6 +1040,9 @@ export function usePolledQuery<T>(
           controller.current = undefined;
           inFlight.current = undefined;
           deadlineAt.current = undefined;
+          if (joined.current === shared) {
+            joined.current = undefined;
+          }
           lastProgressAt.current = Date.now();
           setIsFetching(false);
           setSettled(true);
@@ -579,7 +1055,7 @@ export function usePolledQuery<T>(
 
     inFlight.current = attempt;
     return attempt;
-  }, [release]);
+  }, [applySuccess, entryFor, release]);
 
   /**
    * The wait before the next poll: the error backoff, stretched while the page
@@ -609,27 +1085,37 @@ export function usePolledQuery<T>(
     [nextDelay]
   );
 
-  schedule.current = useCallback((): void => {
-    clearTimer();
-    const current = settings.current;
-    if (!current.enabled) {
-      return;
-    }
-    const hidden = current.refetchOnVisible && !documentVisible();
-    if (hidden && current.hiddenIntervalMs <= 0) {
-      return;
-    }
-    const delay = pollDelay(hidden);
-    scheduledDelay.current = delay;
-    timer.current = setTimeout(() => {
-      timer.current = undefined;
-      if (live.current && settings.current.enabled) {
-        void run();
+  schedule.current = useCallback(
+    (delayMs?: number): void => {
+      clearTimer();
+      const current = settings.current;
+      if (!current.enabled) {
+        return;
       }
-    }, delay);
-  }, [clearTimer, pollDelay, run]);
+      const hidden = current.refetchOnVisible && !documentVisible();
+      if (hidden && current.hiddenIntervalMs <= 0) {
+        return;
+      }
+      const delay =
+        delayMs === undefined
+          ? pollDelay(hidden)
+          : Math.max(delayMs, hidden ? current.hiddenIntervalMs : 0);
+      scheduledDelay.current = delay;
+      timer.current = setTimeout(() => {
+        timer.current = undefined;
+        if (live.current && settings.current.enabled) {
+          void run();
+        }
+      }, delay);
+    },
+    [clearTimer, pollDelay, run]
+  );
 
   const refetch = useCallback((): Promise<void> => {
+    const entry = entryRef.current;
+    if (entry !== undefined && entry.request === undefined) {
+      markInvalidated(entry);
+    }
     failures.current = 0;
     clearTimer();
     return run();
@@ -644,6 +1130,41 @@ export function usePolledQuery<T>(
     release();
     void run();
   }, [clearTimer, release, run]);
+
+  useEffect(() => {
+    const entry =
+      serializedKey === undefined ? undefined : acquireEntry(serializedKey);
+    entryRef.current = entry;
+    const target = entry ?? entryFor();
+    const listener: EntryListener = (outcome, request) => {
+      if (!live.current || joined.current === request) {
+        return;
+      }
+      if (outcome.ok) {
+        applySuccess(outcome);
+      } else {
+        if (settings.current.enabled) {
+          failures.current += 1;
+        }
+        setError(outcome.error);
+      }
+      setSettled(true);
+      lastProgressAt.current = Date.now();
+      if (inFlight.current === undefined && settings.current.enabled) {
+        schedule.current();
+      }
+    };
+    target.listeners.add(listener);
+    return () => {
+      target.listeners.delete(listener);
+      if (entryRef.current === entry) {
+        entryRef.current = undefined;
+      }
+      if (entry !== undefined) {
+        releaseEntry(entry, settings.current.cacheTimeMs);
+      }
+    };
+  }, [serializedKey, applySuccess, entryFor]);
 
   useEffect(() => {
     live.current = true;
@@ -666,15 +1187,26 @@ export function usePolledQuery<T>(
     release();
     failures.current = 0;
     waited.current = false;
-    validator.current = undefined;
     idlePolls.current = 0;
-    setData(null);
     setError(null);
+    setIsFetching(false);
+    const entry = entryRef.current;
+    if (entry?.hasData === true && entry.fetchedAt !== null) {
+      writeData(entry.data as T);
+      setLastUpdatedAt(entry.fetchedAt);
+      setStaleAt(
+        entry.invalidated
+          ? entry.fetchedAt
+          : entry.fetchedAt + settings.current.staleTimeMs
+      );
+      setSettled(true);
+      return;
+    }
+    writeData(null);
     setLastUpdatedAt(null);
     setStaleAt(null);
-    setIsFetching(false);
     setSettled(false);
-  }, [serializedKey, clearTimer, release]);
+  }, [serializedKey, clearTimer, release, writeData]);
 
   useEffect(() => {
     if (!enabled) {
@@ -684,9 +1216,27 @@ export function usePolledQuery<T>(
       setIsFetching(false);
       return;
     }
+    const entry = entryRef.current;
+    const now = Date.now();
+    if (
+      entry !== undefined &&
+      entry.fetchedAt !== null &&
+      isFresh(entry, settings.current.staleTimeMs, now)
+    ) {
+      if (dataRef.current !== entry.data) {
+        writeData(entry.data as T);
+      }
+      setLastUpdatedAt(entry.fetchedAt);
+      setStaleAt(entry.fetchedAt + settings.current.staleTimeMs);
+      setSettled(true);
+      failures.current = 0;
+      lastProgressAt.current = now;
+      schedule.current(Math.max(0, entry.fetchedAt + intervalMs - now));
+      return clearTimer;
+    }
     void run();
     return clearTimer;
-  }, [enabled, intervalMs, serializedKey, clearTimer, release, run]);
+  }, [enabled, intervalMs, serializedKey, clearTimer, release, run, writeData]);
 
   useEffect(() => {
     if (!enabled || serializedKey === undefined) {

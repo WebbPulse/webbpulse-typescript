@@ -303,9 +303,9 @@ A separate entry point, so the core package stays framework free and an
 application that only needs the client never pulls React into its bundle. React
 is an optional peer dependency.
 
-`usePolledQuery` keeps a panel current without a query layer. No react-query, no
-cache and no shared store beyond the refetch keys, because the applications need
-a handful of live panels rather than a framework.
+`usePolledQuery` keeps a panel current without a query layer. No react-query
+and no new dependency: keyed queries share a small stale-while-revalidate cache
+in the module, and that is the whole store.
 
 ```ts
 import {
@@ -380,6 +380,34 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
   and `ETag` in `Access-Control-Expose-Headers`, or the browser hides the
   validator.
 
+- **Keyed queries share a cache.** Each serialised `queryKey` holds its data,
+  ETag and read time in one module scoped entry. A query mounting on a key the
+  cache holds, or changing to one, paints that data at once with `isLoading`
+  false and reads again only once the entry is older than `staleTimeMs` or was
+  invalidated, sending the held ETag so the revalidation is usually a 304.
+  Queries on one key share one read: the first to poll starts it, the rest join
+  it, and all of them take the result and restart their timers from it, so the
+  key is polled once per interval of its fastest subscriber. `refetch()` and
+  `invalidateQueries` mark the entry for a read, including an entry no mounted
+  query holds. An entry nothing has held for `cacheTimeMs` (default 5 minutes)
+  is evicted. A query with no key keeps a private entry and behaves as before.
+- **`clearPolledQueryCache()`** drops every entry's data and ETag, and reads in
+  flight no longer write into the cache. Call it on sign-out and on a switch
+  that changes what an unscoped key means, such as a workspace switch. Mounted
+  queries keep what they show and read afresh on their next poll.
+- **`prefetchPolledQuery(key, fetcher, options)`** warms an entry, for example
+  on hover, so the query mounted next paints at once. It skips an entry fresher
+  than `staleTimeMs` (default 30 seconds), joins a read already in flight, and
+  resolves once the read settles without ever rejecting:
+
+  ```ts
+  onMouseEnter={() =>
+    void prefetchPolledQuery(['issue', id], ({ signal, headers }) =>
+      issues.get<Issue>(`/${id}`, { signal, headers }).then(polledResponse)
+    )
+  }
+  ```
+
 - **Requests are de-duplicated.** A focus event landing on top of an interval
   tick is handed the running promise rather than starting a second request, and
   `refetch()` while one is in flight returns that one, unless it is past its
@@ -400,14 +428,16 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
 - **`queryKey` identifies the query**, not just its invalidation channel. Put
   the filters and the page cursor the fetcher closes over into the key, as
   `['jobs', page, status]`, and changing them starts a fresh query: the timer
-  and any backoff reset, a fetch goes out immediately, the refetch subscription
+  and any backoff reset, a fetch goes out immediately unless the cache holds
+  the new key fresh, the refetch subscription
   moves to the new key, and a response still in flight for the previous key is
   dropped rather than landing under the new one. Keys compare by a stable
   serialisation rather than by identity, so an array built inline on every
   render restarts nothing while its segments hold, and a caller whose key never
   changes sees the behaviour it always had. Remounting a list on a React `key`
   to force a re-read is no longer needed.
-- **A key change clears `data` and raises `isLoading`**, unlike a failed poll,
+- **A change to a key the cache does not hold clears `data` and raises
+  `isLoading`**, unlike a failed poll,
   which keeps the last value. The previous key's rows answer a different
   question, so page one's list under a page two heading would be wrong rather
   than merely stale. A caller that would rather hold the old page while the new
@@ -463,9 +493,11 @@ caller as usual, but no longer writes to the hook's state.
 `@webbpulse/api-client/react` adds `usePolledQuery` and
 `useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS`,
 `DEFAULT_MAX_BACKOFF_MS`, `DEFAULT_ATTEMPT_TIMEOUT_MS`, `DEFAULT_IDLE_AFTER_MS`,
-`DEFAULT_MAX_IDLE_INTERVAL_MS`, `DEFAULT_IDLE_BACKOFF_MULTIPLIER` and
-`IF_NONE_MATCH_HEADER`, the errors `PolledQueryTimeoutError` and
+`DEFAULT_MAX_IDLE_INTERVAL_MS`, `DEFAULT_IDLE_BACKOFF_MULTIPLIER`,
+`DEFAULT_CACHE_TIME_MS` and `IF_NONE_MATCH_HEADER`, the cache controls
+`clearPolledQueryCache` and `prefetchPolledQuery`, the errors `PolledQueryTimeoutError` and
 `PolledQueryNotModifiedError`, `polledResponse` with the class
 `PolledResponse`, the activity tracker `subscribeToActivity` and `idleForMs`,
-and the types `PolledQueryOptions`, `PolledQueryResult`, `PolledQueryFetcher`,
+and the types `PolledQueryOptions`, `PrefetchPolledQueryOptions`,
+`PolledQueryResult`, `PolledQueryFetcher`,
 `PolledQueryContext`, `ConditionalResponse` and `MutationWithRefetch`.

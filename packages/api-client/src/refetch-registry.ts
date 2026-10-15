@@ -48,6 +48,22 @@ function isSingleKey(value: QueryKey | readonly QueryKey[]): value is QueryKey {
 
 const subscribers = new Map<string, Set<() => void>>();
 
+const invalidationObservers = new Set<(serializedKey: string) => void>();
+
+/**
+ * Registers `observer` to hear every invalidated key, by its serialisation,
+ * before the key's subscribers are told to refetch. The polled query cache uses
+ * it to mark entries no mounted query holds as needing a read.
+ */
+export function observeInvalidations(
+  observer: (serializedKey: string) => void
+): Unsubscribe {
+  invalidationObservers.add(observer);
+  return () => {
+    invalidationObservers.delete(observer);
+  };
+}
+
 /**
  * Registers `listener` against `key`, returning its unsubscribe. Several
  * queries may share one key, and all of them are notified together.
@@ -88,7 +104,11 @@ export function subscribeToRefetch(
 export function invalidateQueries(keys: QueryKey | readonly QueryKey[]): void {
   const list: readonly QueryKey[] = isSingleKey(keys) ? [keys] : keys;
   for (const key of list) {
-    const listeners = subscribers.get(serializeQueryKey(key));
+    const serialized = serializeQueryKey(key);
+    for (const observer of [...invalidationObservers]) {
+      observer(serialized);
+    }
+    const listeners = subscribers.get(serialized);
     if (listeners === undefined) {
       continue;
     }
