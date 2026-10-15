@@ -1236,15 +1236,7 @@ export function usePolledQuery<T>(
     }
     void run();
     return clearTimer;
-  }, [
-    enabled,
-    intervalMs,
-    serializedKey,
-    clearTimer,
-    release,
-    run,
-    writeData,
-  ]);
+  }, [enabled, intervalMs, serializedKey, clearTimer, release, run, writeData]);
 
   useEffect(() => {
     if (!enabled || serializedKey === undefined) {
