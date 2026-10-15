@@ -506,14 +506,8 @@ function joinRequest(
     );
   });
   aborted.catch(() => undefined);
-  let read: Promise<unknown>;
-  try {
-    read = Promise.resolve(
-      fetcher({ signal: controller.signal, etag, headers })
-    );
-  } catch (thrown) {
-    read = Promise.reject(thrown);
-  }
+  const read = (async (): Promise<unknown> =>
+    fetcher({ signal: controller.signal, etag, headers }))();
   const request: SharedRequest = {
     controller,
     deadlineAt: timeoutMs > 0 ? now + timeoutMs : undefined,
@@ -684,11 +678,7 @@ export function prefetchPolledQuery<T>(
     releaseEntry(entry, cacheTimeMs);
     return Promise.resolve();
   }
-  const request = joinRequest(
-    entry,
-    fetcher as PolledQueryFetcher<unknown>,
-    attemptTimeoutMs
-  );
+  const request = joinRequest(entry, fetcher, attemptTimeoutMs);
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<void>((resolve) => {
     if (attemptTimeoutMs > 0) {
@@ -996,11 +986,7 @@ export function usePolledQuery<T>(
         await waitForToken.call(authRef.current);
       }
       abort.signal.throwIfAborted();
-      shared = joinRequest(
-        entry,
-        fetcherRef.current as PolledQueryFetcher<unknown>,
-        timeoutMs
-      );
+      shared = joinRequest(entry, fetcherRef.current, timeoutMs);
       joined.current = shared;
       return shared.promise;
     };
