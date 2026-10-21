@@ -212,7 +212,7 @@ describe('AuthClient.requestEmailChange', () => {
       await auth.requestEmailChange({ email: 'new@example.test' })
     ).toEqual({ ok: true });
     const init = lastCall(fetchMock, '/api/auth/email/change');
-    expect(JSON.parse(String(init.body))).toEqual({
+    expect(JSON.parse(init.body as string)).toEqual({
       email: 'new@example.test',
     });
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer a1');
@@ -270,7 +270,7 @@ describe('AuthClient.confirmEmailChange', () => {
       ok: true,
     });
     const init = lastCall(fetchMock, '/api/auth/email/change/confirm');
-    expect(JSON.parse(String(init.body))).toEqual({ token: 't1' });
+    expect(JSON.parse(init.body as string)).toEqual({ token: 't1' });
     expect(new Headers(init.headers).get('authorization')).toBeNull();
   });
 
