@@ -14,6 +14,15 @@ import {
 } from '@webbpulse/api-client';
 
 import {
+  type AccountPaths,
+  type EmailChangeConfirmOutcome,
+  type EmailChangeRequestOutcome,
+  type SessionListOutcome,
+  type SessionRevokeOutcome,
+  classifyAccountError,
+  parseAccountSessions,
+} from './account.js';
+import {
   classifyLinkError,
   type EmailFlowPaths,
   type EmailRequestOutcome,
@@ -186,6 +195,7 @@ export type { WebAuthnAdapter } from './passkeys.js';
 /** Where the identity routes live, relative to the base URL. */
 export interface AuthPaths
   extends
+    AccountPaths,
     EmailFlowPaths,
     MfaPaths,
     OAuthPaths,
@@ -233,6 +243,9 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   loginMfaPasskeyVerify: '/api/auth/login/mfa/passkey/verify',
   desktopHandoff: '/api/auth/desktop-handoff',
   desktopHandoffExchange: '/api/auth/desktop-handoff/exchange',
+  sessions: '/api/auth/sessions',
+  emailChange: '/api/auth/email/change',
+  emailChangeConfirm: '/api/auth/email/change/confirm',
 };
 
 /** Construction options. */
@@ -446,6 +459,30 @@ const PASSKEY_MFA_REASONS: ReadonlySet<
   'cancelled',
   'unsupported',
 ] as const);
+
+/** Which refusals each account route models. */
+const SESSION_REVOKE_REASONS: ReadonlySet<'not-found' | 'current-session'> =
+  new Set(['not-found', 'current-session'] as const);
+
+const EMAIL_CHANGE_REQUEST_REASONS: ReadonlySet<
+  | 'invalid-email'
+  | 'unchanged'
+  | 'taken'
+  | 'step-up-required'
+  | 'unavailable'
+  | 'rate-limited'
+> = new Set([
+  'invalid-email',
+  'unchanged',
+  'taken',
+  'step-up-required',
+  'unavailable',
+  'rate-limited',
+] as const);
+
+const EMAIL_CHANGE_CONFIRM_REASONS: ReadonlySet<
+  'invalid-link' | 'taken' | 'unavailable' | 'rate-limited'
+> = new Set(['invalid-link', 'taken', 'unavailable', 'rate-limited'] as const);
 
 const PASSKEY_LIST_REASONS: ReadonlySet<'unavailable'> = new Set([
   'unavailable',
@@ -1476,6 +1513,85 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
       };
     } catch (error) {
       const refused = classifyLinkError(error, EMAIL_REQUEST_REASONS);
+      if (refused === null) {
+        throw error;
+      }
+      return refused;
+    }
+  }
+
+  /**
+   * The signed-in user's live sessions, most recently active first, with the
+   * one making the call marked `current`. An unexpected body is an empty list.
+   */
+  async listSessions(): Promise<SessionListOutcome> {
+    const response = await this.client.get<unknown>(this.paths.sessions, {
+      headers: this.authorizationHeader(),
+    });
+    return { ok: true, sessions: parseAccountSessions(response.data) };
+  }
+
+  /**
+   * Signs one of the caller's other sessions out. An id that is not one of
+   * theirs is `not-found`, and the calling session is `current-session`, since
+   * {@link logout} is how that one ends.
+   */
+  async revokeSession(sessionId: string): Promise<SessionRevokeOutcome> {
+    try {
+      await this.client.delete(
+        `${this.paths.sessions}/${encodeURIComponent(sessionId)}`,
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      return { ok: true };
+    } catch (error) {
+      return this.settleRefusal(
+        error,
+        classifyAccountError(error, SESSION_REVOKE_REASONS)
+      );
+    }
+  }
+
+  /**
+   * Asks the backend to mail a confirmation link to a new sign-in address.
+   * Nothing changes until the link is confirmed. A sign-in older than the
+   * server's window answers `step-up-required`: step up, then call again.
+   */
+  async requestEmailChange(input: {
+    email: string;
+  }): Promise<EmailChangeRequestOutcome> {
+    try {
+      await this.client.post(
+        this.paths.emailChange,
+        { email: input.email },
+        { retries: 0, headers: this.authorizationHeader() }
+      );
+      return { ok: true };
+    } catch (error) {
+      return this.settleRefusal(
+        error,
+        classifyAccountError(error, EMAIL_CHANGE_REQUEST_REASONS)
+      );
+    }
+  }
+
+  /**
+   * Spends an email change link from the new mailbox. Anonymous, since the link
+   * may be opened in another browser, and a POST so a mail scanner cannot spend
+   * it. Every other session ends; this one keeps its token until its next
+   * refresh shows whether its own session survived.
+   */
+  async confirmEmailChange(input: {
+    token: string;
+  }): Promise<EmailChangeConfirmOutcome> {
+    try {
+      await this.client.post(
+        this.paths.emailChangeConfirm,
+        { token: input.token },
+        { retries: 0 }
+      );
+      return { ok: true };
+    } catch (error) {
+      const refused = classifyAccountError(error, EMAIL_CHANGE_CONFIRM_REASONS);
       if (refused === null) {
         throw error;
       }
