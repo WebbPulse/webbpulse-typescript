@@ -1816,6 +1816,190 @@ describe('usePolledQuery shared cache', () => {
   });
 });
 
+describe('usePolledQuery invalidation during a read', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setVisibility('visible');
+    clearPolledQueryCache();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A fetcher whose calls each wait until released by their call index. */
+  function indexed<T>(): {
+    fetcher: Mock;
+    release: (call: number, value: T) => void;
+  } {
+    const pending: ((value: T) => void)[] = [];
+    const fetcher = vi.fn(
+      () =>
+        new Promise<T>((resolve) => {
+          pending.push(resolve);
+        })
+    );
+    return {
+      fetcher,
+      release: (call: number, value: T) => {
+        pending[call]?.(value);
+      },
+    };
+  }
+
+  it('reads once more after an invalidation during a read and the follow-up wins', async () => {
+    const { fetcher, release } = gated<string>();
+    const { result } = render(fetcher, {
+      intervalMs: 60_000,
+      queryKey: 'racing',
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      invalidateQueries('racing');
+      await Promise.resolve();
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release('before the write');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      release('after the write');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('after the write');
+    expect(result.current.isFetching).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('queues one follow-up for several invalidations during one read', async () => {
+    const { fetcher, release } = gated<string>();
+    const { result } = render(fetcher, {
+      intervalMs: 60_000,
+      queryKey: 'burst',
+    });
+    await settle();
+
+    await act(async () => {
+      invalidateQueries('burst');
+      invalidateQueries('burst');
+      invalidateQueries('burst');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      release('stale');
+      await Promise.resolve();
+    });
+    await settle();
+    await act(async () => {
+      release('fresh');
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.current.data).toBe('fresh');
+  });
+
+  it('shares one follow-up read across mounts on the key', async () => {
+    const { fetcher, release } = gated<string>();
+    const options = { intervalMs: 60_000, queryKey: 'crowd' };
+    const first = render(fetcher, options);
+    const second = render(fetcher, options);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      invalidateQueries('crowd');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      release('stale');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      release('fresh');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(first.result.current.data).toBe('fresh');
+    expect(second.result.current.data).toBe('fresh');
+  });
+
+  it('does not queue a follow-up for an invalidation while idle', async () => {
+    const fetcher = sequence(['a', 'b', 'c']);
+    const { result } = render(fetcher, {
+      intervalMs: 60_000,
+      queryKey: 'idle',
+    });
+    await settle();
+
+    await act(async () => {
+      invalidateQueries('idle');
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.current.data).toBe('b');
+  });
+
+  it('never lets a read that settles late overwrite a newer one', async () => {
+    const { fetcher, release } = indexed<string>();
+    const options = {
+      intervalMs: 60_000,
+      attemptTimeoutMs: 1000,
+      queryKey: 'late',
+    };
+    const { result } = render(fetcher, options);
+    await settle();
+    const prefetched = prefetchPolledQuery('late', fetcher, {
+      attemptTimeoutMs: 0,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await advance(1000);
+    expect(result.current.error).toBeInstanceOf(PolledQueryTimeoutError);
+
+    await act(async () => {
+      void result.current.refetch();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      release(1, 'new');
+      await Promise.resolve();
+    });
+    await settle();
+    expect(result.current.data).toBe('new');
+
+    await act(async () => {
+      release(0, 'old');
+      await prefetched;
+    });
+    await settle();
+    expect(result.current.data).toBe('new');
+
+    const later = render(fetcher, options);
+    expect(later.result.current.data).toBe('new');
+  });
+});
+
 describe('useMutationWithRefetch', () => {
   beforeEach(() => {
     vi.useFakeTimers();

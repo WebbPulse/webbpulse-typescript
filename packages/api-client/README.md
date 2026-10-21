@@ -412,6 +412,10 @@ const { data, error, isStale, lastUpdatedAt, refetch } = usePolledQuery(
   tick is handed the running promise rather than starting a second request, and
   `refetch()` while one is in flight returns that one, unless it is past its
   deadline, in which case a new attempt replaces it.
+- **An invalidation during a read is not dropped.** `invalidateQueries(key)`
+  landing while a read for the key is in flight queues one follow-up read once
+  it settles, however many invalidations arrive, and the follow-up's answer
+  wins. A read that settles after a later one has landed never overwrites it.
 - **The in-flight request is aborted on unmount**, and the signal the fetcher
   receives should be passed straight to the client as `{ signal }`.
 - **`auth` honours the token readiness the client already exposes.** Given a
