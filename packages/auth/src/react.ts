@@ -356,6 +356,14 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   listPasskeys: AuthClient<TUser>['listPasskeys'];
   renamePasskey: AuthClient<TUser>['renamePasskey'];
   deletePasskey: AuthClient<TUser>['deletePasskey'];
+  /** The signed-in user's live sessions, with the calling one marked. */
+  listSessions: AuthClient<TUser>['listSessions'];
+  /** Signs one of the user's other sessions out. */
+  revokeSession: AuthClient<TUser>['revokeSession'];
+  /** Mails a confirmation link to a new sign-in address. */
+  requestEmailChange: AuthClient<TUser>['requestEmailChange'];
+  /** Spends an email change link from the new mailbox. */
+  confirmEmailChange: AuthClient<TUser>['confirmEmailChange'];
   /**
    * Re-authenticates for a fresher access token with a TOTP or recovery code,
    * for a component gating a sensitive action on freshness rather than on a
@@ -401,6 +409,10 @@ const AUTH_METHOD_NAMES = [
   'listPasskeys',
   'renamePasskey',
   'deletePasskey',
+  'listSessions',
+  'revokeSession',
+  'requestEmailChange',
+  'confirmEmailChange',
   'stepUp',
   'stepUpWithPasskey',
   'authTime',

@@ -116,11 +116,22 @@ describe('AUTH_ERROR_CODES', () => {
   });
 
   it('adds the codes the desktop handoff routes emit', () => {
-    expect([...AUTH_ERROR_CODES].slice(51)).toEqual([
+    expect([...AUTH_ERROR_CODES].slice(51, 55)).toEqual([
       'HANDOFF_SCHEME_NOT_ALLOWED',
       'HANDOFF_INVALID_REQUEST',
       'HANDOFF_INVALID',
       'HANDOFF_DISABLED',
+    ]);
+  });
+
+  it('adds the codes the session and email change routes emit', () => {
+    expect([...AUTH_ERROR_CODES].slice(55)).toEqual([
+      'SESSION_NOT_FOUND',
+      'CURRENT_SESSION',
+      'INVALID_EMAIL',
+      'EMAIL_UNCHANGED',
+      'EMAIL_TAKEN',
+      'EMAIL_CHANGE_UNSUPPORTED',
     ]);
   });
 });

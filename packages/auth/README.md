@@ -292,6 +292,34 @@ Refusal reasons: `invalid-link`, `password-rejected`, `rate-limited`,
 `paths`: `verifyEmail`, `verifyEmailConfirm`, `passwordReset`,
 `passwordResetConfirm`.
 
+## Sessions and the sign-in address
+
+```ts
+const { sessions } = await auth.listSessions();
+await auth.revokeSession(sessions[0].id);
+await auth.requestEmailChange({ email: 'new@example.com' });
+
+import { readLinkToken, VERIFY_EMAIL_CHANGE_PATH } from '@webbpulse/auth';
+const token = readLinkToken({ expectedPath: VERIFY_EMAIL_CHANGE_PATH });
+await auth.confirmEmailChange({ token }); // anonymous
+```
+
+- **Revoking is scoped to the caller.** Another user's session id answers
+  `not-found` exactly as an unknown one does, and the calling session answers
+  `current-session`, since `logout()` ends that one.
+- **The change lands only on confirm.** The link goes to the new address and is
+  single use. Confirming checks again that no other account holds the address,
+  marks it verified, ends every other session and tells the old address.
+- **`step-up-required` carries `maxAge`.** The request needs a recent sign-in.
+  Step up, then call again.
+- **`VERIFY_EMAIL_CHANGE_PATH` must equal `EMAIL_CHANGE_LINK_PATH`** in
+  `webbpulse.identity.verification`.
+
+Refusal reasons: `not-found`, `current-session`, `invalid-email`, `unchanged`,
+`taken`, `step-up-required`, `unavailable`, `invalid-link`, `rate-limited`.
+
+`paths`: `sessions`, `emailChange`, `emailChangeConfirm`.
+
 ## OAuth
 
 Google and GitHub. Two of the five routes are browser navigations, so the
@@ -789,6 +817,8 @@ email flows, and reports refusals as outcomes rather than throwing.
   `isAuthErrorCode`, `describeAuthError`.
 - Link flows: `VERIFY_EMAIL_PATH`, `RESET_PASSWORD_PATH`, `LINK_TOKEN_PARAM`,
   `readLinkToken`, `retryAfterSeconds`, `classifyLinkError`.
+- Account: `VERIFY_EMAIL_CHANGE_PATH`, `parseAccountSessions`,
+  `classifyAccountError`.
 - MFA: `TOTP_FACTOR`, `PASSKEY_FACTOR`, `classifyMfaError`, `classifyPasswordStepUpError`.
 - Desktop handoff: `createDesktopHandoffPkce`, `desktopHandoffChallenge`,
   `desktopHandoffLaunchUrl`, `readDesktopHandoffRequest`,
