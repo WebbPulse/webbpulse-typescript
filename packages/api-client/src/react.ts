@@ -327,6 +327,7 @@ interface SharedRequest {
   readonly promise: Promise<RequestOutcome>;
   readonly controller: AbortController;
   readonly deadlineAt: number | undefined;
+  readonly sequence: number;
   waiters: number;
   settled: boolean;
 }
@@ -347,6 +348,8 @@ interface CacheEntry {
   invalidated: boolean;
   version: number;
   generation: number;
+  requests: number;
+  landed: number;
   request: SharedRequest | undefined;
   readonly listeners: Set<EntryListener>;
   holders: number;
@@ -368,6 +371,8 @@ function createEntry(key: string | undefined): CacheEntry {
     invalidated: false,
     version: 0,
     generation: 0,
+    requests: 0,
+    landed: 0,
     request: undefined,
     listeners: new Set(),
     holders: 0,
@@ -496,6 +501,8 @@ function joinRequest(
     etag === undefined ? {} : { [IF_NONE_MATCH_HEADER]: etag };
   const generation = entry.generation;
   const version = entry.version;
+  entry.requests += 1;
+  const sequence = entry.requests;
   const aborted = new Promise<never>((_resolve, reject) => {
     controller.signal.addEventListener(
       'abort',
@@ -511,6 +518,7 @@ function joinRequest(
   const request: SharedRequest = {
     controller,
     deadlineAt: timeoutMs > 0 ? now + timeoutMs : undefined,
+    sequence,
     waiters: 1,
     settled: false,
     promise: Promise.race([read, aborted]).then(
@@ -525,7 +533,9 @@ function joinRequest(
 
 /**
  * Writes a read's value into the entry, unless the cache was cleared while it
- * ran, and tells the entry's listeners.
+ * ran, and tells the entry's listeners. A read that settles after a later read
+ * on the entry has landed writes nothing and answers as a 304 for the held
+ * data, so a stale answer never overwrites a newer one.
  */
 function settleRequest(
   entry: CacheEntry,
@@ -541,6 +551,14 @@ function settleRequest(
   }
   const current = entry.generation === generation;
   const fetchedAt = Date.now();
+  if (current && request.sequence < entry.landed) {
+    return {
+      ok: true,
+      notModified: true,
+      data: entry.hasData ? entry.data : undefined,
+      fetchedAt: entry.fetchedAt ?? fetchedAt,
+    };
+  }
   let outcome: RequestOutcome;
   if (value instanceof PolledResponse) {
     if (value.notModified && sentEtag === undefined) {
@@ -576,6 +594,7 @@ function settleRequest(
   }
   if (current) {
     if (outcome.ok) {
+      entry.landed = request.sequence;
       entry.fetchedAt = fetchedAt;
       if (entry.version === version) {
         entry.invalidated = false;
@@ -598,7 +617,11 @@ function failRequest(
     entry.request = undefined;
   }
   const outcome: RequestOutcome = { ok: false, error: thrown };
-  if (!request.controller.signal.aborted && entry.generation === generation) {
+  if (
+    !request.controller.signal.aborted &&
+    entry.generation === generation &&
+    request.sequence > entry.landed
+  ) {
     notify(entry, outcome, request);
   }
   return outcome;
@@ -727,6 +750,12 @@ function documentVisible(): boolean {
  * warms it, {@link clearPolledQueryCache} empties it, and an entry no mounted
  * query has held for `cacheTimeMs` is evicted. A query with no key keeps a
  * private entry and behaves exactly as before.
+ *
+ * An invalidation that lands while a read for the key is in flight is not lost
+ * to the de-duplication: that read was sent before the write, so once it
+ * settles the query reads once more and that answer wins. Any number of
+ * invalidations during one read queue one follow-up, and a read that settles
+ * after a later one has landed never overwrites it.
  *
  * The timer is a chained `setTimeout` rather than `setInterval`, measured from
  * the end of one fetch to the start of the next, so a fetch slower than the
@@ -858,6 +887,8 @@ export function usePolledQuery<T>(
   const waited = useRef(false);
   const idlePolls = useRef(0);
   const scheduledDelay = useRef(0);
+  const dirty = useRef(false);
+  const runRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   /** Sets `data`, keeping the ref the 304 path compares against in step. */
   const writeData = useCallback((value: T | null): void => {
@@ -1049,6 +1080,11 @@ export function usePolledQuery<T>(
         }
       }
       if (owned && settings.current.enabled) {
+        if (dirty.current) {
+          dirty.current = false;
+          await runRef.current();
+          return;
+        }
         schedule.current();
       }
     })();
@@ -1056,6 +1092,7 @@ export function usePolledQuery<T>(
     inFlight.current = attempt;
     return attempt;
   }, [applySuccess, entryFor, release]);
+  runRef.current = run;
 
   /**
    * The wait before the next poll: the error backoff, stretched while the page
@@ -1183,6 +1220,7 @@ export function usePolledQuery<T>(
     }
     activeKey.current = serializedKey;
     generation.current += 1;
+    dirty.current = false;
     clearTimer();
     release();
     failures.current = 0;
@@ -1212,6 +1250,7 @@ export function usePolledQuery<T>(
     if (!enabled) {
       clearTimer();
       release();
+      dirty.current = false;
       failures.current = 0;
       setIsFetching(false);
       return;
@@ -1243,6 +1282,12 @@ export function usePolledQuery<T>(
       return;
     }
     return subscribeToRefetch(serializedKey, () => {
+      const reading =
+        entryRef.current?.request !== undefined ||
+        (inFlight.current !== undefined && joined.current !== undefined);
+      if (reading) {
+        dirty.current = true;
+      }
       void refetch();
     });
   }, [enabled, serializedKey, refetch]);
