@@ -1,7 +1,7 @@
 /**
  * Headless state machines for the identity settings panels: passkeys, connected
- * accounts and TOTP. Every hook returns state and handlers only, so a product
- * keeps its own markup, copy and layout.
+ * accounts, TOTP and active sessions. Every hook returns state and handlers
+ * only, so a product keeps its own markup, copy and layout.
  *
  * Refusals carry the server's own sentence in `error`, which a product renders
  * verbatim. Success copy is the product's, passed as the `messages` option.
@@ -42,3 +42,10 @@ export {
   type TotpPrompt,
   type TotpStep,
 } from './totp-panel.js';
+
+export {
+  useSessionsPanel,
+  type SessionsPanel,
+  type SessionsPanelMessages,
+  type SessionsPanelOptions,
+} from './sessions-panel.js';

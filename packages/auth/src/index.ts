@@ -17,6 +17,7 @@ export {
   type EmailUnchanged,
   type SessionListOutcome,
   type SessionNotFound,
+  type SessionRevokeOthersOutcome,
   type SessionRevokeOutcome,
 } from './account.js';
 export {

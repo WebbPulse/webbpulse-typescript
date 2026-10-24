@@ -1,7 +1,7 @@
 /**
  * Self-service account calls: the signed-in user's session list and the
- * sign-in address change. The client side of webbpulse's `/sessions` and
- * `/email/change` routes. Every method resolves to an outcome for the refusals
+ * sign-in address change. The client side of webbpulse's `/sessions`,
+ * `/sessions/revoke-others` and `/email/change` routes. Every method resolves to an outcome for the refusals
  * a settings form renders inline, and rethrows anything else.
  */
 
@@ -20,6 +20,8 @@ export const VERIFY_EMAIL_CHANGE_PATH = '/verify-email-change';
 export interface AccountPaths {
   /** Defaults to `/api/auth/sessions`. */
   sessions?: string;
+  /** Defaults to `/api/auth/sessions/revoke-others`. */
+  sessionsRevokeOthers?: string;
   /** Defaults to `/api/auth/email/change`. */
   emailChange?: string;
   /** Defaults to `/api/auth/email/change/confirm`. */
@@ -136,6 +138,12 @@ export type SessionListOutcome = { ok: true; sessions: AccountSession[] };
 /** What {@link AuthClient.revokeSession} resolves to. */
 export type SessionRevokeOutcome =
   { ok: true } | SessionNotFound | CurrentSession;
+
+/**
+ * What {@link AuthClient.revokeOtherSessions} resolves to: how many sessions
+ * ended, 0 when the caller had no other.
+ */
+export type SessionRevokeOthersOutcome = { ok: true; revoked: number };
 
 /** What {@link AuthClient.requestEmailChange} resolves to. */
 export type EmailChangeRequestOutcome =

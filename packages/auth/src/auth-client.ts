@@ -18,6 +18,7 @@ import {
   type EmailChangeConfirmOutcome,
   type EmailChangeRequestOutcome,
   type SessionListOutcome,
+  type SessionRevokeOthersOutcome,
   type SessionRevokeOutcome,
   classifyAccountError,
   parseAccountSessions,
@@ -244,6 +245,7 @@ const DEFAULT_PATHS: Required<AuthPaths> = {
   desktopHandoff: '/api/auth/desktop-handoff',
   desktopHandoffExchange: '/api/auth/desktop-handoff/exchange',
   sessions: '/api/auth/sessions',
+  sessionsRevokeOthers: '/api/auth/sessions/revoke-others',
   emailChange: '/api/auth/email/change',
   emailChangeConfirm: '/api/auth/email/change/confirm',
 };
@@ -1549,6 +1551,24 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
         classifyAccountError(error, SESSION_REVOKE_REASONS)
       );
     }
+  }
+
+  /**
+   * Signs every one of the caller's sessions out except the one making the
+   * call, which keeps its token and cookie. Resolves to how many ended.
+   */
+  async revokeOtherSessions(): Promise<SessionRevokeOthersOutcome> {
+    const response = await this.client.post<unknown>(
+      this.paths.sessionsRevokeOthers,
+      undefined,
+      { retries: 0, headers: this.authorizationHeader() }
+    );
+    const revoked = (response.data as { revoked?: unknown } | null)?.revoked;
+    return {
+      ok: true,
+      revoked:
+        typeof revoked === 'number' && Number.isFinite(revoked) ? revoked : 0,
+    };
   }
 
   /**

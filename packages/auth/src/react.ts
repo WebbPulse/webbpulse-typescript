@@ -360,6 +360,8 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
   listSessions: AuthClient<TUser>['listSessions'];
   /** Signs one of the user's other sessions out. */
   revokeSession: AuthClient<TUser>['revokeSession'];
+  /** Signs every one of the user's sessions out except this one. */
+  revokeOtherSessions: AuthClient<TUser>['revokeOtherSessions'];
   /** Mails a confirmation link to a new sign-in address. */
   requestEmailChange: AuthClient<TUser>['requestEmailChange'];
   /** Spends an email change link from the new mailbox. */
@@ -411,6 +413,7 @@ const AUTH_METHOD_NAMES = [
   'deletePasskey',
   'listSessions',
   'revokeSession',
+  'revokeOtherSessions',
   'requestEmailChange',
   'confirmEmailChange',
   'stepUp',
