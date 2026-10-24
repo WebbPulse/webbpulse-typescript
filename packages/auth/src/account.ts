@@ -34,6 +34,17 @@ export interface AccountSession {
   device: string;
   /** The address the sign-in was first seen from, or an empty string. */
   ip: string;
+  /** The address the session last refreshed from, falling back to `ip`. */
+  lastIp: string;
+  /**
+   * The non-browser product the session runs in, such as `claude-code` or
+   * `Standupless`, read from its user agent, or an empty string for a browser.
+   */
+  client: string;
+  /** A coarse operating system such as `macOS` or `iOS`, or an empty string. */
+  platform: string;
+  /** The OAuth client id of an MCP or other OAuth session, or an empty string. */
+  clientId: string;
   /** When the sign-in happened, as an ISO 8601 string. */
   startedAt: string;
   /** When the session last refreshed, as an ISO 8601 string. */
@@ -168,6 +179,10 @@ export function parseAccountSessions(body: unknown): AccountSession[] {
       id,
       device: text(item['device']),
       ip: text(item['ip']),
+      lastIp: text(item['last_ip']) || text(item['ip']),
+      client: text(item['client']),
+      platform: text(item['platform']),
+      clientId: text(item['client_id']),
       startedAt: text(item['started_at']),
       lastActiveAt: text(item['last_active_at']),
       expiresAt:
