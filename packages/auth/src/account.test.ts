@@ -233,6 +233,51 @@ describe('AuthClient.revokeSession', () => {
   });
 });
 
+describe('AuthClient.revokeOtherSessions', () => {
+  it('posts to the revoke others path with the bearer token', async () => {
+    const { auth, fetchMock } = await signedIn({
+      '/api/auth/sessions/revoke-others': () => jsonResponse({ revoked: 3 }),
+    });
+
+    expect(await auth.revokeOtherSessions()).toEqual({ ok: true, revoked: 3 });
+    const init = lastCall(fetchMock, '/api/auth/sessions/revoke-others');
+    expect(init.method).toBe('POST');
+    expect(new Headers(init.headers).get('authorization')).toBe('Bearer a1');
+  });
+
+  it('reads an unexpected body as none revoked', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/sessions/revoke-others': () => jsonResponse({}),
+    });
+    expect(await auth.revokeOtherSessions()).toEqual({ ok: true, revoked: 0 });
+  });
+
+  it('honours a configured path', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE }),
+      '/identity/sessions/others': () => jsonResponse({ revoked: 1 }),
+    });
+    const auth = createAuthClient<User>({
+      baseUrl: 'https://api.example.test',
+      disableProactiveRefresh: true,
+      paths: { sessionsRevokeOthers: '/identity/sessions/others' },
+      clientOptions: { fetch: fetchMock, retries: 0 },
+    });
+    await auth.login({ email: ALICE.email, password: 'pw' });
+
+    expect(await auth.revokeOtherSessions()).toEqual({ ok: true, revoked: 1 });
+  });
+
+  it('throws when the session ended', async () => {
+    const { auth } = await signedIn({
+      '/api/auth/sessions/revoke-others': () =>
+        envelope(401, 'NOT_AUTHENTICATED'),
+    });
+    await expect(auth.revokeOtherSessions()).rejects.toThrow();
+  });
+});
+
 describe('AuthClient.requestEmailChange', () => {
   it('posts the new address with the bearer token', async () => {
     const { auth, fetchMock } = await signedIn({

@@ -44,6 +44,15 @@ export interface ListPanel<T, TDraft> extends PanelState<T> {
   rename: (id: string, name: string) => Promise<void>;
   /** Removes one row, then reloads. */
   remove: (id: string) => Promise<void>;
+  /**
+   * Runs a mutation the panel does not model through the same loop: busy,
+   * banners, the outcome, then a reload on success. `success` is the notice
+   * when the outcome carries no sentence of its own.
+   */
+  mutate: (
+    call: () => Promise<PanelOutcome>,
+    success?: string
+  ) => Promise<void>;
   /** Clears `error` and `notice`. For a dismissable banner. */
   dismiss: () => void;
   /**
@@ -120,7 +129,7 @@ export interface PanelMessages {
 }
 
 /**
- * Runs the load-mutate-reload loop over one collection. The three identity
+ * Runs the load-mutate-reload loop over one collection. The four identity
  * panels are built from it, and it is exported so a product can apply the same
  * shape to a collection this package does not model.
  *
@@ -271,6 +280,11 @@ export function useListPanel<T, TDraft>(
     [run]
   );
 
+  const mutate = useCallback(
+    (call: () => Promise<PanelOutcome>, success?: string) => run(call, success),
+    [run]
+  );
+
   const dismiss = useCallback((): void => {
     setError(null);
     setNotice(null);
@@ -322,6 +336,7 @@ export function useListPanel<T, TDraft>(
       create,
       rename,
       remove,
+      mutate,
       dismiss,
       beginCall,
       endCall,
@@ -339,6 +354,7 @@ export function useListPanel<T, TDraft>(
       create,
       rename,
       remove,
+      mutate,
       dismiss,
       beginCall,
       endCall,

@@ -297,6 +297,7 @@ Refusal reasons: `invalid-link`, `password-rejected`, `rate-limited`,
 ```ts
 const { sessions } = await auth.listSessions();
 await auth.revokeSession(sessions[0].id);
+await auth.revokeOtherSessions(); // { ok: true, revoked: 2 }
 await auth.requestEmailChange({ email: 'new@example.com' });
 
 import { readLinkToken, VERIFY_EMAIL_CHANGE_PATH } from '@webbpulse/auth';
@@ -312,6 +313,9 @@ await auth.confirmEmailChange({ token }); // anonymous
 - **Revoking is scoped to the caller.** Another user's session id answers
   `not-found` exactly as an unknown one does, and the calling session answers
   `current-session`, since `logout()` ends that one.
+- **`revokeOtherSessions` ends every session but this one** in one call to
+  `POST /sessions/revoke-others` (webbpulse after 0.100.0), resolving to how
+  many ended. The calling session keeps its token and cookie.
 - **The change lands only on confirm.** The link goes to the new address and is
   single use. Confirming checks again that no other account holds the address,
   marks it verified, ends every other session and tells the old address.
@@ -323,7 +327,7 @@ await auth.confirmEmailChange({ token }); // anonymous
 Refusal reasons: `not-found`, `current-session`, `invalid-email`, `unchanged`,
 `taken`, `step-up-required`, `unavailable`, `invalid-link`, `rate-limited`.
 
-`paths`: `sessions`, `emailChange`, `emailChangeConfirm`.
+`paths`: `sessions`, `sessionsRevokeOthers`, `emailChange`, `emailChangeConfirm`.
 
 ## OAuth
 
@@ -677,8 +681,17 @@ successful `link`, which navigates to the provider. `useTotpPanel` has no load
 leg, because no route reports whether a factor is on: pass `factor` when the
 user record says.
 
-`useListPanel` is the core the three are built from, exported so a product can
-apply the same shape to a collection this package does not model.
+`useSessionsPanel` lists the live sessions with the calling one split out as
+`current` and the rest as `others`. `revoke` ends one, counting a session that
+is already gone as ended, and `revokeOthers` ends every other one in a single
+call. Pass `messages.revokedOthers` as a function to word the count, and
+`messages.failed` for a call that never got an answer. Any confirmation step is
+the product's.
+
+`useListPanel` is the core the four are built from, exported so a product can
+apply the same shape to a collection this package does not model. Its `mutate`
+runs a call the panel does not model through the same busy, banner and reload
+loop.
 
 ## Sign-in helpers
 
@@ -868,8 +881,9 @@ deprecated `SessionProvider`, `useSession`, `useSessionState`,
 
 `@webbpulse/auth/panels`
 
-`usePasskeyPanel`, `useConnectedAccountsPanel`, `useTotpPanel`, `useListPanel`,
-`PANEL_OK` and `PANEL_CANCELLED`, with `ListPanel`, `PanelState`,
-`PanelOutcome`, `PanelMessages`, `ListPanelConfig`, `PasskeyPanel`,
-`ConnectedAccountsPanel`, `ProviderOption`, `TotpPanel`, `TotpStep`,
-`TotpPrompt`, `FactorState` and the options and messages types for each.
+`usePasskeyPanel`, `useConnectedAccountsPanel`, `useTotpPanel`,
+`useSessionsPanel`, `useListPanel`, `PANEL_OK` and `PANEL_CANCELLED`, with
+`ListPanel`, `PanelState`, `PanelOutcome`, `PanelMessages`, `ListPanelConfig`,
+`PasskeyPanel`, `ConnectedAccountsPanel`, `ProviderOption`, `TotpPanel`,
+`TotpStep`, `TotpPrompt`, `FactorState`, `SessionsPanel` and the options and
+messages types for each.
