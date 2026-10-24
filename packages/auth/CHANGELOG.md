@@ -1,5 +1,12 @@
 # @webbpulse/auth
 
+## 0.26.0
+
+### Minor Changes
+
+- 0619719: `AccountSession` gains an optional `browser`, the coarse browser family webbpulse's `GET /sessions` now reports, such as `Chrome`, `Safari` or `Edge`, never a version (PLAT-83). `parseAccountSessions` reads it, and it is an empty string for a non-browser client or a server that predates the field.
+- 2908e6f: `AuthClient.revokeOtherSessions()` calls webbpulse's new `POST /sessions/revoke-others` and resolves to `{ ok: true, revoked }`, with the path configurable as `paths.sessionsRevokeOthers` (PLAT-82). `useAuth` exposes it too. `@webbpulse/auth/panels` gains `useSessionsPanel`, a headless sessions panel that lists `AccountSession`s with the calling one split out as `current`, ends one with `revoke` and every other one with `revokeOthers`, and `ListPanel` gains `mutate` for a call the panel does not model.
+
 ## 0.25.0
 
 ### Minor Changes
