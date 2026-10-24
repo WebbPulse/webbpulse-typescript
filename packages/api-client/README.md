@@ -478,6 +478,29 @@ keys as an array holding at least one array key, `[['jobs', 1], 'counts']`.
 walks away from a write. A write still in flight at the reset settles for its
 caller as usual, but no longer writes to the hook's state.
 
+## Testing
+
+Since 0.19.0 the keyed `usePolledQuery` cache lives at module scope, so it
+outlives a test. Without a reset, a later test that mounts a query on the same
+key paints the earlier test's data and skips the read its fetcher stub expects.
+Call `clearPolledQueryCache()` from `@webbpulse/api-client/react` in
+`afterEach`, after Testing Library's `cleanup()`. Once `cleanup()` has
+unmounted every query no entry is held, so the reset drops every entry and its
+eviction timer:
+
+```ts
+import { cleanup } from '@testing-library/react';
+import { afterEach } from 'vitest';
+import { clearPolledQueryCache } from '@webbpulse/api-client/react';
+
+afterEach(() => {
+  cleanup();
+  clearPolledQueryCache();
+});
+```
+
+Register the file under `test.setupFiles` in the vitest config.
+
 ## Exports
 
 `ApiClient`, `createApiClient`, `REQUEST_ID_HEADER`, the auth contract type

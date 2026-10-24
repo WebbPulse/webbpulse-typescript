@@ -651,7 +651,9 @@ function leaveRequest(
  * are dropped and reads in flight no longer write into it. Call it on sign-out
  * and on any switch that changes what an unscoped key means, such as a
  * workspace switch. Mounted queries keep what they show and read afresh on
- * their next poll; invalidate their keys to read now.
+ * their next poll; invalidate their keys to read now. In tests, call it in
+ * `afterEach` after Testing Library's `cleanup()` so cached reads do not leak
+ * from one test into the next.
  */
 export function clearPolledQueryCache(): void {
   for (const [key, entry] of cache) {
