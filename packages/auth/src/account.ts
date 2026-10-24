@@ -45,6 +45,12 @@ export interface AccountSession {
   client: string;
   /** A coarse operating system such as `macOS` or `iOS`, or an empty string. */
   platform: string;
+  /**
+   * A coarse browser family such as `Chrome`, `Safari` or `Edge`, never a
+   * version, or an empty string for a non-browser client or an unknown one.
+   * Absent from a server that predates the field.
+   */
+  browser?: string;
   /** The OAuth client id of an MCP or other OAuth session, or an empty string. */
   clientId: string;
   /** When the sign-in happened, as an ISO 8601 string. */
@@ -190,6 +196,7 @@ export function parseAccountSessions(body: unknown): AccountSession[] {
       lastIp: text(item['last_ip']) || text(item['ip']),
       client: text(item['client']),
       platform: text(item['platform']),
+      browser: text(item['browser']),
       clientId: text(item['client_id']),
       startedAt: text(item['started_at']),
       lastActiveAt: text(item['last_active_at']),
