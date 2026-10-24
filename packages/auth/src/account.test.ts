@@ -113,6 +113,7 @@ describe('parseAccountSessions', () => {
         lastIp: '203.0.113.1',
         client: '',
         platform: '',
+        browser: '',
         clientId: '',
         startedAt: '2026-10-01T00:00:00+00:00',
         lastActiveAt: '2026-10-02T00:00:00+00:00',
@@ -123,7 +124,7 @@ describe('parseAccountSessions', () => {
     ]);
   });
 
-  it('reads the last-seen address, client, platform and OAuth client', () => {
+  it('reads the last-seen address, client, platform and browser', () => {
     expect(
       parseAccountSessions({
         sessions: [
@@ -133,6 +134,7 @@ describe('parseAccountSessions', () => {
             last_ip: '198.51.100.7',
             client: 'claude-code',
             platform: 'macOS',
+            browser: 'Chrome',
             client_id: 'client-1',
           },
         ],
@@ -142,6 +144,7 @@ describe('parseAccountSessions', () => {
       lastIp: '198.51.100.7',
       client: 'claude-code',
       platform: 'macOS',
+      browser: 'Chrome',
       clientId: 'client-1',
     });
   });
@@ -159,6 +162,7 @@ describe('parseAccountSessions', () => {
         lastIp: '',
         client: '',
         platform: '',
+        browser: '',
         clientId: '',
         startedAt: '',
         lastActiveAt: '',
