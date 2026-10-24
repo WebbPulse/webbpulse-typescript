@@ -304,6 +304,11 @@ const token = readLinkToken({ expectedPath: VERIFY_EMAIL_CHANGE_PATH });
 await auth.confirmEmailChange({ token }); // anonymous
 ```
 
+- **Each session says where and how it was last used.** `lastIp` is the address
+  of its latest refresh (the sign-in `ip` for older sessions), `client` names a
+  non-browser product such as `claude-code` or `Standupless`, `platform` is a
+  coarse operating system, and `clientId` is the OAuth client of an MCP session.
+  Each is an empty string when unknown.
 - **Revoking is scoped to the caller.** Another user's session id answers
   `not-found` exactly as an unknown one does, and the calling session answers
   `current-session`, since `logout()` ends that one.

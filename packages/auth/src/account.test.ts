@@ -110,6 +110,10 @@ describe('parseAccountSessions', () => {
         id: 'fam_1',
         device: 'desktop',
         ip: '203.0.113.1',
+        lastIp: '203.0.113.1',
+        client: '',
+        platform: '',
+        clientId: '',
         startedAt: '2026-10-01T00:00:00+00:00',
         lastActiveAt: '2026-10-02T00:00:00+00:00',
         expiresAt: 1790000000,
@@ -117,6 +121,29 @@ describe('parseAccountSessions', () => {
         current: true,
       },
     ]);
+  });
+
+  it('reads the last-seen address, client, platform and OAuth client', () => {
+    expect(
+      parseAccountSessions({
+        sessions: [
+          {
+            ...SESSION,
+            device: 'mcp:client-1:tenant-1',
+            last_ip: '198.51.100.7',
+            client: 'claude-code',
+            platform: 'macOS',
+            client_id: 'client-1',
+          },
+        ],
+      })[0]
+    ).toMatchObject({
+      ip: '203.0.113.1',
+      lastIp: '198.51.100.7',
+      client: 'claude-code',
+      platform: 'macOS',
+      clientId: 'client-1',
+    });
   });
 
   it('drops entries with no id and survives an unexpected body', () => {
@@ -129,6 +156,10 @@ describe('parseAccountSessions', () => {
         id: 'f',
         device: '',
         ip: '',
+        lastIp: '',
+        client: '',
+        platform: '',
+        clientId: '',
         startedAt: '',
         lastActiveAt: '',
         expiresAt: null,
