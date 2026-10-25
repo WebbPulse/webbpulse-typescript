@@ -478,6 +478,68 @@ keys as an array holding at least one array key, `[['jobs', 1], 'counts']`.
 walks away from a write. A write still in flight at the reset settles for its
 caller as usual, but no longer writes to the hook's state.
 
+## Persisting the cache, from `@webbpulse/api-client/react`
+
+`persistPolledQueryCache` keeps the shared `usePolledQuery` cache in IndexedDB,
+so a reload paints the last read at once and an offline session still has
+something to show. It is opt in: nothing is stored until it is called.
+
+```tsx
+import { persistPolledQueryCache } from '@webbpulse/api-client/react';
+
+const persistence = persistPolledQueryCache({
+  namespace: `${user.id}:${workspace.id}`,
+  prefixes: ['issues', ['projects', workspace.id]],
+});
+await persistence.ready;
+root.render(<App />);
+```
+
+- **`ready` hydrates the cache.** Stored records go into the cache marked for
+  a read, so a query paints them with `isLoading` false and `isStale` true and
+  revalidates through the usual conditional GET with the stored ETag. A query
+  mounted before `ready` resolves is handed the stored data when it lands. A
+  key that already holds data read this session is left alone.
+- **Only listed prefixes are written.** A key is written when its segments
+  start with one of `prefixes`, compared the way `serializeQueryKey` compares
+  keys, so `'issues'` covers `['issues', 'open']` but not `'issues-archive'`.
+  Keep anything sensitive out of the list.
+- **Writes are debounced.** Each settled read is written `writeDelayMs` later
+  (1 second by default), in one batch, and pending writes flush on `pagehide`
+  and when the page is hidden. `flush()` writes them now.
+- **Caps.** Records written under another `version` (default 1), older than
+  `maxAgeMs` (7 days) or beyond `maxEntries` (200, newest kept) are dropped on
+  load. A read over `maxEntryBytes` (1,000,000 characters of JSON) is not
+  written, and its older copy is deleted. Bump `version` when the shape of the
+  stored data changes.
+- **Never throws.** During server rendering, without IndexedDB, in private
+  mode, over quota or on a blocked database, the persister turns itself off
+  (`active` false) and the cache carries on in memory.
+
+### Gotchas
+
+- **Clear the namespace on sign out.** Call `persistence.clear()`, or
+  `clearPersistedPolledQueries(namespace)` from code that does not hold the
+  persister. Both stop writes before they delete, so a read settling during
+  sign out is not written back. They never reject.
+- **One persister at a time.** A second call stops the first, which is how a
+  workspace switch moves to a new namespace. Call `clearPolledQueryCache()`
+  as well when the switch should not paint the old workspace's data.
+- **Stored data must survive a structured clone.** Class instances come back as
+  plain objects and a function fails the write, which turns persistence off.
+- **Tests.** Pass `store: createMemoryQueryCacheStore()` or an IndexedDB store
+  from `createIndexedDbQueryStore({ indexedDB })` built on `fake-indexeddb`,
+  and call `persistence.stop()` in `afterEach` before `clearPolledQueryCache()`.
+
+## Online status
+
+`useOnline()` from the React entry reads `false` once a request fails at the
+network layer, and `true` again on the next response of any status or a
+browser `online` event. `navigator.onLine` being false also reads offline. The
+client reports both sides itself; a fetcher that calls `fetch` directly can call
+`reportNetworkFailure()` and `reportNetworkSuccess()` from the root entry, and
+`isOnline()` with `subscribeToOnline(listener)` serve code outside React.
+
 ## Testing
 
 Since 0.19.0 the keyed `usePolledQuery` cache lives at module scope, so it
@@ -515,16 +577,23 @@ Register the file under `test.setupFiles` in the vitest config.
 `createEnvelopeClient` with the types `ApiEnvelope`, `EnvelopeClient` and
 `EnvelopeOptions`, and the refetch bus `invalidateQueries`,
 `subscribeToRefetch` and `serializeQueryKey` with the types `QueryKey`,
-`QueryKeyPart` and `Unsubscribe`.
+`QueryKeyPart` and `Unsubscribe`, the online signal `isOnline`,
+`subscribeToOnline`, `reportNetworkFailure` and `reportNetworkSuccess`, and the
+persistence stores `createIndexedDbQueryStore`, `createMemoryQueryCacheStore`
+and `QUERY_CACHE_DATABASE_NAME` with the types `PersistedQuery`,
+`QueryCacheStore` and `IndexedDbQueryStoreOptions`.
 
 `@webbpulse/api-client/react` adds `usePolledQuery` and
 `useMutationWithRefetch`, the constants `DEFAULT_POLL_INTERVAL_MS`,
 `DEFAULT_MAX_BACKOFF_MS`, `DEFAULT_ATTEMPT_TIMEOUT_MS`, `DEFAULT_IDLE_AFTER_MS`,
 `DEFAULT_MAX_IDLE_INTERVAL_MS`, `DEFAULT_IDLE_BACKOFF_MULTIPLIER`,
 `DEFAULT_CACHE_TIME_MS` and `IF_NONE_MATCH_HEADER`, the cache controls
-`clearPolledQueryCache` and `prefetchPolledQuery`, the errors `PolledQueryTimeoutError` and
+`clearPolledQueryCache` and `prefetchPolledQuery`, the persister
+`persistPolledQueryCache` and `clearPersistedPolledQueries` with the
+`DEFAULT_PERSIST_*` constants, `useOnline`, the errors `PolledQueryTimeoutError` and
 `PolledQueryNotModifiedError`, `polledResponse` with the class
 `PolledResponse`, the activity tracker `subscribeToActivity` and `idleForMs`,
 and the types `PolledQueryOptions`, `PrefetchPolledQueryOptions`,
 `PolledQueryResult`, `PolledQueryFetcher`,
-`PolledQueryContext`, `ConditionalResponse` and `MutationWithRefetch`.
+`PolledQueryContext`, `ConditionalResponse`, `MutationWithRefetch`,
+`PersistPolledQueryCacheOptions` and `PolledQueryPersistence`.

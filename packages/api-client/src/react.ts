@@ -4,10 +4,23 @@
  * its bundle.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 
 import { idleForMs, subscribeToActivity } from './activity.js';
 import type { AuthTokenProvider } from './client.js';
+import { isOnline, subscribeToOnline } from './online.js';
+import {
+  createIndexedDbQueryStore,
+  type PersistedQuery,
+  type QueryCacheStore,
+} from './persist.js';
 import {
   invalidateQueries,
   observeInvalidations,
@@ -360,6 +373,9 @@ const cache = new Map<string, CacheEntry>();
 
 let stopObserving: (() => void) | undefined;
 
+/** Hears every successful read that lands in a keyed entry, for persistence. */
+let settledObserver: ((entry: CacheEntry) => void) | undefined;
+
 /** Builds an empty entry. */
 function createEntry(key: string | undefined): CacheEntry {
   return {
@@ -599,6 +615,7 @@ function settleRequest(
       if (entry.version === version) {
         entry.invalidated = false;
       }
+      settledObserver?.(entry);
     }
     notify(entry, outcome, request);
   }
@@ -723,6 +740,459 @@ export function prefetchPolledQuery<T>(
       releaseEntry(entry, cacheTimeMs);
     }
   );
+}
+
+/** How old a persisted entry may be before it is dropped, when `maxAgeMs` is not given. */
+export const DEFAULT_PERSIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** How many entries a namespace keeps, when `maxEntries` is not given. */
+export const DEFAULT_PERSIST_MAX_ENTRIES = 200;
+
+/**
+ * The largest entry written, in characters of its JSON form, when
+ * `maxEntryBytes` is not given.
+ */
+export const DEFAULT_PERSIST_MAX_ENTRY_BYTES = 1_000_000;
+
+/** Milliseconds a settled read waits before it is written, when `writeDelayMs` is not given. */
+export const DEFAULT_PERSIST_WRITE_DELAY_MS = 1_000;
+
+/** Options for {@link persistPolledQueryCache}. */
+export interface PersistPolledQueryCacheOptions {
+  /**
+   * Scopes every stored entry, for example `${userId}:${workspaceId}`, so one
+   * person's or workspace's data never hydrates another's session.
+   */
+  namespace: string;
+  /**
+   * The keys to persist, as key prefixes: `'issues'` or `['issues']` matches
+   * the key `'issues'` and every array key starting with `'issues'`, and
+   * `['issues', 'open']` only those starting with both segments. A key no
+   * prefix matches is never written, and an empty prefix matches nothing.
+   */
+  prefixes: readonly QueryKey[];
+  /**
+   * The schema version of what the queries hold. Bump it when a response shape
+   * changes; records written under another version are dropped on load.
+   * Defaults to 1.
+   */
+  version?: string | number;
+  /**
+   * Age past which a record is dropped on load, measured from its last read or
+   * revalidation. Defaults to {@link DEFAULT_PERSIST_MAX_AGE_MS}.
+   */
+  maxAgeMs?: number;
+  /**
+   * Entries kept per namespace; the least recently read go first. Defaults to
+   * {@link DEFAULT_PERSIST_MAX_ENTRIES}.
+   */
+  maxEntries?: number;
+  /**
+   * Largest entry written, in characters of its JSON form. A larger entry is
+   * skipped and any older copy deleted. Defaults to
+   * {@link DEFAULT_PERSIST_MAX_ENTRY_BYTES}. `Infinity` skips the measurement.
+   */
+  maxEntryBytes?: number;
+  /**
+   * Milliseconds between a settled read and the write that carries it, so a
+   * burst of reads lands in one transaction. Defaults to
+   * {@link DEFAULT_PERSIST_WRITE_DELAY_MS}.
+   */
+  writeDelayMs?: number;
+  /**
+   * Where records live. Defaults to {@link createIndexedDbQueryStore}, and when
+   * that is unavailable persistence stays off.
+   */
+  store?: QueryCacheStore;
+}
+
+/** What {@link persistPolledQueryCache} returns. */
+export interface PolledQueryPersistence {
+  /** The namespace this persister reads and writes. */
+  readonly namespace: string;
+  /**
+   * Resolves once stored entries are in the cache, or at once when persistence
+   * is off. Never rejects. Await it before the first render to paint from it.
+   */
+  readonly ready: Promise<void>;
+  /**
+   * Whether writes still reach the store: false during server rendering,
+   * without IndexedDB, after any storage failure, and once stopped or cleared.
+   */
+  readonly active: boolean;
+  /** Writes pending entries now. Never rejects. */
+  flush(): Promise<void>;
+  /** Stops writing, dropping pending writes. Stored entries stay. */
+  stop(): void;
+  /**
+   * Stops writing and deletes every entry stored under this namespace. Call it
+   * on sign-out, alongside {@link clearPolledQueryCache}. Never rejects.
+   */
+  clear(): Promise<void>;
+}
+
+/** A key prefix as normalised segments. */
+type KeyPrefix = readonly unknown[];
+
+/** The segments of a serialised key: an array key's parts, or the string key. */
+function keySegments(serialized: string): readonly unknown[] {
+  if (serialized.startsWith('[')) {
+    try {
+      const parsed: unknown = JSON.parse(serialized);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      return [serialized];
+    }
+  }
+  return [serialized];
+}
+
+/** Normalises a prefix the way {@link serializeQueryKey} normalises a key. */
+function prefixSegments(prefix: QueryKey): KeyPrefix {
+  if (typeof prefix === 'string') {
+    return [prefix];
+  }
+  return prefix.map((part) => (part === undefined ? null : part));
+}
+
+/** Whether a serialised key starts with one of the prefixes. */
+function matchesPrefix(
+  serialized: string,
+  prefixes: readonly KeyPrefix[]
+): boolean {
+  const segments = keySegments(serialized);
+  return prefixes.some(
+    (prefix) =>
+      prefix.length > 0 &&
+      prefix.length <= segments.length &&
+      prefix.every((part, index) => segments[index] === part)
+  );
+}
+
+/** Whether data's JSON form fits `maxBytes`. Unserialisable data never fits. */
+function fitsSize(data: unknown, maxBytes: number): boolean {
+  if (!Number.isFinite(maxBytes)) {
+    return true;
+  }
+  try {
+    const json = JSON.stringify(data) as string | undefined;
+    return json === undefined || json.length <= maxBytes;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Puts a stored record into the cache, unless the key already holds data read
+ * this session. The entry is marked for a read, so a query on it paints the
+ * stored data and revalidates with the stored ETag. A mounted query still
+ * waiting on its first data is handed the stored data at once.
+ */
+function hydrateEntry(record: PersistedQuery): void {
+  observeOnce();
+  let entry = cache.get(record.key);
+  if (entry === undefined) {
+    entry = createEntry(record.key);
+    cache.set(record.key, entry);
+  } else if (entry.hasData) {
+    return;
+  }
+  entry.data = record.data;
+  entry.hasData = true;
+  entry.etag = record.etag;
+  entry.fetchedAt = record.fetchedAt;
+  entry.invalidated = true;
+  if (entry.listeners.size === 0) {
+    return;
+  }
+  const outcome: RequestOutcome = {
+    ok: true,
+    notModified: false,
+    data: record.data,
+    fetchedAt: record.fetchedAt,
+  };
+  notify(entry, outcome, {
+    promise: Promise.resolve(outcome),
+    controller: new AbortController(),
+    deadlineAt: undefined,
+    sequence: 0,
+    waiters: 0,
+    settled: true,
+  });
+}
+
+let activePersistence: PolledQueryPersistence | undefined;
+
+/** A persister that does nothing, for server rendering and missing storage. */
+function inertPersistence(namespace: string): PolledQueryPersistence {
+  return {
+    namespace,
+    ready: Promise.resolve(),
+    active: false,
+    flush: () => Promise.resolve(),
+    stop: () => undefined,
+    clear: () => Promise.resolve(),
+  };
+}
+
+/**
+ * Persists the shared {@link usePolledQuery} cache, so a reload paints what
+ * was last read and an offline session still has something to show. Opt in:
+ * nothing is stored until this is called.
+ *
+ * On start it loads the namespace's records, drops those written under another
+ * `version`, older than `maxAgeMs`, no longer matching `prefixes` or beyond
+ * `maxEntries`, and puts the rest into the cache, where a query paints them at
+ * once and revalidates with the stored ETag through the usual conditional
+ * read. Afterwards each successful read on a key matching `prefixes` is
+ * written, with its ETag and read time, `writeDelayMs` later, and pending
+ * writes are flushed when the page is hidden.
+ *
+ * Only one persister runs at a time: a second call stops the first, which is
+ * how a workspace switch moves to a new namespace. It does nothing during
+ * server rendering or without IndexedDB, and any storage failure (private
+ * mode, a full quota, a blocked database) turns it off and leaves the cache in
+ * memory, without throwing.
+ *
+ * @example
+ * ```ts
+ * const persistence = persistPolledQueryCache({
+ *   namespace: `${user.id}:${workspace.id}`,
+ *   prefixes: ['issues', 'projects'],
+ * });
+ * await persistence.ready;
+ * root.render(<App />);
+ * ```
+ */
+export function persistPolledQueryCache(
+  options: PersistPolledQueryCacheOptions
+): PolledQueryPersistence {
+  activePersistence?.stop();
+  const {
+    namespace,
+    version = 1,
+    maxAgeMs = DEFAULT_PERSIST_MAX_AGE_MS,
+    maxEntries = DEFAULT_PERSIST_MAX_ENTRIES,
+    maxEntryBytes = DEFAULT_PERSIST_MAX_ENTRY_BYTES,
+    writeDelayMs = DEFAULT_PERSIST_WRITE_DELAY_MS,
+  } = options;
+  if (typeof window === 'undefined') {
+    return inertPersistence(namespace);
+  }
+  const found = options.store ?? createIndexedDbQueryStore();
+  if (found === undefined) {
+    return inertPersistence(namespace);
+  }
+  const store: QueryCacheStore = found;
+  const prefixes = options.prefixes.map(prefixSegments);
+  const limit = Math.max(0, Math.floor(maxEntries));
+  const stored = new Map<string, number>();
+  const dirty = new Set<string>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  let failed = false;
+
+  const cancelTimer = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+
+  const onHidden = (): void => {
+    if (document.visibilityState === 'hidden') {
+      void flush();
+    }
+  };
+  const onPageHide = (): void => {
+    void flush();
+  };
+
+  const detach = (): void => {
+    cancelTimer();
+    dirty.clear();
+    if (settledObserver === onSettled) {
+      settledObserver = undefined;
+    }
+    window.removeEventListener('pagehide', onPageHide);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onHidden);
+    }
+    if (activePersistence === persistence) {
+      activePersistence = undefined;
+    }
+  };
+
+  const fail = (): void => {
+    failed = true;
+    detach();
+  };
+
+  function onSettled(entry: CacheEntry): void {
+    const key = entry.key;
+    if (
+      stopped ||
+      failed ||
+      key === undefined ||
+      !matchesPrefix(key, prefixes)
+    ) {
+      return;
+    }
+    dirty.add(key);
+    timer ??= setTimeout(
+      () => {
+        timer = undefined;
+        void flush();
+      },
+      Math.max(0, writeDelayMs)
+    );
+  }
+
+  const ready = (async (): Promise<void> => {
+    try {
+      const records = await store.load(namespace);
+      if (stopped || failed) {
+        return;
+      }
+      const now = Date.now();
+      const keep: PersistedQuery[] = [];
+      const drop: string[] = [];
+      for (const record of records) {
+        if (
+          record.version !== version ||
+          now - record.fetchedAt > maxAgeMs ||
+          !matchesPrefix(record.key, prefixes)
+        ) {
+          drop.push(record.key);
+        } else {
+          keep.push(record);
+        }
+      }
+      keep.sort((a, b) => b.fetchedAt - a.fetchedAt);
+      for (const record of keep.splice(limit)) {
+        drop.push(record.key);
+      }
+      for (const record of keep) {
+        stored.set(record.key, record.fetchedAt);
+        hydrateEntry(record);
+      }
+      if (drop.length > 0) {
+        await store.remove(namespace, drop);
+      }
+    } catch {
+      fail();
+    }
+  })();
+
+  async function flush(): Promise<void> {
+    cancelTimer();
+    await ready;
+    if (stopped || failed || dirty.size === 0) {
+      return;
+    }
+    const keys = [...dirty];
+    dirty.clear();
+    const puts = new Map<string, PersistedQuery>();
+    const removes = new Set<string>();
+    for (const key of keys) {
+      const entry = cache.get(key);
+      if (entry === undefined || !entry.hasData || entry.fetchedAt === null) {
+        continue;
+      }
+      if (!fitsSize(entry.data, maxEntryBytes)) {
+        if (stored.delete(key)) {
+          removes.add(key);
+        }
+        continue;
+      }
+      puts.set(key, {
+        key,
+        data: entry.data,
+        etag: entry.etag,
+        fetchedAt: entry.fetchedAt,
+        version,
+      });
+      stored.set(key, entry.fetchedAt);
+    }
+    if (stored.size > limit) {
+      const oldest = [...stored].sort((a, b) => a[1] - b[1]);
+      for (const [key] of oldest.slice(0, stored.size - limit)) {
+        stored.delete(key);
+        puts.delete(key);
+        removes.add(key);
+      }
+    }
+    try {
+      if (puts.size > 0) {
+        await store.save(namespace, [...puts.values()]);
+      }
+      if (removes.size > 0) {
+        await store.remove(namespace, [...removes]);
+      }
+    } catch {
+      fail();
+    }
+  }
+
+  const persistence: PolledQueryPersistence = {
+    namespace,
+    ready,
+    get active() {
+      return !stopped && !failed;
+    },
+    flush,
+    stop() {
+      stopped = true;
+      detach();
+    },
+    async clear() {
+      stopped = true;
+      detach();
+      await ready;
+      try {
+        await store.clear(namespace);
+      } catch {
+        failed = true;
+      }
+    },
+  };
+
+  settledObserver = onSettled;
+  activePersistence = persistence;
+  window.addEventListener('pagehide', onPageHide);
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onHidden);
+  }
+  return persistence;
+}
+
+/**
+ * Deletes every persisted entry under `namespace`, for sign-out when the
+ * persister handle is not to hand. Stops the running persister when it writes
+ * that namespace. Uses the IndexedDB store unless `store` is given, does
+ * nothing during server rendering or without IndexedDB, and never rejects.
+ */
+export async function clearPersistedPolledQueries(
+  namespace: string,
+  store?: QueryCacheStore
+): Promise<void> {
+  if (activePersistence?.namespace === namespace) {
+    await activePersistence.clear();
+    if (store === undefined) {
+      return;
+    }
+  }
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const target = store ?? createIndexedDbQueryStore();
+  try {
+    await target?.clear(namespace);
+  } catch {
+    return;
+  }
 }
 
 /** Whether the document is currently visible. True outside a browser. */
@@ -1508,7 +1978,31 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
   );
 }
 
+/**
+ * Whether the app is online, re-rendering when it changes: `navigator.onLine`
+ * combined with the client's network failures, so a request that cannot reach
+ * the API flips it to false until a response arrives or the browser fires
+ * `online`. Reads true during server rendering.
+ */
+export function useOnline(): boolean {
+  return useSyncExternalStore(subscribeToOnline, isOnline, () => true);
+}
+
 export { idleForMs, subscribeToActivity } from './activity.js';
+export {
+  isOnline,
+  reportNetworkFailure,
+  reportNetworkSuccess,
+  subscribeToOnline,
+} from './online.js';
+export {
+  createIndexedDbQueryStore,
+  createMemoryQueryCacheStore,
+  QUERY_CACHE_DATABASE_NAME,
+  type IndexedDbQueryStoreOptions,
+  type PersistedQuery,
+  type QueryCacheStore,
+} from './persist.js';
 export {
   invalidateQueries,
   serializeQueryKey,
