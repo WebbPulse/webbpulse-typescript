@@ -21,7 +21,7 @@ function record(key: string, fetchedAt = 1_000): PersistedQuery {
 }
 
 /** A fresh IndexedDB store on its own fake factory. */
-function indexedDbStore(): QueryCacheStore {
+function indexedDbStore(): Required<QueryCacheStore> {
   const store = createIndexedDbQueryStore({ indexedDB: new IDBFactory() });
   if (store === undefined) {
     throw new Error('expected a store');
