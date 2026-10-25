@@ -223,8 +223,8 @@ export function useConnectedAccountsPanel(
           )
         );
       } catch (thrown) {
+        endCall();
         if (isStepUpCancelled(thrown)) {
-          endCall();
           return;
         }
         throw thrown;
