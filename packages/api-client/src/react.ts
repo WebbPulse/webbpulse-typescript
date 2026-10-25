@@ -981,10 +981,11 @@ export function persistPolledQueryCache(
   if (typeof window === 'undefined') {
     return inertPersistence(namespace);
   }
-  const store = options.store ?? createIndexedDbQueryStore();
-  if (store === undefined) {
+  const found = options.store ?? createIndexedDbQueryStore();
+  if (found === undefined) {
     return inertPersistence(namespace);
   }
+  const store: QueryCacheStore = found;
   const prefixes = options.prefixes.map(prefixSegments);
   const limit = Math.max(0, Math.floor(maxEntries));
   const stored = new Map<string, number>();
