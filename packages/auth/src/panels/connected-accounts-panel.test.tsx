@@ -159,10 +159,7 @@ async function mountGated(
   options: Omit<ConnectedAccountsOptions, 'client' | 'withStepUp'> = {}
 ): Promise<void> {
   render(
-    <GatedProbe
-      {...options}
-      client={stub as unknown as AuthClient<unknown>}
-    />
+    <GatedProbe {...options} client={stub as unknown as AuthClient<unknown>} />
   );
   await waitFor(() => {
     expect(screen.getByTestId('loading').textContent).toBe('false');
