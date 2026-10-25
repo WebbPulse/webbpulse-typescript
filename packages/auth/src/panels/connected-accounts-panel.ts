@@ -7,13 +7,16 @@
 import { useCallback, useMemo, useState } from 'react';
 
 import type { AuthClient } from '../auth-client.js';
+import { StepUpCancelledError } from '../errors.js';
 import type {
   OAuthLink,
   OAuthLinkOutcome,
   OAuthLinksOutcome,
   OAuthUnlinkOutcome,
 } from '../oauth.js';
+import type { StepUpGate } from '../step-up-react.js';
 import {
+  PANEL_CANCELLED,
   PANEL_OK,
   useListPanel,
   type ListPanel,
@@ -58,6 +61,14 @@ export interface ConnectedAccountsOptions {
   loadOnMount?: boolean;
   /** The success copy. Refusals always use the server's own sentence. */
   messages?: ConnectedAccountsMessages;
+  /**
+   * Wraps the attach and detach calls, typically `withStepUp` from
+   * `useStepUp()`, so a `STEP_UP_REQUIRED` refusal opens the product's prompt
+   * and the call replays once the person re-authenticates. A
+   * `StepUpCancelledError` from the wrapped call settles as a cancellation:
+   * `busy` clears and no banner shows. Omit to call the client directly.
+   */
+  withStepUp?: StepUpGate['withStepUp'];
 }
 
 /** What {@link useConnectedAccountsPanel} returns. */
@@ -97,6 +108,14 @@ function settle(outcome: OAuthUnlinkOutcome): PanelOutcome {
   };
 }
 
+/** Whether a wrapped call ended because the step-up prompt was dismissed. */
+function isStepUpCancelled(thrown: unknown): boolean {
+  return (
+    thrown instanceof StepUpCancelledError ||
+    (thrown instanceof Error && thrown.name === 'StepUpCancelledError')
+  );
+}
+
 /**
  * The connected accounts panel, headless. Renders nothing.
  *
@@ -115,7 +134,7 @@ function settle(outcome: OAuthUnlinkOutcome): PanelOutcome {
 export function useConnectedAccountsPanel(
   options: ConnectedAccountsOptions
 ): ConnectedAccountsPanel {
-  const { client } = options;
+  const { client, withStepUp } = options;
   const providers = options.providers ?? [];
   const [blocked, setBlocked] = useState<Record<string, string>>({});
   const [unlinked, setUnlinked] = useState<string | null>(null);
@@ -135,9 +154,24 @@ export function useConnectedAccountsPanel(
     };
   }, [client]);
 
+  const guard = useCallback(
+    <TResult>(call: () => Promise<TResult>): Promise<TResult> =>
+      withStepUp === undefined ? call() : withStepUp(call)(),
+    [withStepUp]
+  );
+
   const remove = useCallback(
     async (provider: string): Promise<PanelOutcome> => {
-      const outcome = await client.unlinkOAuthProvider(provider);
+      let outcome: OAuthUnlinkOutcome;
+      try {
+        outcome = await guard(() => client.unlinkOAuthProvider(provider));
+      } catch (thrown) {
+        if (isStepUpCancelled(thrown)) {
+          setUnlinked(null);
+          return PANEL_CANCELLED;
+        }
+        throw thrown;
+      }
       if (!outcome.ok && outcome.reason === 'last-sign-in-method') {
         setBlocked((current) => ({
           ...current,
@@ -147,7 +181,7 @@ export function useConnectedAccountsPanel(
       setUnlinked(outcome.ok ? provider : null);
       return settle(outcome);
     },
-    [client]
+    [client, guard]
   );
 
   const removedMessage = options.messages?.removed;
@@ -180,10 +214,21 @@ export function useConnectedAccountsPanel(
   const link = useCallback(
     async (provider: string): Promise<void> => {
       beginCall();
-      const outcome: OAuthLinkOutcome = await client.linkOAuthProvider(
-        provider,
-        returnTo === undefined ? {} : { returnTo }
-      );
+      let outcome: OAuthLinkOutcome;
+      try {
+        outcome = await guard(() =>
+          client.linkOAuthProvider(
+            provider,
+            returnTo === undefined ? {} : { returnTo }
+          )
+        );
+      } catch (thrown) {
+        if (isStepUpCancelled(thrown)) {
+          endCall();
+          return;
+        }
+        throw thrown;
+      }
       if (outcome.ok) {
         const go =
           navigate ?? ((url: string) => globalThis.location.assign(url));
@@ -193,7 +238,7 @@ export function useConnectedAccountsPanel(
       endCall();
       fail(outcome.message, outcome.reason === 'provider-unavailable');
     },
-    [client, navigate, returnTo, beginCall, endCall, fail]
+    [client, guard, navigate, returnTo, beginCall, endCall, fail]
   );
 
   const connectable = useMemo(() => {

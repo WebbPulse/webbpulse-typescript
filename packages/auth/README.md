@@ -748,6 +748,20 @@ successful `link`, which navigates to the provider. `useTotpPanel` has no load
 leg, because no route reports whether a factor is on: pass `factor` when the
 user record says.
 
+Pass `withStepUp` from `useStepUp()` to `useConnectedAccountsPanel` when the
+identity service asks for a recent sign-in before an attach or a detach. A
+`STEP_UP_REQUIRED` refusal then opens the product's prompt and the call
+replays after `submit`; a `cancel` clears `busy` and shows no banner.
+
+```tsx
+const stepUp = useStepUp();
+const panel = useConnectedAccountsPanel({
+  client: auth,
+  providers,
+  withStepUp: stepUp.withStepUp,
+});
+```
+
 `useSessionsPanel` lists the live sessions with the calling one split out as
 `current` and the rest as `others`. `revoke` ends one, counting a session that
 is already gone as ended, and `revokeOthers` ends every other one in a single

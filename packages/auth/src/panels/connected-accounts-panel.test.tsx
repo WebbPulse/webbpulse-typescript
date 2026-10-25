@@ -1,3 +1,4 @@
+import { StepUpRequiredError } from '@webbpulse/api-client';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -9,6 +10,7 @@ import type {
   OAuthLinksOutcome,
   OAuthUnlinkOutcome,
 } from '../oauth.js';
+import { useStepUpGate, type StepUpGate } from '../step-up-react.js';
 import {
   useConnectedAccountsPanel,
   type ConnectedAccountsOptions,
@@ -19,6 +21,7 @@ interface OAuthStub {
   listOAuthLinks: Mock;
   linkOAuthProvider: Mock;
   unlinkOAuthProvider: Mock;
+  stepUp: Mock;
 }
 
 const PROVIDERS: readonly ProviderOption[] = [
@@ -77,7 +80,24 @@ function notLinked(message: string): OAuthUnlinkOutcome {
   return { ok: false, reason: 'not-linked', code: undefined, message };
 }
 
-/** A stub client exposing only the three OAuth calls the panel makes. */
+/** A step-up refusal as the transport classifies it. */
+function challenge(): StepUpRequiredError {
+  return new StepUpRequiredError({
+    status: 401,
+    statusText: 'Unauthorized',
+    url: 'https://api.example.test/auth/oauth/github/link',
+    method: 'POST',
+    body: {
+      success: false,
+      status: 401,
+      message: 'Recent authentication required.',
+      error_code: 'STEP_UP_REQUIRED',
+    },
+    maxAge: undefined,
+  });
+}
+
+/** A stub client exposing the OAuth calls the panel makes and the step-up call. */
 function stubClient(links: OAuthLink[] = []): OAuthStub {
   return {
     listOAuthLinks: vi.fn(() => Promise.resolve(loaded(links))),
@@ -87,6 +107,7 @@ function stubClient(links: OAuthLink[] = []): OAuthStub {
     unlinkOAuthProvider: vi.fn(() =>
       Promise.resolve({ ok: true } as OAuthUnlinkOutcome)
     ),
+    stepUp: vi.fn(() => Promise.resolve({ ok: true })),
   };
 }
 
@@ -116,6 +137,53 @@ function AccountsProbe(options: ConnectedAccountsOptions): React.ReactNode {
   );
 }
 
+let gateHandle: StepUpGate | null = null;
+
+/** Renders the panel behind a real step-up gate built on the same client. */
+function GatedProbe(
+  options: Omit<ConnectedAccountsOptions, 'withStepUp'>
+): React.ReactNode {
+  const gate = useStepUpGate(options.client);
+  gateHandle = gate;
+  return (
+    <div>
+      <span data-testid="prompt">{String(gate.open)}</span>
+      <AccountsProbe {...options} withStepUp={gate.withStepUp} />
+    </div>
+  );
+}
+
+/** Mounts the gated probe and waits for the first load to settle. */
+async function mountGated(
+  stub: OAuthStub,
+  options: Omit<ConnectedAccountsOptions, 'client' | 'withStepUp'> = {}
+): Promise<void> {
+  render(
+    <GatedProbe
+      {...options}
+      client={stub as unknown as AuthClient<unknown>}
+    />
+  );
+  await waitFor(() => {
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+  });
+}
+
+/** The step-up gate from the most recent gated render. */
+function gate(): StepUpGate {
+  if (gateHandle === null) {
+    throw new Error('The gated probe has not rendered.');
+  }
+  return gateHandle;
+}
+
+/** Waits for the step-up prompt to open. */
+async function promptOpen(): Promise<void> {
+  await waitFor(() => {
+    expect(screen.getByTestId('prompt').textContent).toBe('true');
+  });
+}
+
 /** Mounts the probe against a stub and waits for the first load to settle. */
 async function mount(
   stub: OAuthStub,
@@ -142,6 +210,7 @@ function panel(): ReturnType<typeof useConnectedAccountsPanel> {
 
 afterEach(() => {
   handle = null;
+  gateHandle = null;
   vi.restoreAllMocks();
 });
 
@@ -390,5 +459,129 @@ describe('useConnectedAccountsPanel', () => {
       expect(screen.getByTestId('loading').textContent).toBe('false');
     });
     expect(stub.listOAuthLinks).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('useConnectedAccountsPanel with withStepUp', () => {
+  it('replays the attach after the step-up and navigates', async () => {
+    const stub = stubClient();
+    stub.linkOAuthProvider.mockRejectedValueOnce(challenge());
+    const navigate = vi.fn();
+
+    await mountGated(stub, { providers: PROVIDERS, navigate });
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = panel().link('github');
+    });
+    await promptOpen();
+    expect(navigate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await gate().submit({ code: '123456' });
+      await pending;
+    });
+
+    expect(stub.stepUp).toHaveBeenCalledWith({ code: '123456' });
+    expect(stub.linkOAuthProvider).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenCalledWith('https://provider.test/authorize');
+    expect(screen.getByTestId('prompt').textContent).toBe('false');
+    expect(screen.getByTestId('error').textContent).toBe('none');
+  });
+
+  it('settles a cancelled attach step-up with busy cleared and no banner', async () => {
+    const stub = stubClient();
+    stub.linkOAuthProvider.mockRejectedValueOnce(challenge());
+    const navigate = vi.fn();
+
+    await mountGated(stub, { providers: PROVIDERS, navigate });
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = panel().link('github');
+    });
+    await promptOpen();
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+
+    await act(async () => {
+      gate().cancel();
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    expect(stub.linkOAuthProvider).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(screen.getByTestId('busy').textContent).toBe('false');
+    expect(screen.getByTestId('error').textContent).toBe('none');
+    expect(screen.getByTestId('unavailable').textContent).toBe('false');
+  });
+
+  it('replays the detach after the step-up and reloads', async () => {
+    const stub = stubClient([link('google'), link('github')]);
+    stub.unlinkOAuthProvider.mockRejectedValueOnce(challenge());
+
+    await mountGated(stub, {
+      providers: PROVIDERS,
+      messages: { removed: (provider) => `Detached ${provider}.` },
+    });
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = panel().unlink('github');
+    });
+    await promptOpen();
+    expect(stub.listOAuthLinks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await gate().submit({ code: '123456' });
+      await pending;
+    });
+
+    expect(stub.unlinkOAuthProvider).toHaveBeenCalledTimes(2);
+    expect(stub.unlinkOAuthProvider).toHaveBeenLastCalledWith('github');
+    expect(stub.listOAuthLinks).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('notice').textContent).toBe('Detached github.');
+    expect(screen.getByTestId('error').textContent).toBe('none');
+  });
+
+  it('settles a cancelled detach step-up with busy cleared and no banner', async () => {
+    const stub = stubClient([link('google'), link('github')]);
+    stub.unlinkOAuthProvider.mockRejectedValueOnce(challenge());
+
+    await mountGated(stub, {
+      providers: PROVIDERS,
+      messages: { removed: (provider) => `Detached ${provider}.` },
+    });
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = panel().unlink('github');
+    });
+    await promptOpen();
+    expect(screen.getByTestId('busy').textContent).toBe('true');
+
+    await act(async () => {
+      gate().cancel();
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    expect(stub.unlinkOAuthProvider).toHaveBeenCalledTimes(1);
+    expect(stub.listOAuthLinks).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('busy').textContent).toBe('false');
+    expect(screen.getByTestId('error').textContent).toBe('none');
+    expect(screen.getByTestId('notice').textContent).toBe('none');
+    expect(screen.getByTestId('blocked').textContent).toBe('{}');
+  });
+
+  it('passes a refusal through the wrapper unchanged', async () => {
+    const stub = stubClient([link('google')]);
+    stub.unlinkOAuthProvider.mockResolvedValue(
+      lastSignInMethod('Set a password before detaching Google.')
+    );
+
+    await mountGated(stub, { providers: PROVIDERS });
+    await act(async () => {
+      await panel().unlink('google');
+    });
+
+    expect(screen.getByTestId('prompt').textContent).toBe('false');
+    expect(screen.getByTestId('error').textContent).toBe(
+      'Set a password before detaching Google.'
+    );
   });
 });
