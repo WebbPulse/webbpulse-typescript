@@ -1,5 +1,11 @@
 # @webbpulse/api-client
 
+## 0.21.0
+
+### Minor Changes
+
+- bd5e643: The shared `usePolledQuery` cache can persist to IndexedDB (PLAT-91). `persistPolledQueryCache({ namespace, prefixes })` from `@webbpulse/api-client/react` is opt in: it hydrates the cache from the namespace's stored records before the first fetch, so a reload paints the last read and revalidates it with the stored ETag, then writes each settled read on a listed key prefix with a debounced write and a flush on `pagehide`. Records carry a schema `version` and are dropped past `maxAgeMs`, beyond `maxEntries` or over `maxEntryBytes`. `clear()` and `clearPersistedPolledQueries(namespace)` wipe a namespace on sign out. It does nothing during server rendering or without IndexedDB, and any storage failure falls back to memory without throwing. A new online signal combines `navigator.onLine` with network failures the client reports: `useOnline()` in the React entry, and `isOnline`, `subscribeToOnline`, `reportNetworkFailure` and `reportNetworkSuccess` from the root. The root also exports `createIndexedDbQueryStore`, `createMemoryQueryCacheStore` and `QUERY_CACHE_DATABASE_NAME`.
+
 ## 0.20.1
 
 ### Patch Changes
