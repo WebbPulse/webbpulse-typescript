@@ -32,9 +32,20 @@ import {
   type OAuthCallbackResult,
 } from './oauth.js';
 import type { SessionManager, SessionState } from './session.js';
-import { useStepUpGate, type StepUpGate } from './step-up-react.js';
+import {
+  useProactiveStepUpGate,
+  useStepUpGate,
+  type ProactiveStepUp,
+  type ProactiveStepUpOptions,
+  type ReactiveStepUpOptions,
+  type StepUpGate,
+} from './step-up-react.js';
 
 export type {
+  ProactiveStepUp,
+  ProactiveStepUpOptions,
+  ProactiveStepUpStage,
+  ReactiveStepUpOptions,
   StepUpFailure,
   StepUpGate,
   StepUpMethod,
@@ -1123,6 +1134,41 @@ export function useDismissedUntilSignIn(key: string): DismissedUntilSignIn {
  * )}
  * ```
  */
-export function useStepUp(): StepUpGate {
-  return useStepUpGate(useAuthClient());
+export function useStepUp(options?: ReactiveStepUpOptions): StepUpGate;
+/**
+ * The proactive step-up for the {@link AuthClient} in context: a fresh proof
+ * of identity asked for before a sensitive call, for a server that records a
+ * step-up rather than refusing a call without one. Try `prove({ passkey: true })`
+ * first; when `stage` moves to `code`, ask for a code or password and call
+ * `prove` with it. `skip` carries on for an account with no second factor, and
+ * a `rate-limited` code holds `locked` with the wait in `lockedFor`. The mode
+ * is fixed for the component's lifetime.
+ *
+ * @example
+ * ```tsx
+ * const stepUp = useStepUp({ mode: 'proactive' });
+ *
+ * <DeleteDialog
+ *   stage={stepUp.stage}
+ *   error={stepUp.error?.message}
+ *   busy={stepUp.pending}
+ *   locked={stepUp.locked}
+ *   onPasskey={() => stepUp.prove({ passkey: true })}
+ *   onCode={(code) => stepUp.prove({ code })}
+ *   onSkip={stepUp.skip}
+ *   onClose={stepUp.reset}
+ * />
+ * ```
+ */
+export function useStepUp(options: ProactiveStepUpOptions): ProactiveStepUp;
+export function useStepUp(
+  options: ReactiveStepUpOptions | ProactiveStepUpOptions = {}
+): StepUpGate | ProactiveStepUp {
+  const client = useAuthClient();
+  const gate = useStepUpGate(client);
+  const proactive = useProactiveStepUpGate(
+    client,
+    options.mode === 'proactive' ? options : {}
+  );
+  return options.mode === 'proactive' ? proactive : gate;
 }

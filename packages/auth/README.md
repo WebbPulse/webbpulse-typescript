@@ -282,6 +282,51 @@ const { mutate } = useMutationWithRefetch(
   mutation's `reset()` clears the resulting error.
 - **`maxAge` is the strictest** `max_age` among the parked challenges.
 
+### Proactive step-up
+
+`useStepUp({ mode: 'proactive' })` asks for a fresh proof before a sensitive
+call, for a server that records whether a call was stepped up rather than
+refusing one that was not. Nothing is parked: the product proves first, then
+makes the call.
+
+```tsx
+const stepUp = useStepUp({ mode: 'proactive' });
+
+useEffect(() => {
+  if (open && stepUp.stage === 'idle') void stepUp.prove({ passkey: true });
+}, [open, stepUp.stage]);
+
+{
+  stepUp.stage === 'code' && (
+    <CodeForm
+      error={stepUp.error?.message}
+      busy={stepUp.pending}
+      disabled={stepUp.locked}
+      onSubmit={(code) => stepUp.prove({ code })}
+      onSkip={hasSecondFactor ? undefined : stepUp.skip}
+    />
+  );
+}
+```
+
+- **`stage` is `idle`, `code` or `done`.** `prove(method)` takes the same
+  `{ password }`, `{ code }` or `{ passkey: true }` as `submit`, resolves true
+  once proven and moves `stage` to `done`.
+- **A passkey that cannot be used moves to `code`** rather than failing: no
+  passkeys on the account, no WebAuthn in the browser, a dismissed prompt, a
+  refusal or a throw. The first three leave `error` null; a refusal or a throw
+  lands in `error`.
+- **`skip()` marks the step-up done** with no proof, for an account with no
+  second factor. Whether an account qualifies is the product's call.
+- **`reset()` returns to `idle`** for a closed prompt. A lockout stays.
+- **A `rate-limited` code or password locks those methods.** `locked` is true,
+  `lockedFor` counts down the whole seconds left, and `error` is the refusal
+  until the wait is over. A code or password resolves false without a request
+  while locked; a passkey still runs. The wait is the refusal's `retryAfter`,
+  or `lockoutFallbackSeconds` (60 by default) when it names none.
+- **The mode is fixed** for the component's lifetime, and the reactive gate is
+  unchanged for `useStepUp()` and `useStepUp({ mode: 'reactive' })`.
+
 ## Email verification and password reset
 
 ```ts
@@ -892,6 +937,8 @@ deprecated `SessionProvider`, `useSession`, `useSessionState`,
 `PasskeySignInButtonOptions`, `OAuthProviderLink`, `OAuthProviderLinksOptions`,
 `EmailVerificationLinkState`, `EmailVerificationLinkOptions`, `QueryAuth`,
 `DismissedUntilSignIn`, `StepUpGate`, `StepUpMethod`, `StepUpFailure`,
+`ProactiveStepUp`, `ProactiveStepUpOptions`, `ProactiveStepUpStage`,
+`ReactiveStepUpOptions`,
 `SessionProviderProps`, `UseSessionResult`, `AnySessionManager` and
 `OAuthCallbackHandler`.
 
