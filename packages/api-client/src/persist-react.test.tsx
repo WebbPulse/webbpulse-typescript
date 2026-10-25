@@ -3,10 +3,12 @@ import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  clearAllPersistedPolledQueries,
   clearPersistedPolledQueries,
   clearPolledQueryCache,
   createIndexedDbQueryStore,
   createMemoryQueryCacheStore,
+  listPersistedNamespaces,
   persistPolledQueryCache,
   polledResponse,
   prefetchPolledQuery,
@@ -300,6 +302,92 @@ describe('persistPolledQueryCache', () => {
     expect(await store.load(NAMESPACE)).toEqual([]);
   });
 
+  it('never writes an excluded key and drops its stored record on load', async () => {
+    const store = createMemoryQueryCacheStore();
+    await store.save(NAMESPACE, [
+      record(serializeQueryKey(['issues', 'directory', 1]), 'stored'),
+      record(ISSUES, ['kept']),
+    ]);
+    const persistence = persist({
+      store,
+      exclude: [['issues', 'directory']],
+    });
+    await persistence.ready;
+
+    expect((await store.load(NAMESPACE)).map((query) => query.key)).toEqual([
+      ISSUES,
+    ]);
+
+    await prefetchPolledQuery(['issues', 'directory', 2], answer('nope'));
+    await prefetchPolledQuery(['issues', 'closed'], answer('yes'));
+    await persistence.flush();
+
+    expect(
+      (await store.load(NAMESPACE)).map((query) => query.key).sort()
+    ).toEqual([ISSUES, serializeQueryKey(['issues', 'closed'])].sort());
+  });
+
+  it('clearAllPersistedPolledQueries clears every namespace and stops writing', async () => {
+    const store = createMemoryQueryCacheStore();
+    await store.save(NAMESPACE, [record(ISSUES, ['one'])]);
+    await store.save('user-1:workspace-2', [record(ISSUES, ['two'])]);
+    const persistence = persist({ store });
+    await persistence.ready;
+
+    expect((await listPersistedNamespaces(store)).sort()).toEqual(
+      [NAMESPACE, 'user-1:workspace-2'].sort()
+    );
+
+    await clearAllPersistedPolledQueries();
+
+    expect(persistence.active).toBe(false);
+    expect(await listPersistedNamespaces(store)).toEqual([]);
+    await prefetchPolledQuery(['issues', 'new'], answer('new'));
+    await persistence.flush();
+    expect(await store.load(NAMESPACE)).toEqual([]);
+  });
+
+  it('clears a custom store namespace by namespace without clearAll', async () => {
+    const memory = createMemoryQueryCacheStore();
+    await memory.save('one', [record(ISSUES, 1)]);
+    await memory.save('two', [record(ISSUES, 2)]);
+    const store: QueryCacheStore = {
+      load: (namespace) => memory.load(namespace),
+      save: (namespace, queries) => memory.save(namespace, queries),
+      remove: (namespace, keys) => memory.remove(namespace, keys),
+      clear: (namespace) => memory.clear(namespace),
+      listNamespaces: () => memory.listNamespaces(),
+    };
+
+    await clearAllPersistedPolledQueries(store);
+
+    expect(await memory.listNamespaces()).toEqual([]);
+  });
+
+  it('clear-all and listing never reject', async () => {
+    const memory = createMemoryQueryCacheStore();
+    const bare: QueryCacheStore = {
+      load: (namespace) => memory.load(namespace),
+      save: (namespace, queries) => memory.save(namespace, queries),
+      remove: (namespace, keys) => memory.remove(namespace, keys),
+      clear: (namespace) => memory.clear(namespace),
+    };
+    const broken: QueryCacheStore = {
+      ...bare,
+      listNamespaces: () => Promise.reject(new Error('denied')),
+      clearAll: () => Promise.reject(new Error('denied')),
+    };
+
+    await expect(listPersistedNamespaces(bare)).resolves.toEqual([]);
+    await expect(listPersistedNamespaces(broken)).resolves.toEqual([]);
+    await expect(listPersistedNamespaces()).resolves.toEqual([]);
+    await expect(clearAllPersistedPolledQueries(bare)).resolves.toBeUndefined();
+    await expect(
+      clearAllPersistedPolledQueries(broken)
+    ).resolves.toBeUndefined();
+    await expect(clearAllPersistedPolledQueries()).resolves.toBeUndefined();
+  });
+
   it('a second persister stops the first', async () => {
     const first = persist({ store: createMemoryQueryCacheStore() });
     const second = persist({
@@ -367,6 +455,89 @@ describe('persistPolledQueryCache', () => {
       expect(fetcher).toHaveBeenCalledTimes(1);
     });
     expect(fetcher.mock.calls[0]?.[0].etag).toBe('W/"p"');
+  });
+});
+
+describe('reconnect refetch', () => {
+  it('refetches a mounted query as soon as the connection returns', async () => {
+    reportNetworkFailure();
+    const fetcher = vi.fn(() => Promise.resolve('data'));
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 60_000, queryKey: ['reconnect'] })
+    );
+    await waitFor(() => {
+      expect(result.current.data).toBe('data');
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      reportNetworkSuccess();
+    });
+
+    await waitFor(() => {
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('retries at once when the attempt in flight at reconnect fails', async () => {
+    reportNetworkFailure();
+    let fail: (error: Error) => void = () => undefined;
+    const fetcher = vi
+      .fn<() => Promise<string>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((_resolve, reject) => {
+            fail = reject;
+          })
+      )
+      .mockResolvedValue('data');
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 60_000 })
+    );
+    await waitFor(() => {
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    act(() => {
+      fail(new TypeError('Failed to fetch'));
+    });
+
+    await waitFor(() => {
+      expect(result.current.data).toBe('data');
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not read twice when the attempt in flight at reconnect succeeds', async () => {
+    reportNetworkFailure();
+    let succeed: (value: string) => void = () => undefined;
+    const fetcher = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          succeed = resolve;
+        })
+    );
+    const { result } = renderHook(() =>
+      usePolledQuery(fetcher, { intervalMs: 60_000 })
+    );
+    await waitFor(() => {
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      reportNetworkSuccess();
+      succeed('data');
+    });
+    await waitFor(() => {
+      expect(result.current.data).toBe('data');
+    });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
 

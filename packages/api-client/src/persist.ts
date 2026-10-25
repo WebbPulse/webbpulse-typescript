@@ -33,6 +33,18 @@ export interface QueryCacheStore {
   remove(namespace: string, keys: readonly string[]): Promise<void>;
   /** Deletes every record under `namespace`, leaving other namespaces alone. */
   clear(namespace: string): Promise<void>;
+  /**
+   * Every namespace holding at least one record. Optional for a custom store;
+   * without it and {@link QueryCacheStore.clearAll} nothing can clear every
+   * namespace at once.
+   */
+  listNamespaces?(): Promise<string[]>;
+  /**
+   * Deletes every record in every namespace, for sign-out. Optional for a
+   * custom store; without it, clearing everything clears each namespace
+   * {@link QueryCacheStore.listNamespaces} returns.
+   */
+  clearAll?(): Promise<void>;
 }
 
 /** The IndexedDB database the default store opens. */
@@ -163,7 +175,7 @@ function isRecord(value: unknown): value is StoredRecord {
 }
 
 /** The IndexedDB backed {@link QueryCacheStore}. */
-class IndexedDbQueryStore implements QueryCacheStore {
+class IndexedDbQueryStore implements Required<QueryCacheStore> {
   private readonly factory: IDBFactory;
   private readonly name: string;
   private connection: Promise<IDBDatabase> | undefined;
@@ -256,6 +268,38 @@ class IndexedDbQueryStore implements QueryCacheStore {
       };
     });
   }
+
+  /** Reads the distinct namespaces from the namespace index. */
+  async listNamespaces(): Promise<string[]> {
+    const database = await this.database();
+    const transaction = database.transaction(OBJECT_STORE, 'readonly');
+    const index = transaction.objectStore(OBJECT_STORE).index(NAMESPACE_INDEX);
+    const request = index.openKeyCursor(null, 'nextunique');
+    return new Promise((resolve, reject) => {
+      const found: string[] = [];
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor === null) {
+          resolve(found);
+          return;
+        }
+        if (typeof cursor.key === 'string') {
+          found.push(cursor.key);
+        }
+        cursor.continue();
+      };
+      request.onerror = () => {
+        reject(failure(request.error, 'IndexedDB request failed.'));
+      };
+    });
+  }
+
+  /** Deletes every record in one transaction. */
+  clearAll(): Promise<void> {
+    return this.write((store) => {
+      store.clear();
+    });
+  }
 }
 
 /**
@@ -265,7 +309,7 @@ class IndexedDbQueryStore implements QueryCacheStore {
  */
 export function createIndexedDbQueryStore(
   options: IndexedDbQueryStoreOptions = {}
-): QueryCacheStore | undefined {
+): Required<QueryCacheStore> | undefined {
   const factory = options.indexedDB ?? globalFactory();
   if (factory === undefined) {
     return undefined;
@@ -280,7 +324,7 @@ export function createIndexedDbQueryStore(
  * An in-memory {@link QueryCacheStore}, for tests and for a caller that wants
  * the persister's shape without durable storage.
  */
-export function createMemoryQueryCacheStore(): QueryCacheStore {
+export function createMemoryQueryCacheStore(): Required<QueryCacheStore> {
   const namespaces = new Map<string, Map<string, PersistedQuery>>();
   const bucket = (namespace: string): Map<string, PersistedQuery> => {
     let held = namespaces.get(namespace);
@@ -314,6 +358,17 @@ export function createMemoryQueryCacheStore(): QueryCacheStore {
     },
     clear(namespace) {
       namespaces.delete(namespace);
+      return Promise.resolve();
+    },
+    listNamespaces() {
+      return Promise.resolve(
+        [...namespaces]
+          .filter(([, held]) => held.size > 0)
+          .map(([namespace]) => namespace)
+      );
+    },
+    clearAll() {
+      namespaces.clear();
       return Promise.resolve();
     },
   };

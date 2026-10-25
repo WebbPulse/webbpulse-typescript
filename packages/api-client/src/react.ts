@@ -772,6 +772,13 @@ export interface PersistPolledQueryCacheOptions {
    */
   prefixes: readonly QueryKey[];
   /**
+   * Keys never to persist, as key prefixes read the same way as `prefixes`, so
+   * `['members', 'directory']` keeps that list out while `['members']` is
+   * persisted. A matching key is never written, and a stored record on one is
+   * dropped on load.
+   */
+  exclude?: readonly QueryKey[];
+  /**
    * The schema version of what the queries hold. Bump it when a response shape
    * changes; records written under another version are dropped on load.
    * Defaults to 1.
@@ -925,6 +932,9 @@ function hydrateEntry(record: PersistedQuery): void {
 
 let activePersistence: PolledQueryPersistence | undefined;
 
+/** The store the running persister writes, for clearing every namespace. */
+let activeStore: QueryCacheStore | undefined;
+
 /** A persister that does nothing, for server rendering and missing storage. */
 function inertPersistence(namespace: string): PolledQueryPersistence {
   return {
@@ -943,11 +953,11 @@ function inertPersistence(namespace: string): PolledQueryPersistence {
  * nothing is stored until this is called.
  *
  * On start it loads the namespace's records, drops those written under another
- * `version`, older than `maxAgeMs`, no longer matching `prefixes` or beyond
- * `maxEntries`, and puts the rest into the cache, where a query paints them at
+ * `version`, older than `maxAgeMs`, no longer matching `prefixes`, matching
+ * `exclude` or beyond `maxEntries`, and puts the rest into the cache, where a query paints them at
  * once and revalidates with the stored ETag through the usual conditional
- * read. Afterwards each successful read on a key matching `prefixes` is
- * written, with its ETag and read time, `writeDelayMs` later, and pending
+ * read. Afterwards each successful read on a key matching `prefixes` and not
+ * `exclude` is written, with its ETag and read time, `writeDelayMs` later, and pending
  * writes are flushed when the page is hidden.
  *
  * Only one persister runs at a time: a second call stops the first, which is
@@ -987,6 +997,9 @@ export function persistPolledQueryCache(
   }
   const store: QueryCacheStore = found;
   const prefixes = options.prefixes.map(prefixSegments);
+  const excluded = (options.exclude ?? []).map(prefixSegments);
+  const persisted = (key: string): boolean =>
+    matchesPrefix(key, prefixes) && !matchesPrefix(key, excluded);
   const limit = Math.max(0, Math.floor(maxEntries));
   const stored = new Map<string, number>();
   const dirty = new Set<string>();
@@ -1022,6 +1035,7 @@ export function persistPolledQueryCache(
     }
     if (activePersistence === persistence) {
       activePersistence = undefined;
+      activeStore = undefined;
     }
   };
 
@@ -1032,12 +1046,7 @@ export function persistPolledQueryCache(
 
   function onSettled(entry: CacheEntry): void {
     const key = entry.key;
-    if (
-      stopped ||
-      failed ||
-      key === undefined ||
-      !matchesPrefix(key, prefixes)
-    ) {
+    if (stopped || failed || key === undefined || !persisted(key)) {
       return;
     }
     dirty.add(key);
@@ -1063,7 +1072,7 @@ export function persistPolledQueryCache(
         if (
           record.version !== version ||
           now - record.fetchedAt > maxAgeMs ||
-          !matchesPrefix(record.key, prefixes)
+          !persisted(record.key)
         ) {
           drop.push(record.key);
         } else {
@@ -1161,6 +1170,7 @@ export function persistPolledQueryCache(
 
   settledObserver = onSettled;
   activePersistence = persistence;
+  activeStore = store;
   window.addEventListener('pagehide', onPageHide);
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', onHidden);
@@ -1192,6 +1202,72 @@ export async function clearPersistedPolledQueries(
     await target?.clear(namespace);
   } catch {
     return;
+  }
+}
+
+/** Deletes every namespace a store holds, through `clearAll` or each namespace. */
+async function clearEveryNamespace(store: QueryCacheStore): Promise<void> {
+  if (store.clearAll !== undefined) {
+    await store.clearAll();
+    return;
+  }
+  if (store.listNamespaces === undefined) {
+    return;
+  }
+  for (const namespace of await store.listNamespaces()) {
+    await store.clear(namespace);
+  }
+}
+
+/**
+ * Deletes every persisted entry in every namespace, for sign-out when the
+ * namespaces in use are not all known, such as after workspace switches.
+ * Stops the running persister and clears its store as well as `store`, which
+ * defaults to the IndexedDB store. A custom store needs `clearAll` or
+ * `listNamespaces` for this to reach it. Does nothing during server rendering
+ * or without IndexedDB, and never rejects. Call it alongside
+ * {@link clearPolledQueryCache}.
+ */
+export async function clearAllPersistedPolledQueries(
+  store?: QueryCacheStore
+): Promise<void> {
+  const running = activePersistence;
+  const runningStore = activeStore;
+  running?.stop();
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const targets = new Set<QueryCacheStore>();
+  if (runningStore !== undefined) {
+    targets.add(runningStore);
+  }
+  const target = store ?? createIndexedDbQueryStore();
+  if (target !== undefined) {
+    targets.add(target);
+  }
+  await running?.ready;
+  for (const each of targets) {
+    await clearEveryNamespace(each).catch(() => undefined);
+  }
+}
+
+/**
+ * Every namespace holding persisted entries, in `store` or the IndexedDB store
+ * by default. Resolves to an empty list during server rendering, without
+ * IndexedDB, for a custom store without `listNamespaces`, or on any storage
+ * failure. Never rejects.
+ */
+export async function listPersistedNamespaces(
+  store?: QueryCacheStore
+): Promise<string[]> {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  const target = store ?? createIndexedDbQueryStore();
+  try {
+    return (await target?.listNamespaces?.()) ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -1360,6 +1436,7 @@ export function usePolledQuery<T>(
   const idlePolls = useRef(0);
   const scheduledDelay = useRef(0);
   const dirty = useRef(false);
+  const reconnected = useRef(false);
   const runRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   /** Sets `data`, keeping the ref the 304 path compares against in step. */
@@ -1520,6 +1597,7 @@ export function usePolledQuery<T>(
 
     const attempt = (async (): Promise<void> => {
       let owned = false;
+      let failed = false;
       try {
         const outcome = await Promise.race([pending, cutoff]);
         if (superseded()) {
@@ -1533,6 +1611,7 @@ export function usePolledQuery<T>(
         if (superseded()) {
           return;
         }
+        failed = true;
         failures.current += 1;
         setError(thrown);
       } finally {
@@ -1552,8 +1631,13 @@ export function usePolledQuery<T>(
         }
       }
       if (owned && settings.current.enabled) {
-        if (dirty.current) {
+        const retry = failed && reconnected.current;
+        reconnected.current = false;
+        if (dirty.current || retry) {
           dirty.current = false;
+          if (retry) {
+            failures.current = 0;
+          }
           await runRef.current();
           return;
         }
@@ -1801,6 +1885,30 @@ export function usePolledQuery<T>(
       }
     };
   }, [enabled, refetchOnFocus, refetchOnVisible, clearTimer, run]);
+
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    return subscribeToOnline((online) => {
+      if (!online) {
+        return;
+      }
+      const current = settings.current;
+      if (
+        current.refetchOnVisible &&
+        current.hiddenIntervalMs <= 0 &&
+        !documentVisible()
+      ) {
+        return;
+      }
+      if (inFlight.current !== undefined) {
+        reconnected.current = true;
+        return;
+      }
+      void refetch();
+    });
+  }, [enabled, refetch]);
 
   useEffect(() => {
     if (!enabled || idleAfterMs <= 0) {

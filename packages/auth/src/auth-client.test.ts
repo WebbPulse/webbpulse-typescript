@@ -1,5 +1,10 @@
-import { ApiError, createApiClient } from '@webbpulse/api-client';
-import { describe, expect, it, vi, type Mock } from 'vitest';
+import {
+  ApiError,
+  ApiNetworkError,
+  createApiClient,
+  reportNetworkSuccess,
+} from '@webbpulse/api-client';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { AuthClient, createAuthClient, type AuthState } from './auth-client.js';
 import { AuthSessionEndedError } from './errors.js';
@@ -1416,5 +1421,203 @@ describe('AuthClient boot race', () => {
     await domainCall;
 
     expect(bearerFor(fetchMock, '/api/cars')).toBe('Bearer a2');
+  });
+});
+
+describe('AuthClient offline refresh', () => {
+  afterEach(() => {
+    reportNetworkSuccess();
+  });
+
+  /** A signed in client whose refresh fails at the network layer first. */
+  async function signedInWithOfflineRefresh(
+    afterOutage: (call: number) => Response | Error,
+    options: Partial<Parameters<typeof createAuthClient<User>>[0]> = {}
+  ): Promise<{ auth: AuthClient<User>; fetchMock: Mock }> {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/refresh': (call) =>
+        call === 0 ? new TypeError('Failed to fetch') : afterOutage(call),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => Promise.resolve(ALICE),
+      ...options,
+    });
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    return { auth, fetchMock };
+  }
+
+  it('keeps the session through a refresh that failed offline', async () => {
+    const onSessionEnded = vi.fn();
+    const { auth } = await signedInWithOfflineRefresh(
+      () => jsonResponse({ access_token: 'a2', expires_in: 600 }),
+      { onSessionEnded }
+    );
+
+    await expect(auth.refresh()).resolves.toBeNull();
+
+    expect(onSessionEnded).not.toHaveBeenCalled();
+    expect(auth.getState()).toMatchObject({
+      status: 'authenticated',
+      user: ALICE,
+      hasAccessToken: true,
+      error: expect.any(ApiNetworkError),
+      sessionEnded: null,
+    });
+    expect(auth.getAccessToken()).toBe('a1');
+  });
+
+  it('refreshes once the connection returns', async () => {
+    const { auth, fetchMock } = await signedInWithOfflineRefresh(() =>
+      jsonResponse({ access_token: 'a2', expires_in: 600 })
+    );
+
+    await auth.refresh();
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+
+    reportNetworkSuccess();
+
+    await vi.waitFor(() => {
+      expect(auth.getAccessToken()).toBe('a2');
+    });
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+    expect(auth.getState()).toMatchObject({
+      status: 'authenticated',
+      hasAccessToken: true,
+      error: null,
+    });
+  });
+
+  it('ends the session when the retry is refused', async () => {
+    const onSessionEnded = vi.fn();
+    const { auth } = await signedInWithOfflineRefresh(
+      () => envelope(401, 'SESSION_REVOKED'),
+      { onSessionEnded }
+    );
+
+    await auth.refresh();
+    reportNetworkSuccess();
+
+    await vi.waitFor(() => {
+      expect(auth.getState().status).toBe('anonymous');
+    });
+    expect(auth.getAccessToken()).toBeNull();
+    expect(onSessionEnded).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the held token at its expiry while offline', async () => {
+    const scheduled: { handler: () => void; ms: number }[] = [];
+    const { auth } = await signedInWithOfflineRefresh(
+      () => jsonResponse({ access_token: 'a2', expires_in: 600 }),
+      {
+        setTimeoutImpl: (handler, ms) => {
+          scheduled.push({ handler, ms });
+          return scheduled.length;
+        },
+        clearTimeoutImpl: () => undefined,
+      }
+    );
+
+    await auth.refresh();
+    const expiry = scheduled.at(-1);
+    expect(expiry?.ms).toBeGreaterThan(590_000);
+    expect(expiry?.ms).toBeLessThanOrEqual(600_000);
+
+    expiry?.handler();
+
+    expect(auth.getAccessToken()).toBeNull();
+    expect(auth.getState()).toMatchObject({
+      status: 'authenticated',
+      user: ALICE,
+      hasAccessToken: false,
+    });
+  });
+
+  it('stops waiting once disposed', async () => {
+    const { auth, fetchMock } = await signedInWithOfflineRefresh(() =>
+      jsonResponse({ access_token: 'a2', expires_in: 600 })
+    );
+
+    await auth.refresh();
+    auth.dispose();
+    reportNetworkSuccess();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+  });
+
+  it('runs the startup refresh again once the connection returns', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/refresh': (call) =>
+        call === 0
+          ? new TypeError('Failed to fetch')
+          : jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => Promise.resolve(ALICE),
+    });
+
+    await expect(auth.initialize()).resolves.toBeNull();
+    expect(auth.getState().status).toBe('anonymous');
+
+    reportNetworkSuccess();
+
+    await vi.waitFor(() => {
+      expect(auth.getState().status).toBe('authenticated');
+    });
+    expect(auth.getAccessToken()).toBe('a1');
+  });
+
+  it('does not rerun the startup refresh after a sign in', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/refresh': () => new TypeError('Failed to fetch'),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => Promise.resolve(ALICE),
+    });
+
+    await auth.initialize();
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    reportNetworkSuccess();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+  });
+
+  it('leaves a pending MFA challenge alone on reconnect', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({
+          mfa_required: true,
+          mfa_ticket: 't1',
+          factors: ['totp'],
+        }),
+      '/api/auth/refresh': () => new TypeError('Failed to fetch'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.initialize();
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+    reportNetworkSuccess();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+    expect(auth.getState().pendingMfa).toMatchObject({ ticket: 't1' });
+  });
+
+  it('still ends the session on a refused startup refresh', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/refresh': () => envelope(401, 'INVALID_TOKEN'),
+    });
+    const auth = authWith(fetchMock);
+
+    await auth.initialize();
+    reportNetworkSuccess();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
   });
 });

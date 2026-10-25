@@ -72,6 +72,20 @@ describe('createIndexedDbQueryStore', () => {
     expect(await store.load('one')).toEqual([record('b')]);
   });
 
+  it('lists every namespace once and clears them all', async () => {
+    const store = indexedDbStore();
+    expect(await store.listNamespaces()).toEqual([]);
+    await store.save('one', [record('a'), record('b')]);
+    await store.save('two', [record('a')]);
+
+    expect((await store.listNamespaces()).sort()).toEqual(['one', 'two']);
+
+    await store.clearAll();
+    expect(await store.listNamespaces()).toEqual([]);
+    expect(await store.load('one')).toEqual([]);
+    expect(await store.load('two')).toEqual([]);
+  });
+
   it('rejects a value that cannot be cloned without losing the store', async () => {
     const store = indexedDbStore();
     await store.save('ns', [record('a')]);
@@ -104,6 +118,19 @@ describe('createMemoryQueryCacheStore', () => {
 
     expect(await store.load('one')).toEqual([record('a')]);
     expect(await store.load('two')).toEqual([]);
+  });
+
+  it('lists only namespaces holding records and clears them all', async () => {
+    const store = createMemoryQueryCacheStore();
+    await store.save('one', [record('a')]);
+    await store.save('two', [record('a')]);
+    await store.remove('two', ['a']);
+
+    expect(await store.listNamespaces()).toEqual(['one']);
+
+    await store.clearAll();
+    expect(await store.listNamespaces()).toEqual([]);
+    expect(await store.load('one')).toEqual([]);
   });
 });
 
