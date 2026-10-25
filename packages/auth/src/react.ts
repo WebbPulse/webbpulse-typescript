@@ -1168,9 +1168,7 @@ export function useStepUp(
   const gate = useStepUpGate(client);
   const proactive = useProactiveStepUpGate(
     client,
-    options.mode === 'proactive'
-      ? { lockoutFallbackSeconds: options.lockoutFallbackSeconds }
-      : {}
+    options.mode === 'proactive' ? options : {}
   );
   return options.mode === 'proactive' ? proactive : gate;
 }
