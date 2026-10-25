@@ -504,6 +504,11 @@ root.render(<App />);
   start with one of `prefixes`, compared the way `serializeQueryKey` compares
   keys, so `'issues'` covers `['issues', 'open']` but not `'issues-archive'`.
   Keep anything sensitive out of the list.
+- **`exclude` carves keys out.** `exclude` takes prefixes read the same way,
+  and a key matching one is never written even under a listed prefix, so
+  `prefixes: ['members'], exclude: [['members', 'directory']]` persists the
+  member list without the admin directory. A stored record on an excluded key
+  is dropped on load.
 - **Writes are debounced.** Each settled read is written `writeDelayMs` later
   (1 second by default), in one batch, and pending writes flush on `pagehide`
   and when the page is hidden. `flush()` writes them now.
@@ -522,6 +527,14 @@ root.render(<App />);
   `clearPersistedPolledQueries(namespace)` from code that does not hold the
   persister. Both stop writes before they delete, so a read settling during
   sign out is not written back. They never reject.
+- **Or clear every namespace.** `clearAllPersistedPolledQueries()` stops the
+  running persister and deletes every namespace in its store and in the
+  IndexedDB store, so sign out does not need to remember each workspace it
+  persisted. `listPersistedNamespaces()` lists the namespaces held. Both take
+  an optional `store`, never reject, and resolve to nothing or an empty list
+  during server rendering or without IndexedDB. A custom `QueryCacheStore`
+  needs the optional `clearAll` or `listNamespaces` methods for these to reach
+  it; both built-in stores implement them.
 - **One persister at a time.** A second call stops the first, which is how a
   workspace switch moves to a new namespace. Call `clearPolledQueryCache()`
   as well when the switch should not paint the old workspace's data.
@@ -539,6 +552,13 @@ browser `online` event. `navigator.onLine` being false also reads offline. The
 client reports both sides itself; a fetcher that calls `fetch` directly can call
 `reportNetworkFailure()` and `reportNetworkSuccess()` from the root entry, and
 `isOnline()` with `subscribeToOnline(listener)` serve code outside React.
+
+Every mounted, enabled `usePolledQuery` refetches as soon as the signal flips
+from offline to online, whether from a browser `online` event or a response
+that proves the network is back, instead of waiting out its interval or error
+backoff. A query with an attempt in flight lets it finish and goes again at
+once only when it fails. A query paused in a hidden document waits for the
+document to become visible, as usual.
 
 ## Testing
 
@@ -589,7 +609,8 @@ and `QUERY_CACHE_DATABASE_NAME` with the types `PersistedQuery`,
 `DEFAULT_MAX_IDLE_INTERVAL_MS`, `DEFAULT_IDLE_BACKOFF_MULTIPLIER`,
 `DEFAULT_CACHE_TIME_MS` and `IF_NONE_MATCH_HEADER`, the cache controls
 `clearPolledQueryCache` and `prefetchPolledQuery`, the persister
-`persistPolledQueryCache` and `clearPersistedPolledQueries` with the
+`persistPolledQueryCache`, `clearPersistedPolledQueries`,
+`clearAllPersistedPolledQueries` and `listPersistedNamespaces` with the
 `DEFAULT_PERSIST_*` constants, `useOnline`, the errors `PolledQueryTimeoutError` and
 `PolledQueryNotModifiedError`, `polledResponse` with the class
 `PolledResponse`, the activity tracker `subscribeToActivity` and `idleForMs`,

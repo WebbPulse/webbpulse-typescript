@@ -49,6 +49,28 @@ token is an httpOnly cookie scoped to `Path=/api/auth`, so every call sets
   behind the gateway authorizer resolves. Passing your own `client` option opts
   out of that: give it a `getAuthToken` of your own.
 
+### Offline
+
+The token never touches storage, so a reload with no connection cannot restore
+a session: the refresh cookie is only usable by reaching the refresh endpoint.
+What the client does instead, from the online signal in `@webbpulse/api-client`:
+
+- **An offline reload renders anonymous and tries again.** The startup refresh
+  failing at the network layer resolves `initialize` to null with the error in
+  `error`, then runs the startup refresh again once the connection returns,
+  unless a sign-in or an MFA challenge has started since.
+- **Going offline mid-session is not a sign-out.** A refresh that fails at the
+  network layer, such as the proactive one, keeps the user and status, records
+  the `ApiNetworkError` in `error` and fires no `onSessionEnded`. The held token
+  is dropped at its expiry, so `hasAccessToken` turns false and an expired token
+  is never sent. The refresh runs again when the connection returns; a refusal
+  then ends the session as usual.
+- **Timeouts and server errors are unchanged.** Only `ApiNetworkError` holds
+  the session. A refresh endpoint that fails at the network layer while the rest
+  of the API answers, such as a CORS fault, keeps the session held with every
+  authenticated call answering 401 until the refresh succeeds.
+- **`SessionManager` is unchanged**: any refresh failure leaves it anonymous.
+
 ## Which flag a route guard gates on
 
 `status` moves to `'loading'` for the duration of every session call, so a guard

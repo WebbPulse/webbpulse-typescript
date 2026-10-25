@@ -8,7 +8,10 @@
 
 import {
   ApiError,
+  ApiNetworkError,
   createApiClient,
+  isOnline,
+  subscribeToOnline,
   type ApiClient,
   type ApiClientOptions,
 } from '@webbpulse/api-client';
@@ -593,6 +596,14 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   /** The single in-flight startup refresh, so `initialize` is idempotent. */
   private initializePromise: Promise<TUser | null> | null = null;
   private proactiveTimer: unknown = null;
+  /** When the held access token expires, in epoch milliseconds, or null. */
+  private tokenExpiresAt: number | null = null;
+  /** Drops the held token at its expiry while a refresh waits out an outage. */
+  private expiryTimer: unknown = null;
+  /** Stops waiting for the connection to return before retrying a refresh. */
+  private stopReconnectWait: (() => void) | null = null;
+  /** Whether the session is being kept through a refresh that failed offline. */
+  private holdingThroughOutage = false;
   private disposed = false;
 
   private state: AuthState<TUser> = {
@@ -700,7 +711,12 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * disagree with it about whether a session exists.
    */
   private adoptToken(token: string, expiresIn: number | undefined): void {
+    this.cancelOutageHold();
     this.accessToken = token;
+    this.tokenExpiresAt =
+      expiresIn !== undefined && Number.isFinite(expiresIn) && expiresIn > 0
+        ? Date.now() + expiresIn * 1000
+        : null;
     this.scheduleProactiveRefresh(expiresIn);
   }
 
@@ -711,8 +727,93 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * again.
    */
   private clearToken(): void {
+    this.cancelOutageHold();
+    this.holdingThroughOutage = false;
     this.accessToken = null;
+    this.tokenExpiresAt = null;
     this.cancelProactiveRefresh();
+  }
+
+  /**
+   * Keeps a live session through a refresh that failed at the network layer,
+   * so going offline is not a sign-out. The user and status stay, the held
+   * token is dropped at its expiry so an expired token is never sent, and the
+   * refresh runs again as soon as the connection returns, where a 401 ends the
+   * session as usual.
+   */
+  private holdThroughOutage(error: ApiNetworkError): void {
+    this.holdingThroughOutage = true;
+    this.setState({ error });
+    if (this.disposed) {
+      return;
+    }
+    this.armExpiryDrop();
+    this.waitForReconnect(() => {
+      void this.refresh().catch(() => undefined);
+    });
+  }
+
+  /** Drops the held token once it expires, keeping the user and status. */
+  private armExpiryDrop(): void {
+    if (this.expiryTimer !== null || this.tokenExpiresAt === null) {
+      return;
+    }
+    const drop = (): void => {
+      this.expiryTimer = null;
+      this.accessToken = null;
+      this.tokenExpiresAt = null;
+      this.cancelProactiveRefresh();
+      this.setState({ hasAccessToken: false });
+    };
+    const remaining = this.tokenExpiresAt - Date.now();
+    if (remaining <= 0) {
+      drop();
+      return;
+    }
+    const setTimeoutImpl =
+      this.options.setTimeoutImpl ??
+      ((handler: () => void, ms: number) => globalThis.setTimeout(handler, ms));
+    this.expiryTimer = setTimeoutImpl(drop, remaining);
+  }
+
+  /**
+   * Runs `retry` once, the next time the online signal from
+   * `@webbpulse/api-client` flips back to online, or at once when it already
+   * reads online. Replaces any earlier wait.
+   */
+  private waitForReconnect(retry: () => void): void {
+    this.stopReconnectWait?.();
+    if (isOnline()) {
+      this.stopReconnectWait = null;
+      queueMicrotask(retry);
+      return;
+    }
+    const unsubscribe = subscribeToOnline((online) => {
+      if (!online) {
+        return;
+      }
+      unsubscribe();
+      if (this.stopReconnectWait === unsubscribe) {
+        this.stopReconnectWait = null;
+      }
+      retry();
+    });
+    this.stopReconnectWait = unsubscribe;
+  }
+
+  /** Cancels the expiry drop and the wait for the connection to return. */
+  private cancelOutageHold(): void {
+    this.stopReconnectWait?.();
+    this.stopReconnectWait = null;
+    if (this.expiryTimer === null) {
+      return;
+    }
+    const clearTimeoutImpl =
+      this.options.clearTimeoutImpl ??
+      ((handle: unknown) =>
+        globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
+    clearTimeoutImpl(this.expiryTimer);
+    this.expiryTimer = null;
   }
 
   private scheduleProactiveRefresh(expiresIn: number | undefined): void {
@@ -757,6 +858,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   dispose(): void {
     this.disposed = true;
     this.cancelProactiveRefresh();
+    this.cancelOutageHold();
     this.listeners.clear();
   }
 
@@ -764,7 +866,9 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * The silent refresh on load. A valid cookie signs the user in with no login
    * screen and anything else renders anonymous, resolving rather than rejecting
    * because no session is an expected answer at startup. Idempotent, so
-   * StrictMode's double mount makes one request.
+   * StrictMode's double mount makes one request. A refresh that failed at the
+   * network layer, as on an offline reload, runs again once the connection
+   * returns, unless a sign-in has started or happened since.
    */
   async initialize(): Promise<TUser | null> {
     if (this.initializePromise !== null) {
@@ -778,7 +882,22 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
           return null;
         }
         return await this.settleAuthenticated(undefined);
-      } catch {
+      } catch (error) {
+        if (
+          error instanceof AuthSessionEndedError &&
+          error.cause instanceof ApiNetworkError &&
+          !this.disposed
+        ) {
+          this.waitForReconnect(() => {
+            if (
+              this.state.status === 'anonymous' &&
+              this.state.pendingMfa === null &&
+              this.accessToken === null
+            ) {
+              void this.initialize();
+            }
+          });
+        }
         return null;
       } finally {
         this.initializePromise = null;
@@ -837,8 +956,20 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
           ? response.data.expires_in
           : undefined;
       this.adoptToken(token, expiresIn);
+      if (this.holdingThroughOutage) {
+        this.holdingThroughOutage = false;
+        this.setState({ hasAccessToken: true, error: null });
+      }
       return token;
     } catch (error) {
+      if (
+        !opts.startup &&
+        error instanceof ApiNetworkError &&
+        this.state.status === 'authenticated'
+      ) {
+        this.holdThroughOutage(error);
+        throw error;
+      }
       const code = getAuthErrorCode(error);
       const ended = new AuthSessionEndedError({
         message:
