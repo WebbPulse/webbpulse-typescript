@@ -1,5 +1,16 @@
 # @webbpulse/auth
 
+## 0.27.0
+
+### Minor Changes
+
+- eb7ff23: Keep the session through a refresh that fails at the network layer: the user and status stay, the token is dropped at its expiry, and the refresh runs again when the connection returns. A startup refresh that failed offline runs again on reconnect (PLAT-93).
+
+### Patch Changes
+
+- Updated dependencies [eb7ff23]
+  - @webbpulse/api-client@0.22.0
+
 ## 0.26.1
 
 ### Patch Changes
