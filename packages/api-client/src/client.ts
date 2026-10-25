@@ -6,6 +6,7 @@ import {
   apiErrorFromResponse,
   retryAfterFromHeaders,
 } from './errors.js';
+import { reportNetworkFailure, reportNetworkSuccess } from './online.js';
 import { joinUrl, serializeQuery, type QueryParams } from './query.js';
 
 /** Header the API returns carrying the per request uuid7 correlation id. */
@@ -468,6 +469,7 @@ export class ApiClient {
           ...(timedOut ? { timeoutMs } : {}),
         });
       }
+      reportNetworkFailure();
       throw new ApiNetworkError({ url, method, cause: error });
     } finally {
       if (timer !== undefined) {
@@ -478,6 +480,7 @@ export class ApiClient {
       }
     }
 
+    reportNetworkSuccess();
     const responseRequestId =
       response.headers.get(REQUEST_ID_HEADER) ?? undefined;
 

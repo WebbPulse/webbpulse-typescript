@@ -47,3 +47,17 @@ export {
   type QueryParams,
   type QueryValue,
 } from './query.js';
+export {
+  isOnline,
+  reportNetworkFailure,
+  reportNetworkSuccess,
+  subscribeToOnline,
+} from './online.js';
+export {
+  createIndexedDbQueryStore,
+  createMemoryQueryCacheStore,
+  QUERY_CACHE_DATABASE_NAME,
+  type IndexedDbQueryStoreOptions,
+  type PersistedQuery,
+  type QueryCacheStore,
+} from './persist.js';
