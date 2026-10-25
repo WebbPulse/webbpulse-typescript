@@ -2,7 +2,7 @@ import { ApiError, StepUpRequiredError } from '@webbpulse/api-client';
 import { useMutationWithRefetch } from '@webbpulse/api-client/react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { describe, expect, it, vi, type Mock } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { AuthState } from './auth-client.js';
 import { StepUpCancelledError } from './errors.js';
@@ -425,5 +425,332 @@ describe('useStepUp', () => {
 
     expect(result.current.mutation.error).toBeNull();
     expect(result.current.mutation.isMutating).toBe(false);
+  });
+});
+
+function refusal(reason: string, extra: Record<string, unknown> = {}) {
+  return {
+    ok: false,
+    reason,
+    code: undefined,
+    message: `refused: ${reason}`,
+    ...extra,
+  };
+}
+
+function proactive(client: AnyAuthClient, lockoutFallbackSeconds?: number) {
+  return renderHook(
+    () =>
+      useStepUp(
+        lockoutFallbackSeconds === undefined
+          ? { mode: 'proactive' }
+          : { mode: 'proactive', lockoutFallbackSeconds }
+      ),
+    { wrapper: wrapperFor(client) }
+  );
+}
+
+describe('useStepUp proactive mode', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('starts idle', () => {
+    const { client } = stubClient();
+    const { result } = proactive(client);
+
+    expect(result.current).toMatchObject({
+      stage: 'idle',
+      pending: false,
+      error: null,
+      locked: false,
+      lockedFor: 0,
+    });
+  });
+
+  it('proves with a passkey and no parked request', async () => {
+    const { client, stepUpWithPasskey } = stubClient();
+    const { result } = proactive(client);
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.prove({ passkey: true });
+    });
+
+    expect(ok).toBe(true);
+    expect(stepUpWithPasskey).toHaveBeenCalledWith({});
+    expect(result.current.stage).toBe('done');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('passes the abort signal to the passkey step-up', async () => {
+    const { client, stepUpWithPasskey } = stubClient();
+    const { result } = proactive(client);
+    const signal = new AbortController().signal;
+
+    await act(async () => {
+      await result.current.prove({ passkey: true, signal });
+    });
+
+    expect(stepUpWithPasskey).toHaveBeenCalledWith({ signal });
+  });
+
+  it.each(['no-passkeys', 'unsupported', 'cancelled'])(
+    'moves to the code stage with no error on %s',
+    async (reason) => {
+      const { client } = stubClient(refusal(reason));
+      const { result } = proactive(client);
+
+      let ok = true;
+      await act(async () => {
+        ok = await result.current.prove({ passkey: true });
+      });
+
+      expect(ok).toBe(false);
+      expect(result.current.stage).toBe('code');
+      expect(result.current.error).toBeNull();
+    }
+  );
+
+  it('moves to the code stage and shows a passkey refusal', async () => {
+    const outcome = refusal('rejected');
+    const { client } = stubClient(outcome);
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ passkey: true });
+    });
+
+    expect(result.current.stage).toBe('code');
+    expect(result.current.error).toEqual(outcome);
+  });
+
+  it('moves to the code stage when the passkey step-up throws', async () => {
+    const { client, stepUpWithPasskey } = stubClient();
+    stepUpWithPasskey.mockRejectedValueOnce(new Error('no adapter'));
+    const { result } = proactive(client);
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.prove({ passkey: true });
+    });
+
+    expect(ok).toBe(false);
+    expect(result.current.stage).toBe('code');
+    expect(result.current.pending).toBe(false);
+    expect(result.current.error).toBeInstanceOf(Error);
+    expect(result.current.error?.message).toBe('no adapter');
+  });
+
+  it('proves with a code after the passkey falls back', async () => {
+    const { client, stepUp, stepUpWithPasskey } = stubClient();
+    stepUpWithPasskey.mockResolvedValueOnce(refusal('no-passkeys'));
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ passkey: true });
+    });
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.prove({ code: '123456' });
+    });
+
+    expect(ok).toBe(true);
+    expect(stepUp).toHaveBeenCalledWith({ code: '123456' });
+    expect(result.current.stage).toBe('done');
+  });
+
+  it('keeps the stage on a wrong code and shows the refusal', async () => {
+    const outcome = refusal('invalid-code');
+    const { client } = stubClient(outcome);
+    const { result } = proactive(client);
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.prove({ code: '000000' });
+    });
+
+    expect(ok).toBe(false);
+    expect(result.current.stage).toBe('idle');
+    expect(result.current.error).toEqual(outcome);
+  });
+
+  it('proves with a password', async () => {
+    const { client, stepUp } = stubClient();
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ password: 'hunter2' });
+    });
+
+    expect(stepUp).toHaveBeenCalledWith({ password: 'hunter2' });
+    expect(result.current.stage).toBe('done');
+  });
+
+  it('ignores a second prove while one is in flight', async () => {
+    const { client, stepUp } = stubClient();
+    let release!: (value: unknown) => void;
+    stepUp.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    const { result } = proactive(client);
+
+    let first!: Promise<boolean>;
+    act(() => {
+      first = result.current.prove({ code: '123456' });
+    });
+    expect(result.current.pending).toBe(true);
+
+    let second = true;
+    await act(async () => {
+      second = await result.current.prove({ code: '123456' });
+    });
+    expect(second).toBe(false);
+
+    await act(async () => {
+      release({ ok: true, expiresIn: 600 });
+      await first;
+    });
+    expect(stepUp).toHaveBeenCalledTimes(1);
+    expect(result.current.stage).toBe('done');
+  });
+
+  it('skip marks the step-up done without a request', () => {
+    const { client, stepUp, stepUpWithPasskey } = stubClient();
+    const { result } = proactive(client);
+
+    act(() => {
+      result.current.skip();
+    });
+
+    expect(result.current.stage).toBe('done');
+    expect(stepUp).not.toHaveBeenCalled();
+    expect(stepUpWithPasskey).not.toHaveBeenCalled();
+  });
+
+  it('reset returns to idle and clears the error', async () => {
+    const { client } = stubClient(refusal('rejected'));
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ passkey: true });
+    });
+    act(() => {
+      result.current.reset();
+    });
+
+    expect(result.current.stage).toBe('idle');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('locks codes for the retry wait on a rate-limited code', async () => {
+    vi.useFakeTimers();
+    const outcome = refusal('rate-limited', { retryAfter: 90 });
+    const { client, stepUp } = stubClient(outcome);
+    const { result } = proactive(client);
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.prove({ code: '000000' });
+    });
+
+    expect(ok).toBe(false);
+    expect(result.current.locked).toBe(true);
+    expect(result.current.lockedFor).toBe(90);
+    expect(result.current.error).toEqual(outcome);
+
+    let blocked = true;
+    await act(async () => {
+      blocked = await result.current.prove({ code: '123456' });
+    });
+    expect(blocked).toBe(false);
+    expect(stepUp).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(result.current.lockedFor).toBe(60);
+
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(result.current.locked).toBe(false);
+    expect(result.current.lockedFor).toBe(0);
+    expect(result.current.error).toBeNull();
+  });
+
+  it('uses the fallback wait when the lockout names none', async () => {
+    vi.useFakeTimers();
+    const { client } = stubClient(
+      refusal('rate-limited', { retryAfter: undefined })
+    );
+    const { result } = proactive(client, 120);
+
+    await act(async () => {
+      await result.current.prove({ code: '000000' });
+    });
+
+    expect(result.current.locked).toBe(true);
+    expect(result.current.lockedFor).toBe(120);
+  });
+
+  it('defaults the fallback wait to 60 seconds', async () => {
+    vi.useFakeTimers();
+    const { client } = stubClient(
+      refusal('rate-limited', { retryAfter: undefined })
+    );
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ code: '000000' });
+    });
+
+    expect(result.current.lockedFor).toBe(60);
+  });
+
+  it('still allows a passkey while codes are locked', async () => {
+    vi.useFakeTimers();
+    const { client, stepUp, stepUpWithPasskey } = stubClient();
+    stepUp.mockResolvedValueOnce(refusal('rate-limited', { retryAfter: 60 }));
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ code: '000000' });
+    });
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.prove({ passkey: true });
+    });
+
+    expect(ok).toBe(true);
+    expect(stepUpWithPasskey).toHaveBeenCalledTimes(1);
+    expect(result.current.stage).toBe('done');
+    expect(result.current.error).toBeNull();
+  });
+
+  it('does not lock on a rate-limited passkey', async () => {
+    const outcome = refusal('rate-limited', { retryAfter: 60 });
+    const { client } = stubClient(outcome);
+    const { result } = proactive(client);
+
+    await act(async () => {
+      await result.current.prove({ passkey: true });
+    });
+
+    expect(result.current.locked).toBe(false);
+    expect(result.current.stage).toBe('code');
+    expect(result.current.error).toEqual(outcome);
+  });
+
+  it('leaves the reactive gate unchanged by default', () => {
+    const { client } = stubClient();
+    const { result } = renderHook(() => useStepUp({ mode: 'reactive' }), {
+      wrapper: wrapperFor(client),
+    });
+
+    expect(result.current).toMatchObject({ open: false, maxAge: null });
+    expect(typeof result.current.withStepUp).toBe('function');
   });
 });
