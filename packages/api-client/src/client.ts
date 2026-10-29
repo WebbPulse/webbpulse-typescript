@@ -6,7 +6,11 @@ import {
   apiErrorFromResponse,
   retryAfterFromHeaders,
 } from './errors.js';
-import { reportNetworkFailure, reportNetworkSuccess } from './online.js';
+import {
+  reportNetworkFailure,
+  reportNetworkSuccess,
+  type ReachabilityProbe,
+} from './online.js';
 import { joinUrl, serializeQuery, type QueryParams } from './query.js';
 
 /** Header the API returns carrying the per request uuid7 correlation id. */
@@ -139,7 +143,18 @@ export interface ApiClientOptions {
   generateRequestId?: () => string;
   /** Injected for tests. Defaults to `globalThis.fetch`. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Path, resolved against `baseUrl`, or absolute URL that the shared
+   * reachability signal probes after this client hits a network failure. Any
+   * HTTP answer proves the network, so it need not exist. In a browser the
+   * probe is a credential-free `no-cors` GET, so CORS and auth never get in the
+   * way. Defaults to `'/'`. Null makes this client supply no probe.
+   */
+  probePath?: string | null;
 }
+
+/** Ceiling on how long one reachability probe waits for an answer. */
+const PROBE_TIMEOUT_MS = 10_000;
 
 /** Request headers that make a 304 an answer rather than a failure. */
 const CONDITIONAL_HEADERS = ['if-none-match', 'if-modified-since'];
@@ -247,12 +262,42 @@ export class ApiClient {
   readonly baseUrl: string;
   private readonly options: ApiClientOptions;
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly probe: ReachabilityProbe | undefined;
 
   constructor(options: ApiClientOptions) {
     this.options = options;
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     const impl = options.fetch ?? globalThis.fetch;
     this.fetchImpl = impl.bind(globalThis);
+    const probePath = options.probePath === undefined ? '/' : options.probePath;
+    this.probe =
+      probePath === null ? undefined : () => this.sendProbe(probePath);
+  }
+
+  /**
+   * One reachability probe: a GET that resolves on any HTTP answer and rejects
+   * on a network failure or after {@link PROBE_TIMEOUT_MS}.
+   */
+  private async sendProbe(probePath: string): Promise<void> {
+    const url = /^https?:\/\//i.test(probePath)
+      ? probePath
+      : joinUrl(this.baseUrl, probePath);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+    const init: RequestInit = {
+      method: 'GET',
+      credentials: 'omit',
+      signal: controller.signal,
+    };
+    if (typeof window !== 'undefined') {
+      init.mode = 'no-cors';
+      init.cache = 'no-store';
+    }
+    try {
+      await this.fetchImpl(url, init);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -469,7 +514,7 @@ export class ApiClient {
           ...(timedOut ? { timeoutMs } : {}),
         });
       }
-      reportNetworkFailure();
+      reportNetworkFailure(this.probe);
       throw new ApiNetworkError({ url, method, cause: error });
     } finally {
       if (timer !== undefined) {

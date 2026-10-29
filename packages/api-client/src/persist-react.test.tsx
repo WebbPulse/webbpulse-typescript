@@ -1,11 +1,12 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { IDBFactory } from 'fake-indexeddb';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   clearAllPersistedPolledQueries,
   clearPersistedPolledQueries,
   clearPolledQueryCache,
+  configureReachability,
   createIndexedDbQueryStore,
   createMemoryQueryCacheStore,
   listPersistedNamespaces,
@@ -102,12 +103,17 @@ function failingStore(fail: 'load' | 'save'): QueryCacheStore {
   };
 }
 
+beforeEach(() => {
+  configureReachability({ graceMs: 0, probe: false });
+});
+
 afterEach(() => {
   cleanup();
   running?.stop();
   running = undefined;
   clearPolledQueryCache();
   reportNetworkSuccess();
+  configureReachability();
 });
 
 describe('persistPolledQueryCache', () => {

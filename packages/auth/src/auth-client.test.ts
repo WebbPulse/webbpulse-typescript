@@ -1,10 +1,19 @@
 import {
   ApiError,
   ApiNetworkError,
+  configureReachability,
   createApiClient,
   reportNetworkSuccess,
 } from '@webbpulse/api-client';
-import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
 
 import { AuthClient, createAuthClient, type AuthState } from './auth-client.js';
 import { AuthSessionEndedError } from './errors.js';
@@ -1520,7 +1529,7 @@ describe('AuthClient offline refresh', () => {
     );
 
     await auth.refresh();
-    const expiry = scheduled.at(-1);
+    const expiry = scheduled.find(({ ms }) => ms > 30_000);
     expect(expiry?.ms).toBeGreaterThan(590_000);
     expect(expiry?.ms).toBeLessThanOrEqual(600_000);
 
@@ -1606,6 +1615,145 @@ describe('AuthClient offline refresh', () => {
 
     expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
     expect(auth.getState().pendingMfa).toMatchObject({ ticket: 't1' });
+  });
+
+  describe('backoff', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      configureReachability({ probe: false });
+    });
+
+    afterEach(() => {
+      reportNetworkSuccess();
+      configureReachability();
+      vi.useRealTimers();
+    });
+
+    it('retries a refresh that failed offline with backoff on its own', async () => {
+      const { auth, fetchMock } = await signedInWithOfflineRefresh((call) =>
+        call < 3
+          ? new TypeError('Failed to fetch')
+          : jsonResponse({ access_token: 'a2', expires_in: 600 })
+      );
+
+      await auth.refresh();
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(4);
+
+      await vi.waitFor(() => {
+        expect(auth.getAccessToken()).toBe('a2');
+      });
+      expect(auth.getState()).toMatchObject({
+        status: 'authenticated',
+        hasAccessToken: true,
+        error: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(4);
+    });
+
+    it('caps the wait at refreshRetryMaxMs', async () => {
+      const { auth, fetchMock } = await signedInWithOfflineRefresh(
+        () => new TypeError('Failed to fetch'),
+        { refreshRetryBaseMs: 100, refreshRetryMaxMs: 250 }
+      );
+
+      await auth.refresh();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(5);
+
+      auth.dispose();
+    });
+
+    it('stops retrying once a retry is refused', async () => {
+      const { auth, fetchMock } = await signedInWithOfflineRefresh(() =>
+        envelope(401, 'SESSION_REVOKED')
+      );
+
+      await auth.refresh();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => {
+        expect(auth.getState().status).toBe('anonymous');
+      });
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+    });
+
+    it('stops retrying on sign-out', async () => {
+      const fetchMock = routedFetch({
+        '/api/auth/login': () =>
+          jsonResponse({ access_token: 'a1', expires_in: 600 }),
+        '/api/auth/logout': () => new Response(null, { status: 204 }),
+        '/api/auth/refresh': () => new TypeError('Failed to fetch'),
+      });
+      const auth = authWith(fetchMock, {
+        loadUser: () => Promise.resolve(ALICE),
+      });
+      await auth.login({ email: 'a@b.test', password: 'pw' });
+
+      await auth.refresh();
+      await auth.logout();
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(1);
+    });
+
+    it('retries at once when the network answers again', async () => {
+      const { auth, fetchMock } = await signedInWithOfflineRefresh(() =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 })
+      );
+
+      await auth.refresh();
+      reportNetworkSuccess();
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.waitFor(() => {
+        expect(auth.getAccessToken()).toBe('a2');
+      });
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+    });
+
+    it('retries the startup refresh with backoff', async () => {
+      const fetchMock = routedFetch({
+        '/api/auth/refresh': (call) =>
+          call < 2
+            ? new TypeError('Failed to fetch')
+            : jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      });
+      const auth = authWith(fetchMock, {
+        loadUser: () => Promise.resolve(ALICE),
+      });
+
+      await auth.initialize();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(3);
+      await vi.waitFor(() => {
+        expect(auth.getState().status).toBe('authenticated');
+      });
+    });
   });
 
   it('still ends the session on a refused startup refresh', async () => {

@@ -1,8 +1,9 @@
 import { IDBFactory } from 'fake-indexeddb';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createApiClient } from './client.js';
 import {
+  configureReachability,
   isOnline,
   reportNetworkFailure,
   reportNetworkSuccess,
@@ -135,6 +136,15 @@ describe('createMemoryQueryCacheStore', () => {
 });
 
 describe('online signal', () => {
+  beforeEach(() => {
+    configureReachability({ graceMs: 0, probe: false });
+  });
+
+  afterEach(() => {
+    reportNetworkSuccess();
+    configureReachability();
+  });
+
   it('goes offline on a network failure and back on a response', () => {
     reportNetworkSuccess();
     const seen: boolean[] = [];
