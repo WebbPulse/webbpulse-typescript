@@ -20,6 +20,17 @@ import {
   subscribeToOnline,
 } from './online.js';
 
+/** The URL a fetch call was made with. */
+function urlOf(input: string | URL | Request | undefined): string {
+  if (input === undefined) {
+    return '';
+  }
+  if (typeof input === 'string') {
+    return input;
+  }
+  return input instanceof URL ? input.href : input.url;
+}
+
 /** A probe that fails until `answer` is called. */
 function controllableProbe(): {
   probe: Mock<() => Promise<unknown>>;
@@ -292,7 +303,7 @@ describe('reachability window events', () => {
 describe('client probe', () => {
   it('probes the configured path after a network failure', async () => {
     const fetchImpl = vi.fn<typeof fetch>((url) =>
-      String(url).endsWith('/health')
+      urlOf(url).endsWith('/health')
         ? Promise.resolve(new Response(null, { status: 404 }))
         : Promise.reject(new TypeError('Failed to fetch'))
     );
@@ -309,9 +320,7 @@ describe('client probe', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(String(fetchImpl.mock.calls[1]?.[0])).toBe(
-      'https://api.test/health'
-    );
+    expect(urlOf(fetchImpl.mock.calls[1]?.[0])).toBe('https://api.test/health');
     expect(fetchImpl.mock.calls[1]?.[1]).toMatchObject({
       method: 'GET',
       credentials: 'omit',
@@ -335,7 +344,7 @@ describe('client probe', () => {
     await expect(client.get('/x')).rejects.toThrow();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(String(fetchImpl.mock.calls[1]?.[0])).toBe('https://api.test/');
+    expect(urlOf(fetchImpl.mock.calls[1]?.[0])).toBe('https://api.test/');
   });
 
   it('does not probe with a null probePath', async () => {
