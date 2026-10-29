@@ -57,14 +57,20 @@ What the client does instead, from the online signal in `@webbpulse/api-client`:
 
 - **An offline reload renders anonymous and tries again.** The startup refresh
   failing at the network layer resolves `initialize` to null with the error in
-  `error`, then runs the startup refresh again once the connection returns,
-  unless a sign-in or an MFA challenge has started since.
+  `error`, then runs the startup refresh again with backoff, unless a sign-in
+  or an MFA challenge has started since.
 - **Going offline mid-session is not a sign-out.** A refresh that fails at the
   network layer, such as the proactive one, keeps the user and status, records
   the `ApiNetworkError` in `error` and fires no `onSessionEnded`. The held token
   is dropped at its expiry, so `hasAccessToken` turns false and an expired token
-  is never sent. The refresh runs again when the connection returns; a refusal
-  then ends the session as usual.
+  is never sent. The refresh runs again on its own; a refusal then ends the
+  session as usual.
+- **Retries back off on their own.** A refresh that failed at the network layer
+  is retried after `refreshRetryBaseMs` (default 1000), doubling each time up to
+  `refreshRetryMaxMs` (default 30000), with no call from the app. It also runs
+  at once when the shared reachability signal in `@webbpulse/api-client` sees
+  the network answer again. Retrying stops on success, on sign-out, on
+  `dispose()` and on any failure that is not at the network layer, such as a 401.
 - **Timeouts and server errors are unchanged.** Only `ApiNetworkError` holds
   the session. A refresh endpoint that fails at the network layer while the rest
   of the API answers, such as a CORS fault, keeps the session held with every

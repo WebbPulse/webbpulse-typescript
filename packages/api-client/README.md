@@ -546,12 +546,48 @@ root.render(<App />);
 
 ## Online status
 
-`useOnline()` from the React entry reads `false` once a request fails at the
-network layer, and `true` again on the next response of any status or a
-browser `online` event. `navigator.onLine` being false also reads offline. The
-client reports both sides itself; a fetcher that calls `fetch` directly can call
-`reportNetworkFailure()` and `reportNetworkSuccess()` from the root entry, and
-`isOnline()` with `subscribeToOnline(listener)` serve code outside React.
+`useOnline()` from the React entry reads `false` only once the API has been
+unreachable for a grace period, so one dropped request after a laptop wakes
+does not flash an offline notice. `navigator.onLine` being false reads offline
+at once. `isOnline()` with `subscribeToOnline(listener)` serve code outside
+React.
+
+How a spell of trouble runs:
+
+- A request that fails at the network layer starts it. The API is probed at
+  once, then again after 1s, 2s, 4s and so on, capped at 30s.
+- Any response or probe answer, of any status, ends it at once with no offline
+  reading. A blip is usually disproved in under a second.
+- Trouble that lasts the grace period, 15s by default, reads offline until a
+  response or probe answers.
+- Window focus, the document turning visible and a browser `online` event probe
+  at once and restart the backoff. The focus and visibility listeners exist only
+  while there is trouble, and every timer is cleared when it ends.
+
+Each client supplies its own probe: a credential-free GET of `probePath`,
+resolved against `baseUrl` (default `'/'`), sent as `no-cors` in a browser so
+CORS and auth never matter. Any HTTP answer counts, so the path need not exist.
+Set `probePath: null` for a client that should supply no probe. A fetcher that
+calls `fetch` directly can call `reportNetworkFailure(probe?)` and
+`reportNetworkSuccess()` from the root entry.
+
+`configureReachability(options)` tunes the shared signal once at startup.
+Options left out return to their defaults, so a bare call resets it.
+
+| Option        | Default | Meaning                                                 |
+| ------------- | ------- | ------------------------------------------------------- |
+| `graceMs`     | `15000` | How long trouble lasts before reading offline.          |
+| `probeBaseMs` | `1000`  | The wait before the second probe, doubled each failure. |
+| `probeMaxMs`  | `30000` | The cap on the wait between probes.                     |
+| `probe`       | `true`  | Whether to probe at all.                                |
+
+`{ graceMs: 0, probe: false }` restores the behaviour before 0.23: offline on
+the first failure, online on the next response or `online` event. Tests that
+assert on offline reads usually want it in `beforeEach`, with
+`reportNetworkSuccess()` and `configureReachability()` in `afterEach`.
+`probeReachabilityNow()` probes at once when there is trouble, and
+`subscribeToNetworkRecovery(listener)` hears each spell end, whether or not it
+lasted long enough to read offline.
 
 Every mounted, enabled `usePolledQuery` refetches as soon as the signal flips
 from offline to online, whether from a browser `online` event or a response
@@ -598,7 +634,11 @@ Register the file under `test.setupFiles` in the vitest config.
 `EnvelopeOptions`, and the refetch bus `invalidateQueries`,
 `subscribeToRefetch` and `serializeQueryKey` with the types `QueryKey`,
 `QueryKeyPart` and `Unsubscribe`, the online signal `isOnline`,
-`subscribeToOnline`, `reportNetworkFailure` and `reportNetworkSuccess`, and the
+`subscribeToOnline`, `reportNetworkFailure`, `reportNetworkSuccess`,
+`configureReachability`, `probeReachabilityNow` and
+`subscribeToNetworkRecovery` with the constants `DEFAULT_OFFLINE_GRACE_MS`,
+`DEFAULT_PROBE_BASE_MS` and `DEFAULT_PROBE_MAX_MS` and the types
+`ReachabilityOptions` and `ReachabilityProbe`, and the
 persistence stores `createIndexedDbQueryStore`, `createMemoryQueryCacheStore`
 and `QUERY_CACHE_DATABASE_NAME` with the types `PersistedQuery`,
 `QueryCacheStore` and `IndexedDbQueryStoreOptions`.

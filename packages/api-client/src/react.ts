@@ -2089,8 +2089,9 @@ export function useMutationWithRefetch<TArgs extends unknown[], TResult>(
 /**
  * Whether the app is online, re-rendering when it changes: `navigator.onLine`
  * combined with the client's network failures, so a request that cannot reach
- * the API flips it to false until a response arrives or the browser fires
- * `online`. Reads true during server rendering.
+ * the API flips it to false once the trouble outlasts the reachability grace
+ * period, until a response or probe answers. Reads true during server
+ * rendering.
  */
 export function useOnline(): boolean {
   return useSyncExternalStore(subscribeToOnline, isOnline, () => true);
@@ -2098,10 +2099,18 @@ export function useOnline(): boolean {
 
 export { idleForMs, subscribeToActivity } from './activity.js';
 export {
+  configureReachability,
+  DEFAULT_OFFLINE_GRACE_MS,
+  DEFAULT_PROBE_BASE_MS,
+  DEFAULT_PROBE_MAX_MS,
   isOnline,
+  probeReachabilityNow,
   reportNetworkFailure,
   reportNetworkSuccess,
+  subscribeToNetworkRecovery,
   subscribeToOnline,
+  type ReachabilityOptions,
+  type ReachabilityProbe,
 } from './online.js';
 export {
   createIndexedDbQueryStore,

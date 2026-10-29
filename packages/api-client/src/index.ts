@@ -48,10 +48,18 @@ export {
   type QueryValue,
 } from './query.js';
 export {
+  configureReachability,
+  DEFAULT_OFFLINE_GRACE_MS,
+  DEFAULT_PROBE_BASE_MS,
+  DEFAULT_PROBE_MAX_MS,
   isOnline,
+  probeReachabilityNow,
   reportNetworkFailure,
   reportNetworkSuccess,
+  subscribeToNetworkRecovery,
   subscribeToOnline,
+  type ReachabilityOptions,
+  type ReachabilityProbe,
 } from './online.js';
 export {
   createIndexedDbQueryStore,

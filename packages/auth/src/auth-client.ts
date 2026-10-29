@@ -10,8 +10,7 @@ import {
   ApiError,
   ApiNetworkError,
   createApiClient,
-  isOnline,
-  subscribeToOnline,
+  subscribeToNetworkRecovery,
   type ApiClient,
   type ApiClientOptions,
 } from '@webbpulse/api-client';
@@ -295,6 +294,14 @@ export interface AuthClientOptions<TUser = unknown> {
    * open.
    */
   disableProactiveRefresh?: boolean;
+  /**
+   * The wait before retrying a refresh that failed at the network layer,
+   * doubled after each further failure. Defaults to 1000. The retry also runs
+   * at once when the shared reachability signal sees the network answer again.
+   */
+  refreshRetryBaseMs?: number;
+  /** The cap on the wait between those retries. Defaults to 30000. */
+  refreshRetryMaxMs?: number;
   /** WebAuthn adapter. Defaults to `navigator.credentials` when present. */
   webAuthn?: WebAuthnAdapter;
   /**
@@ -602,6 +609,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   private expiryTimer: unknown = null;
   /** Stops waiting for the connection to return before retrying a refresh. */
   private stopReconnectWait: (() => void) | null = null;
+  /** Network retries since the last refresh that reached the server. */
+  private reconnectAttempts = 0;
   /** Whether the session is being kept through a refresh that failed offline. */
   private holdingThroughOutage = false;
   private disposed = false;
@@ -712,6 +721,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    */
   private adoptToken(token: string, expiresIn: number | undefined): void {
     this.cancelOutageHold();
+    this.reconnectAttempts = 0;
     this.accessToken = token;
     this.tokenExpiresAt =
       expiresIn !== undefined && Number.isFinite(expiresIn) && expiresIn > 0
@@ -738,8 +748,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * Keeps a live session through a refresh that failed at the network layer,
    * so going offline is not a sign-out. The user and status stay, the held
    * token is dropped at its expiry so an expired token is never sent, and the
-   * refresh runs again as soon as the connection returns, where a 401 ends the
-   * session as usual.
+   * refresh runs again with backoff, or at once when the network answers again,
+   * until it succeeds or a refusal ends the session as usual.
    */
   private holdThroughOutage(error: ApiNetworkError): void {
     this.holdingThroughOutage = true;
@@ -777,28 +787,43 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   }
 
   /**
-   * Runs `retry` once, the next time the online signal from
-   * `@webbpulse/api-client` flips back to online, or at once when it already
-   * reads online. Replaces any earlier wait.
+   * Runs `retry` once, after a backoff of `refreshRetryBaseMs` doubled per
+   * earlier attempt up to `refreshRetryMaxMs`, or sooner when the shared
+   * reachability signal from `@webbpulse/api-client` sees the network answer.
+   * Replaces any earlier wait.
    */
   private waitForReconnect(retry: () => void): void {
     this.stopReconnectWait?.();
-    if (isOnline()) {
-      this.stopReconnectWait = null;
-      queueMicrotask(retry);
-      return;
-    }
-    const unsubscribe = subscribeToOnline((online) => {
-      if (!online) {
-        return;
-      }
+    const base = this.options.refreshRetryBaseMs ?? 1_000;
+    const max = this.options.refreshRetryMaxMs ?? 30_000;
+    const delayMs = Math.min(max, base * 2 ** this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    const setTimeoutImpl =
+      this.options.setTimeoutImpl ??
+      ((handler: () => void, ms: number) => globalThis.setTimeout(handler, ms));
+    const clearTimeoutImpl =
+      this.options.clearTimeoutImpl ??
+      ((handle: unknown) =>
+        globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
+    let timer: unknown = null;
+    let unsubscribe: () => void = () => undefined;
+    const stop = (): void => {
       unsubscribe();
-      if (this.stopReconnectWait === unsubscribe) {
+      if (timer !== null) {
+        clearTimeoutImpl(timer);
+        timer = null;
+      }
+      if (this.stopReconnectWait === stop) {
         this.stopReconnectWait = null;
       }
+    };
+    const fire = (): void => {
+      stop();
       retry();
-    });
-    this.stopReconnectWait = unsubscribe;
+    };
+    unsubscribe = subscribeToNetworkRecovery(fire);
+    timer = setTimeoutImpl(fire, delayMs);
+    this.stopReconnectWait = stop;
   }
 
   /** Cancels the expiry drop and the wait for the connection to return. */
@@ -867,8 +892,8 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    * screen and anything else renders anonymous, resolving rather than rejecting
    * because no session is an expected answer at startup. Idempotent, so
    * StrictMode's double mount makes one request. A refresh that failed at the
-   * network layer, as on an offline reload, runs again once the connection
-   * returns, unless a sign-in has started or happened since.
+   * network layer, as on an offline reload, runs again with backoff or once the
+   * network answers, unless a sign-in has started or happened since.
    */
   async initialize(): Promise<TUser | null> {
     if (this.initializePromise !== null) {
@@ -1518,6 +1543,7 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
     const path =
       options.everywhere === true ? this.paths.logoutAll : this.paths.logout;
     const headers = this.authorizationHeader();
+    this.cancelOutageHold();
     this.setState({ status: 'loading', error: null });
     try {
       await this.client.post(path, undefined, { retries: 0, headers });

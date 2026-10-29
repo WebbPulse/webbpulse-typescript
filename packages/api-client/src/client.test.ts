@@ -1,6 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient, REQUEST_ID_HEADER, createApiClient } from './client.js';
 import { ApiError, ApiNetworkError, ApiTimeoutError } from './errors.js';
+import { configureReachability, reportNetworkSuccess } from './online.js';
+
+beforeEach(() => {
+  configureReachability({ probe: false });
+});
+
+afterEach(() => {
+  reportNetworkSuccess();
+  configureReachability();
+});
 
 const BASE = 'https://api.example.com';
 
