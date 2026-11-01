@@ -1,5 +1,12 @@
 # @webbpulse/auth
 
+## 0.31.0
+
+### Minor Changes
+
+- 0bd6c6e: Adds `APPLE_PROVIDER` for Sign in with Apple (PLAT-107), the server provider added in `webbpulse` 0.111.0. Every OAuth method already takes a plain string provider, so nothing else changes. `providerLabel` in `@webbpulse/discovery` already renders it as `Apple`.
+- b9907ac: Hold desktop handoff state across a browser sign-in (PLAT-105). `createDesktopHandoffVerifierStore` is a single-use, expiring holder for the app side's PKCE verifier, in memory by default or in local storage with a `storageKey` for a shell the operating system can stop. `createDesktopHandoffReturnStore` keeps the handoff page's request across a mailed link and only answers paths on that page. `isDesktopHandoffCallback` matches a callback with or without a usable code.
+
 ## 0.30.0
 
 ### Minor Changes
