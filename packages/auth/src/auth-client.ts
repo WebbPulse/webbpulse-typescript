@@ -165,6 +165,14 @@ export interface AuthMfaRequired {
 /** What {@link AuthClient.login} resolves to. */
 export type LoginOutcome<TUser> = AuthSuccess<TUser> | AuthMfaRequired;
 
+/**
+ * What {@link AuthClient.signUp} resolves to. `signedIn` is false when the route
+ * issued no session, which is also its neutral answer for a taken address.
+ */
+export type SignUpOutcome<TUser> =
+  | { signedIn: true; user: TUser | null; expiresIn: number | undefined }
+  | { signedIn: false };
+
 /** Credentials for a password login. */
 export interface PasswordCredentials {
   email: string;
@@ -1053,6 +1061,30 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
   async register(body: Record<string, unknown>): Promise<unknown> {
     const response = await this.client.post<unknown>(this.paths.register, body);
     return response.data;
+  }
+
+  /**
+   * Registers an account and adopts the session when the route issues one, for a
+   * backend on `unverified_sessions`. No refresh is spent, since the response
+   * already holds the token. A refused registration rejects, so the form can
+   * render the reason.
+   */
+  async signUp(body: Record<string, unknown>): Promise<SignUpOutcome<TUser>> {
+    const response = await this.client.post<TokenResponseBody>(
+      this.paths.register,
+      body,
+      { retries: 0 }
+    );
+    const data = response.data;
+    const token = data.access_token;
+    if (typeof token !== 'string' || token === '') {
+      return { signedIn: false };
+    }
+    const expiresIn =
+      typeof data.expires_in === 'number' ? data.expires_in : undefined;
+    this.adoptToken(token, expiresIn);
+    const user = await this.settleAuthenticated(data.user as TUser | undefined);
+    return { signedIn: true, user, expiresIn };
   }
 
   /** Completes an MFA login with a TOTP code. */
@@ -2329,6 +2361,27 @@ export class AuthClient<TUser = unknown> implements AuthTokenProvider {
    */
   setUser(user: TUser): void {
     this.setState({ user });
+  }
+
+  /**
+   * Rotates the access token and then re-reads the user, for a server side change
+   * that a token claim carries, such as a confirmed address. The order matters:
+   * a page that mounts on the fresh profile must already hold a token the API
+   * accepts, which {@link reloadUser} alone would leave stale.
+   *
+   * Resolves to null without a request when this client holds no session, so a
+   * link opened on another device neither ends nor announces anything. A failed
+   * rotation resolves to null as {@link refresh} does.
+   */
+  async refreshSession(): Promise<TUser | null> {
+    if (this.accessToken === null) {
+      return null;
+    }
+    const token = await this.refresh();
+    if (token === null) {
+      return null;
+    }
+    return this.reloadUser();
   }
 
   /**

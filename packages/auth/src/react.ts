@@ -18,6 +18,7 @@ import type { AuthClient, AuthState } from './auth-client.js';
 import {
   readLinkToken,
   VERIFY_EMAIL_PATH,
+  type EmailRequestOutcome,
   type LinkRefused,
 } from './email-flows.js';
 import type { AuthSessionEndedError } from './errors.js';
@@ -408,6 +409,12 @@ export interface UseAuthResult<TUser> extends AuthState<TUser> {
    * 401 ends the session the way a failed refresh does.
    */
   reloadUser: AuthClient<TUser>['reloadUser'];
+  /**
+   * Rotates the token and then re-reads the user, for a server side change a
+   * token claim carries. Resolves to null without a request when no session is
+   * held.
+   */
+  refreshSession: AuthClient<TUser>['refreshSession'];
   /** The in-memory access token, or null. Rarely needed in a component. */
   getAccessToken: () => string | null;
 }
@@ -435,6 +442,7 @@ const AUTH_METHOD_NAMES = [
   'logout',
   'setUser',
   'reloadUser',
+  'refreshSession',
   'getAccessToken',
 ] as const;
 
@@ -632,7 +640,11 @@ export interface EmailVerificationLinkOptions {
   expectedPath?: string;
   /** The URL to read the token from. Defaults to the current location. */
   url?: string;
-  /** Called once after a confirmed address, to re-read the user record. */
+  /**
+   * Called once after a confirmed address. Call `client.refreshSession()` here on
+   * a backend whose token carries `email_verified`, since `reloadUser` leaves the
+   * old claim in the token.
+   */
   onConfirmed?: () => void | Promise<void>;
 }
 
@@ -648,7 +660,12 @@ export interface EmailVerificationLinkOptions {
  *
  * @example
  * ```tsx
- * const state = useEmailVerificationLink({ client, onConfirmed: checkAuthStatus });
+ * const state = useEmailVerificationLink({
+ *   client,
+ *   onConfirmed: async () => {
+ *     await client?.refreshSession();
+ *   },
+ * });
  * if (state.kind === 'refused') return <Alert message={state.message} />;
  * ```
  */
@@ -702,6 +719,170 @@ export function useEmailVerificationLink(
   }, []);
 
   return state;
+}
+
+/** How often {@link useEmailVerificationWatch} checks by default. */
+export const EMAIL_VERIFICATION_WATCH_INTERVAL_MS = 30_000;
+
+/** Options for {@link useEmailVerificationWatch}. */
+export interface EmailVerificationWatchOptions {
+  /** The client whose session to refresh. Null watches nothing. */
+  client: AuthClient<unknown> | null;
+  /**
+   * Whether the server now says the address is confirmed, read from the product's
+   * own profile route. A rejection counts as not yet.
+   */
+  isVerified: () => Promise<boolean>;
+  /** False stops the watch. Defaults to true. */
+  enabled?: boolean;
+  /** Milliseconds between timed checks. */
+  intervalMs?: number;
+}
+
+/**
+ * Picks up an address confirmed on another device or in another tab. It checks on
+ * an interval and when the page regains focus or visibility, skips a hidden page
+ * and an overlapping check, and calls `client.refreshSession` once `isVerified`
+ * resolves true. A failed check waits for the next one. Nothing runs on mount.
+ *
+ * @example
+ * ```tsx
+ * useEmailVerificationWatch({
+ *   client,
+ *   enabled: user?.email_verified === false,
+ *   isVerified: async () => (await fetchProfile()).email_verified === true,
+ * });
+ * ```
+ */
+export function useEmailVerificationWatch(
+  options: EmailVerificationWatchOptions
+): void {
+  const {
+    client,
+    enabled = true,
+    intervalMs = EMAIL_VERIFICATION_WATCH_INTERVAL_MS,
+  } = options;
+  const latest = useRef(options);
+  latest.current = options;
+
+  useEffect(() => {
+    if (client === null || !enabled) {
+      return undefined;
+    }
+    let checking = false;
+
+    const check = async (): Promise<void> => {
+      if (checking || document.visibilityState !== 'visible') {
+        return;
+      }
+      checking = true;
+      try {
+        if (await latest.current.isVerified()) {
+          await client.refreshSession();
+        }
+      } finally {
+        checking = false;
+      }
+    };
+    const run = (): void => {
+      check().catch(() => undefined);
+    };
+
+    const timer = window.setInterval(run, intervalMs);
+    window.addEventListener('focus', run);
+    document.addEventListener('visibilitychange', run);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', run);
+      document.removeEventListener('visibilitychange', run);
+    };
+  }, [client, enabled, intervalMs]);
+}
+
+/** How long {@link useEmailVerificationResend} waits between sends by default. */
+export const EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60;
+
+/** Options for {@link useEmailVerificationResend}. */
+export interface EmailVerificationResendOptions {
+  /** The client to send with. Null makes `send` resolve null without a request. */
+  client: AuthClient<unknown> | null;
+  /** Seconds to wait after an accepted send. */
+  cooldownSeconds?: number;
+}
+
+/** What {@link useEmailVerificationResend} returns. */
+export interface EmailVerificationResend {
+  /**
+   * Requests another link and starts the cooldown when it is accepted. Resolves
+   * null without a request while one is in flight or the cooldown runs. A network
+   * failure rejects.
+   */
+  send: (email: string) => Promise<EmailRequestOutcome | null>;
+  /** Whether a request is in flight. */
+  sending: boolean;
+  /** Seconds left in the cooldown, zero when a send is allowed. */
+  remaining: number;
+}
+
+/**
+ * A resend control's mechanics without its copy: the request, the in-flight guard
+ * and the countdown. `send` is stable across renders.
+ *
+ * @example
+ * ```tsx
+ * const { send, sending, remaining } = useEmailVerificationResend({ client });
+ * <button disabled={sending || remaining > 0} onClick={() => void send(email)} />
+ * ```
+ */
+export function useEmailVerificationResend(
+  options: EmailVerificationResendOptions
+): EmailVerificationResend {
+  const [sending, setSending] = useState(false);
+  const [remaining, setRemaining] = useState(0);
+  const inFlight = useRef(false);
+  const remainingNow = useRef(0);
+  remainingNow.current = remaining;
+  const latest = useRef(options);
+  latest.current = options;
+
+  useEffect(() => {
+    if (remaining <= 0) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setRemaining((seconds) => seconds - 1);
+    }, 1000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [remaining]);
+
+  const send = useCallback(
+    async (email: string): Promise<EmailRequestOutcome | null> => {
+      const { client, cooldownSeconds } = latest.current;
+      if (client === null || inFlight.current || remainingNow.current > 0) {
+        return null;
+      }
+      inFlight.current = true;
+      setSending(true);
+      try {
+        const outcome = await client.requestEmailVerification({ email });
+        if (outcome.ok) {
+          const seconds =
+            cooldownSeconds ?? EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS;
+          remainingNow.current = seconds;
+          setRemaining(seconds);
+        }
+        return outcome;
+      } finally {
+        inFlight.current = false;
+        setSending(false);
+      }
+    },
+    []
+  );
+
+  return { send, sending, remaining };
 }
 
 /**

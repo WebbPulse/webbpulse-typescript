@@ -276,6 +276,56 @@ describe('useAuth', () => {
     expect(client.getAccessToken()).toBe('a1');
   });
 
+  it('exposes refreshSession, which rotates the token and re-renders', async () => {
+    const BOB: User = { id: 'u_1', email: 'bob@example.test' };
+    let loads = 0;
+    const { client, fetchMock } = clientWith(
+      (call) => jsonResponse({ access_token: `a${call + 1}`, expires_in: 600 }),
+      () => {
+        loads += 1;
+        return Promise.resolve(loads === 1 ? ALICE : BOB);
+      }
+    );
+
+    function Refresher(): React.ReactNode {
+      const { user, refreshSession } = useAuth<User>();
+      return (
+        <div>
+          <span data-testid="email">{user?.email ?? 'none'}</span>
+          <button
+            type="button"
+            onClick={() => {
+              void refreshSession();
+            }}
+          >
+            refresh
+          </button>
+        </div>
+      );
+    }
+
+    render(
+      <AuthProvider client={client as unknown as AnyAuthClient}>
+        <Refresher />
+      </AuthProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('email').textContent).toBe(ALICE.email);
+    });
+    const tokenBefore = client.getAccessToken();
+    const callsBefore = fetchMock.mock.calls.length;
+
+    act(() => {
+      screen.getByRole('button', { name: 'refresh' }).click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('email').textContent).toBe(BOB.email);
+    });
+    expect(fetchMock.mock.calls.length).toBe(callsBefore + 1);
+    expect(client.getAccessToken()).not.toBe(tokenBefore);
+  });
+
   it('keeps its methods stable across state changes', async () => {
     const seen: (() => unknown)[] = [];
     function Capture(): React.ReactNode {
