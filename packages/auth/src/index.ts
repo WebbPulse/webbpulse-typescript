@@ -120,6 +120,7 @@ export {
   type TotpEnrolmentStarted,
 } from './mfa.js';
 export {
+  APPLE_PROVIDER,
   GITHUB_PROVIDER,
   GOOGLE_PROVIDER,
   OAUTH_CALLBACK_PARAMS,
