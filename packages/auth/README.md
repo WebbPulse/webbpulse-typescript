@@ -932,7 +932,7 @@ email flows, and reports refusals as outcomes rather than throwing.
   `isHandoffSchemeAllowed`, `isDesktopHandoffChallenge`,
   `isDesktopHandoffVerifier`, `classifyDesktopHandoffError`, and the
   `DESKTOP_HANDOFF_*` constants.
-- OAuth: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`, `readOAuthCallback`,
+- OAuth: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`, `APPLE_PROVIDER`, `readOAuthCallback`,
   `stripOAuthParams`, `parseOAuthLinks`, `describeOAuthCallbackError`,
   `classifyOAuthError`, and the `OAUTH_*` parameter constants.
 - Passkeys: `passkeysSupported`, `conditionalMediationAvailable`,

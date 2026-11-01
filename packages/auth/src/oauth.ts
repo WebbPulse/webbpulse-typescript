@@ -26,6 +26,13 @@ export const GOOGLE_PROVIDER = 'google';
 export const GITHUB_PROVIDER = 'github';
 
 /**
+ * Sign in with Apple, which a product turns on with its Apple configuration. The
+ * browser flow is the same as the baseline providers: the server handles Apple's
+ * form post and comes back through the ordinary callback redirect.
+ */
+export const APPLE_PROVIDER = 'apple';
+
+/**
  * The query parameter a successful sign-in callback lands with. The value
  * carries no information; the session itself is in the cookie.
  */
