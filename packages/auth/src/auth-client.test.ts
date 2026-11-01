@@ -690,6 +690,123 @@ describe('AuthClient.setUser', () => {
   });
 });
 
+describe('AuthClient.signUp', () => {
+  it('adopts an issued session without spending a refresh', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/register': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600, user: ALICE }),
+    });
+    const auth = authWith(fetchMock);
+
+    await expect(
+      auth.signUp({ email: 'a@b.test', password: 'pw' })
+    ).resolves.toEqual({ signedIn: true, user: ALICE, expiresIn: 600 });
+
+    expect(auth.getAccessToken()).toBe('a1');
+    expect(auth.getState().status).toBe('authenticated');
+    expect(callsTo(fetchMock, '/api/auth/refresh')).toHaveLength(0);
+  });
+
+  it('loads the user when the answer embeds none', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/register': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => Promise.resolve(ALICE),
+    });
+
+    await expect(
+      auth.signUp({ email: 'a@b.test', password: 'pw' })
+    ).resolves.toEqual({ signedIn: true, user: ALICE, expiresIn: 600 });
+  });
+
+  it('reports no session on the neutral answer', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/register': () => jsonResponse({ registered: true }),
+    });
+    const auth = authWith(fetchMock);
+
+    await expect(
+      auth.signUp({ email: 'a@b.test', password: 'pw' })
+    ).resolves.toEqual({ signedIn: false });
+
+    expect(auth.getAccessToken()).toBeNull();
+    expect(auth.getState().status).not.toBe('authenticated');
+  });
+
+  it('rejects a refused registration and holds no session', async () => {
+    const fetchMock = routedFetch({
+      '/api/auth/register': () => envelope(422, 'PASSWORD_REJECTED'),
+    });
+    const auth = authWith(fetchMock);
+
+    await expect(
+      auth.signUp({ email: 'a@b.test', password: 'pw' })
+    ).rejects.toThrow();
+
+    expect(auth.getAccessToken()).toBeNull();
+  });
+});
+
+describe('AuthClient.refreshSession', () => {
+  it('rotates the token before re-reading the user', async () => {
+    const BOB: User = { id: 'u_1', email: 'bob@example.test' };
+    const tokensSeenByLoad: (string | null)[] = [];
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/refresh': () =>
+        jsonResponse({ access_token: 'a2', expires_in: 600 }),
+    });
+    const auth: AuthClient<User> = authWith(fetchMock, {
+      loadUser: () => {
+        tokensSeenByLoad.push(auth.getAccessToken());
+        return Promise.resolve(tokensSeenByLoad.length === 1 ? ALICE : BOB);
+      },
+    });
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+
+    await expect(auth.refreshSession()).resolves.toBe(BOB);
+
+    expect(tokensSeenByLoad).toEqual(['a1', 'a2']);
+    expect(auth.getState().user).toBe(BOB);
+  });
+
+  it('sends nothing and ends nothing when no session is held', async () => {
+    const onSessionEnded = vi.fn();
+    const loadUser = vi.fn(() => Promise.resolve(ALICE));
+    const fetchMock = routedFetch({});
+    const auth = authWith(fetchMock, { loadUser, onSessionEnded });
+
+    await expect(auth.refreshSession()).resolves.toBeNull();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(loadUser).not.toHaveBeenCalled();
+    expect(onSessionEnded).not.toHaveBeenCalled();
+  });
+
+  it('skips the re-read when the rotation fails', async () => {
+    let loads = 0;
+    const fetchMock = routedFetch({
+      '/api/auth/login': () =>
+        jsonResponse({ access_token: 'a1', expires_in: 600 }),
+      '/api/auth/refresh': () => envelope(401, 'REFRESH_INVALID'),
+    });
+    const auth = authWith(fetchMock, {
+      loadUser: () => {
+        loads += 1;
+        return Promise.resolve(ALICE);
+      },
+    });
+    await auth.login({ email: 'a@b.test', password: 'pw' });
+
+    await expect(auth.refreshSession()).resolves.toBeNull();
+
+    expect(loads).toBe(1);
+  });
+});
+
 describe('AuthClient.reloadUser', () => {
   it('re-reads the user without touching the refresh route', async () => {
     const BOB: User = { id: 'u_1', email: 'bob@example.test' };

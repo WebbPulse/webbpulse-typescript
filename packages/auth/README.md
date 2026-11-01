@@ -109,12 +109,18 @@ waits on `!isBusy` as well, so it does not fire mid-login.
 ```ts
 auth.setUser(user); // no request, no rotation, leaves `status` alone
 await auth.reloadUser(); // re-reads through `loadUser`, rotates nothing
+await auth.refreshSession(); // rotates the token, then re-reads
 ```
 
 Use these rather than `refresh` after a profile edit: every rotation is a chance
 for the reuse detector to end a healthy session. A 401 from `reloadUser` ends
 the session as a failed refresh does and resolves to null; any other failure
 leaves the session alone and lands in `error`.
+
+Use `refreshSession` when a server side change is carried by a token claim, such
+as a confirmed address. It rotates first, so a page that mounts on the new profile
+already holds a token the API accepts. With no session held it resolves to null
+without a request.
 
 ## The session ending, from React
 
@@ -361,6 +367,35 @@ const token = readLinkToken({ expectedPath: RESET_PASSWORD_PATH });
 
 Refusal reasons: `invalid-link`, `password-rejected`, `rate-limited`,
 `unavailable`. These return outcomes rather than throwing.
+
+A backend on `unverified_sessions` signs a new account in before it is confirmed,
+and gates routes with `require_verified_email` in `webbpulse.identity`. The client
+side of that is:
+
+```ts
+const outcome = await auth.signUp({ email, password }); // adopts an issued session
+if (!outcome.signedIn) showCheckYourEmail(); // also the answer for a taken address
+
+import {
+  useEmailVerificationResend,
+  useEmailVerificationWatch,
+} from '@webbpulse/auth/react';
+
+useEmailVerificationWatch({
+  client,
+  enabled: user?.email_verified === false,
+  isVerified: async () => (await fetchProfile()).email_verified === true,
+});
+const { send, sending, remaining } = useEmailVerificationResend({ client });
+```
+
+- **`useEmailVerificationWatch` picks up a link opened elsewhere.** It checks every
+  30 seconds and on focus or visibility, skips a hidden page, and calls
+  `refreshSession` once the product's profile says verified.
+- **`useEmailVerificationResend` holds no copy.** It sends, guards the in-flight
+  request and counts down 60 seconds after an accepted send.
+- **Which routes an unconfirmed user may reach, and what they see, stay with the
+  product.**
 
 `paths`: `verifyEmail`, `verifyEmailConfirm`, `passwordReset`,
 `passwordResetConfirm`.
@@ -957,20 +992,26 @@ email flows, and reports refusals as outcomes rather than throwing.
   `parsePasskeys`, `parsePasskeyChallenge`, `classifyPasskeyError`.
 
 Types accompany each group, including `AuthClientOptions`, `AuthState`,
-`AuthStatus`, `AuthErrorCode`, `AuthPaths`, `LoginOutcome`, `MfaChallenge`,
+`AuthStatus`, `AuthErrorCode`, `AuthPaths`, `LoginOutcome`, `SignUpOutcome`,
+`MfaChallenge`,
 `PasswordCredentials`, `WebAuthnAdapter` and the outcome unions for every flow.
 
 `@webbpulse/auth/react`
 
 `AuthProvider`, `useAuth`, `useAuthClient`, `useAuthState`, `useSessionEnded`,
 `useOAuthCallback`, `usePasskeySignInSupport`, `usePasskeySignInButton`,
-`useOAuthProviderLinks`, `useEmailVerificationLink`, `useQueryAuth`,
-`useDismissedUntilSignIn`, `useStepUp`, `DISMISSAL_STORAGE_PREFIX`, and the
+`useOAuthProviderLinks`, `useEmailVerificationLink`,
+`useEmailVerificationWatch`, `useEmailVerificationResend`, `useQueryAuth`,
+`useDismissedUntilSignIn`, `useStepUp`, `DISMISSAL_STORAGE_PREFIX`,
+`EMAIL_VERIFICATION_WATCH_INTERVAL_MS`,
+`EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS`, and the
 deprecated `SessionProvider`, `useSession`, `useSessionState`,
 `useSessionManager`, with `AuthProviderProps`, `UseAuthResult`, `AnyAuthClient`,
 `PasskeySignInSupport`, `PasskeySignInSupportOptions`, `PasskeySignInButton`,
 `PasskeySignInButtonOptions`, `OAuthProviderLink`, `OAuthProviderLinksOptions`,
-`EmailVerificationLinkState`, `EmailVerificationLinkOptions`, `QueryAuth`,
+`EmailVerificationLinkState`, `EmailVerificationLinkOptions`,
+`EmailVerificationWatchOptions`, `EmailVerificationResendOptions`,
+`EmailVerificationResend`, `QueryAuth`,
 `DismissedUntilSignIn`, `StepUpGate`, `StepUpMethod`, `StepUpFailure`,
 `ProactiveStepUp`, `ProactiveStepUpOptions`, `ProactiveStepUpStage`,
 `ReactiveStepUpOptions`,

@@ -1,16 +1,22 @@
-import { render, waitFor } from '@testing-library/react';
+import { act, render, renderHook, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AuthClient } from './auth-client.js';
 import {
   VERIFY_EMAIL_PATH,
+  type EmailRequestOutcome,
   type EmailVerificationOutcome,
 } from './email-flows.js';
 import {
+  EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+  EMAIL_VERIFICATION_WATCH_INTERVAL_MS,
   useEmailVerificationLink,
+  useEmailVerificationResend,
+  useEmailVerificationWatch,
   type EmailVerificationLinkOptions,
   type EmailVerificationLinkState,
+  type EmailVerificationWatchOptions,
 } from './react.js';
 
 const LANDING = `https://app.example.test${VERIFY_EMAIL_PATH}?token=tok_123`;
@@ -247,5 +253,308 @@ describe('useEmailVerificationLink', () => {
     await waitFor(() => {
       expect(confirm).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/** Lets a timer or event's promises settle inside React's act. */
+async function advance(ms: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
+describe('useEmailVerificationWatch', () => {
+  type RefreshSession = AuthClient<unknown>['refreshSession'];
+  let visibility: DocumentVisibilityState;
+
+  function setup(overrides: Partial<EmailVerificationWatchOptions> = {}) {
+    const refreshSession = vi.fn<RefreshSession>(() => Promise.resolve(null));
+    const isVerified = vi.fn(() => Promise.resolve(true));
+    const client = { refreshSession } as unknown as AuthClient<unknown>;
+    const view = renderHook(() => {
+      useEmailVerificationWatch({ client, isVerified, ...overrides });
+    });
+    return { refreshSession, isVerified, ...view };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    visibility = 'visible';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(
+      () => visibility
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('checks on the interval, not on mount, and refreshes once verified', async () => {
+    const { isVerified, refreshSession } = setup();
+
+    await advance(0);
+    expect(isVerified).not.toHaveBeenCalled();
+
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+    expect(isVerified).toHaveBeenCalledTimes(1);
+    expect(refreshSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the session alone until the address is verified', async () => {
+    const isVerified = vi.fn(() => Promise.resolve(false));
+    const { refreshSession } = setup({ isVerified });
+
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+
+    expect(isVerified).toHaveBeenCalledTimes(1);
+    expect(refreshSession).not.toHaveBeenCalled();
+  });
+
+  it('checks when the window regains focus or the page becomes visible', async () => {
+    const { isVerified } = setup();
+
+    window.dispatchEvent(new Event('focus'));
+    await advance(0);
+    expect(isVerified).toHaveBeenCalledTimes(1);
+
+    document.dispatchEvent(new Event('visibilitychange'));
+    await advance(0);
+    expect(isVerified).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips a hidden page', async () => {
+    visibility = 'hidden';
+    const { isVerified } = setup();
+
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+
+    expect(isVerified).not.toHaveBeenCalled();
+  });
+
+  it('never runs two checks at once', async () => {
+    let answer: (verified: boolean) => void = () => undefined;
+    const isVerified = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          answer = resolve;
+        })
+    );
+    setup({ isVerified });
+
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new Event('focus'));
+    await advance(0);
+    expect(isVerified).toHaveBeenCalledTimes(1);
+
+    answer(false);
+    await advance(0);
+    window.dispatchEvent(new Event('focus'));
+    await advance(0);
+    expect(isVerified).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps watching after a failed check', async () => {
+    const isVerified = vi
+      .fn<() => Promise<boolean>>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(true);
+    const { refreshSession } = setup({ isVerified });
+
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+    expect(refreshSession).not.toHaveBeenCalled();
+
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+    expect(refreshSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours a custom interval', async () => {
+    const { isVerified } = setup({ intervalMs: 1000 });
+
+    await advance(1000);
+
+    expect(isVerified).toHaveBeenCalledTimes(1);
+  });
+
+  it('watches nothing when disabled or without a client', async () => {
+    const { isVerified } = setup({ enabled: false });
+    const orphan = vi.fn(() => Promise.resolve(true));
+    renderHook(() => {
+      useEmailVerificationWatch({ client: null, isVerified: orphan });
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+
+    expect(isVerified).not.toHaveBeenCalled();
+    expect(orphan).not.toHaveBeenCalled();
+  });
+
+  it('stops on unmount', async () => {
+    const { isVerified, unmount } = setup();
+
+    unmount();
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await advance(EMAIL_VERIFICATION_WATCH_INTERVAL_MS);
+
+    expect(isVerified).not.toHaveBeenCalled();
+  });
+});
+
+describe('useEmailVerificationResend', () => {
+  type RequestVerification = AuthClient<unknown>['requestEmailVerification'];
+  const SENT: EmailRequestOutcome = { ok: true, detail: 'Sent.' };
+  const LIMITED: EmailRequestOutcome = {
+    ok: false,
+    reason: 'rate-limited',
+    code: undefined,
+    message: 'Slow down.',
+    retryAfter: undefined,
+  };
+
+  function setup(request: RequestVerification, cooldownSeconds?: number) {
+    const client = {
+      requestEmailVerification: request,
+    } as unknown as AuthClient<unknown>;
+    return renderHook(() =>
+      useEmailVerificationResend({
+        client,
+        ...(cooldownSeconds === undefined ? {} : { cooldownSeconds }),
+      })
+    );
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sends, then refuses until the cooldown has run out', async () => {
+    const request = vi.fn<RequestVerification>(() => Promise.resolve(SENT));
+    const { result } = setup(request);
+
+    let first: EmailRequestOutcome | null = null;
+    await act(async () => {
+      first = await result.current.send('a@b.test');
+    });
+    expect(first).toBe(SENT);
+    expect(request).toHaveBeenCalledWith({ email: 'a@b.test' });
+    expect(result.current.remaining).toBe(
+      EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
+    );
+
+    let second: EmailRequestOutcome | null = SENT;
+    await act(async () => {
+      second = await result.current.send('a@b.test');
+    });
+    expect(second).toBeNull();
+    expect(request).toHaveBeenCalledTimes(1);
+
+    for (let i = 0; i < EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS; i += 1) {
+      await advance(1000);
+    }
+    expect(result.current.remaining).toBe(0);
+
+    await act(async () => {
+      await result.current.send('a@b.test');
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('honours a custom cooldown', async () => {
+    const { result } = setup(() => Promise.resolve(SENT), 5);
+
+    await act(async () => {
+      await result.current.send('a@b.test');
+    });
+    expect(result.current.remaining).toBe(5);
+
+    await advance(1000);
+    expect(result.current.remaining).toBe(4);
+  });
+
+  it('starts no cooldown on a refusal, and hands it back', async () => {
+    const { result } = setup(() => Promise.resolve(LIMITED));
+
+    let outcome: EmailRequestOutcome | null = null;
+    await act(async () => {
+      outcome = await result.current.send('a@b.test');
+    });
+
+    expect(outcome).toBe(LIMITED);
+    expect(result.current.remaining).toBe(0);
+  });
+
+  it('guards the request in flight and reports it', async () => {
+    let answer: (outcome: EmailRequestOutcome) => void = () => undefined;
+    const request = vi.fn<RequestVerification>(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        })
+    );
+    const { result } = setup(request);
+
+    let pending: Promise<EmailRequestOutcome | null> = Promise.resolve(null);
+    act(() => {
+      pending = result.current.send('a@b.test');
+    });
+    expect(result.current.sending).toBe(true);
+
+    let overlapping: EmailRequestOutcome | null = SENT;
+    await act(async () => {
+      overlapping = await result.current.send('a@b.test');
+    });
+    expect(overlapping).toBeNull();
+    expect(request).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      answer(SENT);
+      await pending;
+    });
+    expect(result.current.sending).toBe(false);
+  });
+
+  it('rejects a network failure and allows another try', async () => {
+    const request = vi
+      .fn<RequestVerification>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(SENT);
+    const { result } = setup(request);
+
+    await act(async () => {
+      await expect(result.current.send('a@b.test')).rejects.toThrow('offline');
+    });
+    expect(result.current.sending).toBe(false);
+    expect(result.current.remaining).toBe(0);
+
+    await act(async () => {
+      await result.current.send('a@b.test');
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves null without a client', async () => {
+    const { result } = renderHook(() =>
+      useEmailVerificationResend({ client: null })
+    );
+
+    await expect(result.current.send('a@b.test')).resolves.toBeNull();
+    expect(result.current.sending).toBe(false);
+  });
+
+  it('keeps send stable across renders', async () => {
+    const { result, rerender } = setup(() => Promise.resolve(SENT));
+    const before = result.current.send;
+
+    await act(async () => {
+      await result.current.send('a@b.test');
+    });
+    rerender();
+
+    expect(result.current.send).toBe(before);
   });
 });

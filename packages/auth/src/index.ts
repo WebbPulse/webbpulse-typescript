@@ -33,6 +33,7 @@ export {
   type LoginOutcome,
   type MfaChallenge,
   type PasswordCredentials,
+  type SignUpOutcome,
   type WebAuthnAdapter,
 } from './auth-client.js';
 export {
