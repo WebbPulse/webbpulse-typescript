@@ -9,6 +9,7 @@ import {
   desktopHandoffCallbackUrl,
   desktopHandoffChallenge,
   desktopHandoffLaunchUrl,
+  isDesktopHandoffCallback,
   isHandoffSchemeAllowed,
   normaliseHandoffAllowlist,
   normaliseHandoffScheme,
@@ -512,5 +513,29 @@ describe('AuthClient.completeDesktopHandoff', () => {
 
     expect(outcome).toMatchObject({ ok: false, reason: 'invalid' });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('isDesktopHandoffCallback', () => {
+  it('matches the callback on an allowed scheme, with or without a code', () => {
+    for (const url of [
+      'exampleapp://auth/handoff?code=abc',
+      'exampleapp-staging://auth/handoff',
+      'exampleapp://auth/handoff?code=not%20a%20code',
+    ]) {
+      expect(isDesktopHandoffCallback(url, ALLOWED)).toBe(true);
+    }
+  });
+
+  it('refuses other links, schemes and paths', () => {
+    for (const url of [
+      'exampleapp://w/acme',
+      'exampleapp://auth/other',
+      'other://auth/handoff?code=abc',
+      'https://auth/handoff?code=abc',
+      'not a url',
+    ]) {
+      expect(isDesktopHandoffCallback(url, ALLOWED)).toBe(false);
+    }
   });
 });

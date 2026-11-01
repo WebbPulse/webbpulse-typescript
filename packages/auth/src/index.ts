@@ -47,6 +47,7 @@ export {
   desktopHandoffCallbackUrl,
   desktopHandoffChallenge,
   desktopHandoffLaunchUrl,
+  isDesktopHandoffCallback,
   isDesktopHandoffChallenge,
   isDesktopHandoffVerifier,
   isHandoffSchemeAllowed,
@@ -72,6 +73,16 @@ export {
   type DesktopHandoffSchemeNotAllowed,
   type DesktopHandoffUnavailable,
 } from './desktop-handoff.js';
+export {
+  DESKTOP_HANDOFF_RETURN_TTL_MS,
+  DESKTOP_HANDOFF_VERIFIER_TTL_MS,
+  createDesktopHandoffReturnStore,
+  createDesktopHandoffVerifierStore,
+  type DesktopHandoffReturnStore,
+  type DesktopHandoffReturnStoreOptions,
+  type DesktopHandoffVerifierStore,
+  type DesktopHandoffVerifierStoreOptions,
+} from './desktop-handoff-pending.js';
 export {
   LINK_TOKEN_PARAM,
   RESET_PASSWORD_PATH,
