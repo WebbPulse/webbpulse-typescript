@@ -244,6 +244,41 @@ export interface DesktopHandoffCallback {
   code: string;
 }
 
+/** The parsed URL when it is on an allowed scheme and the callback's host and path. */
+function parseDesktopHandoffCallback(
+  href: string,
+  allowedSchemes: readonly string[]
+): URL | null {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  if (!isHandoffSchemeAllowed(url.protocol.slice(0, -1), allowedSchemes)) {
+    return null;
+  }
+  if (
+    url.hostname !== DESKTOP_HANDOFF_CALLBACK_HOST ||
+    url.pathname !== DESKTOP_HANDOFF_CALLBACK_PATH
+  ) {
+    return null;
+  }
+  return url;
+}
+
+/**
+ * Whether a URL is a handoff callback on an allowed scheme, with or without a
+ * usable code, so an app can route a broken callback to its failure path rather
+ * than treating it as an ordinary deep link.
+ */
+export function isDesktopHandoffCallback(
+  href: string,
+  allowedSchemes: readonly string[]
+): boolean {
+  return parseDesktopHandoffCallback(href, allowedSchemes) !== null;
+}
+
 /**
  * Reads the code off the `<scheme>://auth/handoff?code=...` URL the operating
  * system delivered to the desktop app, or null when it is not a handoff
@@ -253,27 +288,15 @@ export function readDesktopHandoffCallback(
   href: string,
   allowedSchemes: readonly string[]
 ): DesktopHandoffCallback | null {
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch {
-    return null;
-  }
-  const scheme = url.protocol.slice(0, -1);
-  if (!isHandoffSchemeAllowed(scheme, allowedSchemes)) {
-    return null;
-  }
-  if (
-    url.hostname !== DESKTOP_HANDOFF_CALLBACK_HOST ||
-    url.pathname !== DESKTOP_HANDOFF_CALLBACK_PATH
-  ) {
+  const url = parseDesktopHandoffCallback(href, allowedSchemes);
+  if (url === null) {
     return null;
   }
   const code = url.searchParams.get(DESKTOP_HANDOFF_CODE_PARAM) ?? '';
   if (!CODE_PATTERN.test(code)) {
     return null;
   }
-  return { scheme: normaliseHandoffScheme(scheme), code };
+  return { scheme: normaliseHandoffScheme(url.protocol.slice(0, -1)), code };
 }
 
 /** Whether a verifier is shaped as RFC 7636 requires. */

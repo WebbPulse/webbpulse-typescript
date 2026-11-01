@@ -613,7 +613,12 @@ const result = await auth.completeDesktopHandoff({
 });
 ```
 
-Keep the verifier in memory and never put it in a URL. The code lives about a
+Keep the verifier in memory and never put it in a URL. `createDesktopHandoffVerifierStore()`
+holds it for one sign-in: `take` answers it once, or null after 10 minutes. A
+shell the operating system can stop while the browser is open, such as a mobile
+app, passes a `storageKey` to keep it in local storage instead, and can check
+`hasPending()` before redeeming a launch URL that stays the same for the life of
+the process. The code lives about a
 minute and is spent by any exchange attempt. A spent, expired or mismatched
 code resolves to `invalid`, and the fix is to start again from the app. Mint refusals are
 `scheme-not-allowed`, `invalid-request`, `not-authenticated` (send the person to
@@ -621,7 +626,16 @@ sign in first), `unavailable` and `rate-limited`. Exchange refusals are
 `scheme-not-allowed`, `invalid`, `refused` (the account may not sign in, or the
 request was cross-site), `unavailable` and `rate-limited`.
 `readDesktopHandoffRequest` and `readDesktopHandoffCallback` are the URL readers
-those methods use.
+those methods use. `isDesktopHandoffCallback(url, allowedSchemes)` matches the
+callback with or without a usable code, so a broken callback reaches the failure
+path rather than the deep link router.
+
+A sign-up, password reset or email verification can leave the handoff page and
+come back through a mailed link. `createDesktopHandoffReturnStore({ storageKey })`
+keeps the page's path for an hour so the web app can offer a way back: `remember`
+it on the page, `read` it where the link goes, and `clear` it once the app has its
+sign-in. `read` only answers paths on the handoff page, so the result is safe to
+render as a link. It holds the public challenge, never a code or a verifier.
 
 ## Errors
 
@@ -929,9 +943,10 @@ email flows, and reports refusals as outcomes rather than throwing.
   `desktopHandoffLaunchUrl`, `readDesktopHandoffRequest`,
   `desktopHandoffCallbackUrl`, `readDesktopHandoffCallback`,
   `normaliseHandoffScheme`, `normaliseHandoffAllowlist`,
-  `isHandoffSchemeAllowed`, `isDesktopHandoffChallenge`,
-  `isDesktopHandoffVerifier`, `classifyDesktopHandoffError`, and the
-  `DESKTOP_HANDOFF_*` constants.
+  `isHandoffSchemeAllowed`, `isDesktopHandoffCallback`,
+  `isDesktopHandoffChallenge`, `isDesktopHandoffVerifier`,
+  `classifyDesktopHandoffError`, `createDesktopHandoffVerifierStore`,
+  `createDesktopHandoffReturnStore`, and the `DESKTOP_HANDOFF_*` constants.
 - OAuth: `GOOGLE_PROVIDER`, `GITHUB_PROVIDER`, `APPLE_PROVIDER`, `readOAuthCallback`,
   `stripOAuthParams`, `parseOAuthLinks`, `describeOAuthCallbackError`,
   `classifyOAuthError`, and the `OAUTH_*` parameter constants.
